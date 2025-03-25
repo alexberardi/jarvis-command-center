@@ -4,6 +4,7 @@ from .models import Node
 from sqlalchemy.orm import Session
 from . import admin
 import logging
+from .mistral_client import query_mistral
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("uvicorn")
@@ -40,7 +41,8 @@ def ping():
     return {"message": "pong"}
 
 @app.post("/voice")
-def handle_voice(node: Node = Depends(verify_api_key)):
+async def handle_voice(node: Node = Depends(verify_api_key)):
     # Stub handler
     logger.info(f"Voice command from node: {node.node_id} in room {node.room}")
-    return {"message": f"Hello from {node.room}"}
+    result = await query_mistral("Tell me a joke")
+    return { "response": result }
