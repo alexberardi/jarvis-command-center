@@ -30,6 +30,11 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+@app.get("")
+def hello_world():
+    return {"message": "Hello World!"}
+
+
 @app.get("/ping")
 def ping():
     return {"message": "pong"}
