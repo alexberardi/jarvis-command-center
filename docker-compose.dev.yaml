@@ -1,0 +1,16 @@
+version: '3.9'
+
+services:
+  jarvis-voice-api:
+    build: .
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./app:/app/app
+      - ./data:/app/data
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+

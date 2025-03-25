@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# VS Code and IDE files
+.vscode/
+.idea/
+*.swp
+
+# Environment
+.env
+*.env
+venv/
+env/
+
+# SQLite DB
+*.db
+data/
+
+# Alembic
+alembic/versions/
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# OS Files
+.DS_Store
+Thumbs.db
+
