@@ -30,7 +30,7 @@ async def log_requests(request: Request, call_next):
     return response
 
 
-@app.get("")
+@app.get("/")
 def hello_world():
     return {"message": "Hello World!"}
 
