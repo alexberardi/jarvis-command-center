@@ -6,3 +6,6 @@ pydantic
 watchdog
 python-dotenv
 httpx
+websockets
+debugpy
+rapidfuzz

@@ -4,21 +4,50 @@ __pycache__/
 *.pyo
 *.pyd
 *.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
 
 # VS Code and IDE files
 .vscode/
 .idea/
 *.swp
+*.swo
+*~
 
-# Environment
+# Environment variables
 .env
 *.env
-venv/
-env/
+.env.local
+.env.development
+.env.test
+.env.production
 
-# SQLite DB
+# SQLite databases
 *.db
 data/
+*.sqlite
+*.sqlite3
 
 # Alembic
 alembic/versions/
@@ -30,4 +59,33 @@ docker-compose.override.yml
 # OS Files
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
 
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Home Assistant specific files
+areas.json
+devices.json
+entities.json
+services.json
+
+# Debug and temporary files
+temp_*.py
+*.tmp
+*.bak
+
+# Logs
+logs/
+*.log

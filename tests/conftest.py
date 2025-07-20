@@ -1,0 +1,146 @@
+import pytest
+import os
+import tempfile
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from app.db import Base
+from app.models import Node
+from fastapi.testclient import TestClient
+from app.main import app
+
+
+@pytest.fixture(scope="session")
+def test_engine():
+    """Create a test database engine"""
+    # Use in-memory SQLite for tests with threading support
+    engine = create_engine(
+        "sqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False}  # Allow SQLite to work across threads
+    )
+    Base.metadata.create_all(bind=engine)
+    return engine
+
+
+@pytest.fixture(scope="session")
+def test_engine_file():
+    """Create a file-based test database engine (alternative if memory doesn't work)"""
+    # Create a temporary file for the test database
+    db_fd, db_path = tempfile.mkstemp(suffix='.db')
+    os.close(db_fd)  # Close the file descriptor, we just need the path
+    
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        echo=False,
+        connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    
+    yield engine
+    
+    # Cleanup: remove the temporary database file
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+@pytest.fixture(scope="session")
+def test_session_factory(test_engine_file):
+    """Create a test session factory"""
+    return sessionmaker(autocommit=False, autoflush=False, bind=test_engine_file)
+
+
+@pytest.fixture
+def test_db(test_session_factory):
+    """Create a test database session"""
+    session = test_session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+@pytest.fixture
+def test_node(test_db):
+    """Create a test node in the database"""
+    node = Node(
+        node_id="test-node",
+        api_key="test-key",
+        room="living room",
+        user="test-user"
+    )
+    test_db.add(node)
+    test_db.commit()
+    test_db.refresh(node)
+    
+    yield node
+    
+    # Cleanup after test
+    test_db.delete(node)
+    test_db.commit()
+
+
+@pytest.fixture
+def test_node_empty_room(test_db):
+    """Create a test node with empty room"""
+    node = Node(
+        node_id="test-node-empty",
+        api_key="test-key-empty",
+        room="",
+        user="test-user"
+    )
+    test_db.add(node)
+    test_db.commit()
+    test_db.refresh(node)
+    
+    yield node
+    
+    # Cleanup after test
+    test_db.delete(node)
+    test_db.commit()
+
+
+@pytest.fixture
+def client_with_test_db(test_db):
+    """Create a test client with dependency override for database"""
+    from app.deps import get_db
+    
+    def override_get_db():
+        try:
+            yield test_db
+        finally:
+            pass
+    
+    app.dependency_overrides[get_db] = override_get_db
+    
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        # Clean up dependency override
+        app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def multiple_test_nodes(test_db):
+    """Create multiple test nodes for testing"""
+    nodes = [
+        Node(node_id="node-1", api_key="key-1", room="kitchen", user="user1"),
+        Node(node_id="node-2", api_key="key-2", room="bedroom", user="user2"),
+        Node(node_id="node-3", api_key="key-3", room="", user="user3")  # Empty room
+    ]
+    
+    for node in nodes:
+        test_db.add(node)
+    test_db.commit()
+    
+    for node in nodes:
+        test_db.refresh(node)
+    
+    yield nodes
+    
+    # Cleanup
+    for node in nodes:
+        test_db.delete(node)
+    test_db.commit() 

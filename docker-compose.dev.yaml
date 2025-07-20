@@ -4,7 +4,8 @@ services:
   jarvis-voice-api:
     build: .
     ports:
-      - "8001:8001"
+      - "9998:9998"
+      - "5678:5678"
     volumes:
       - ./app:/app/app
       - ./data:/app/data
@@ -13,5 +14,5 @@ services:
       - ./alembic.ini:/app/alembic.ini
     environment:
       - PYTHONUNBUFFERED=1
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
-
+      - DEBUG=true
+    command: ["python", "-Xfrozen_modules=off", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9998", "--reload"]
