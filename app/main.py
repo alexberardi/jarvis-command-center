@@ -7,15 +7,15 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Depends, Request, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from app.context_providers.standard_system_prompt_provider import StandardSystemPromptProvider
+from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
 from app.context_providers.node_context_provider import NodeContextProvider
-from app.core.interfaces.ijarvis_context_provider import IJarvisContextProvider, ISystemPromptProvider
+from app.core.interfaces.ijarvis_context_provider import IJarvisContextProvider, ICommandInferenceSystemPromptProvider, ITranscriptionCleanupSystemPromptProvider
 from app.request_models.voice_command_request import VoiceCommandRequest, CommandDefinition
 from app.response_models.voice_command_response import VoiceCommandResponse, VoiceCommandError, SingleCommandResponse
 from app.debug_setup import setup_debugger
 from app.core.utils.rest_client import post
 from app.core.malformed_json_extractor import MalformedJsonExtractorService
-from .deps import verify_api_key, get_system_prompt_provider
+from .deps import verify_api_key, get_command_inference_system_prompt_provider, get_transcription_cleanup_system_prompt_provider
 from . import admin
 
 # Set up logging
@@ -303,7 +303,8 @@ def health_check():
 async def handle_voice(
     request: VoiceCommandRequest,
     node_context_provider: NodeContextProvider = Depends(verify_api_key),
-    system_prompt_provider: ISystemPromptProvider = Depends(get_system_prompt_provider)
+    system_prompt_provider: ICommandInferenceSystemPromptProvider = Depends(get_command_inference_system_prompt_provider),
+    transcription_cleanup_provider: ITranscriptionCleanupSystemPromptProvider = Depends(get_transcription_cleanup_system_prompt_provider)
 ):
     import time
     start_time = time.time()
@@ -312,16 +313,46 @@ async def handle_voice(
     logger.info(f"Command: '{request.voice_command}'")
 
     try:
+        # Step 1: Transcription cleanup (if enabled)
+        cleaned_voice_command = request.voice_command
+        if transcription_cleanup_provider.name != "NO_OP":
+            logger.info("🔄 Performing transcription cleanup...")
+            cleanup_prompt = transcription_cleanup_provider.build_system_prompt(request.voice_command)
+            
+            cleanup_messages = [
+                {"role": "system", "content": cleanup_prompt},
+                {"role": "user", "content": request.voice_command}
+            ]
+            
+            llm_api_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
+            llm_api_version = os.getenv("JARVIS_LLM_PROXY_API_VERSION", "0")
+            lightweight_chat_url = f"{llm_api_url}/api/v{llm_api_version}/lightweight/chat"
+            
+            try:
+                cleanup_response = await post(url=lightweight_chat_url, json_data={"messages": cleanup_messages})
+                cleanup_content = cleanup_response.get('content', cleanup_response.get('response', ''))
+                
+                if cleanup_content and cleanup_content.strip():
+                    cleaned_voice_command = cleanup_content.strip()
+                    logger.info(f"✅ Transcription cleaned: '{request.voice_command}' → '{cleaned_voice_command}'")
+                else:
+                    logger.warning("⚠️ Transcription cleanup returned empty response, using original")
+            except Exception as e:
+                logger.warning(f"⚠️ Transcription cleanup failed: {e}, using original command")
+        else:
+            logger.info("⏭️ Transcription cleanup disabled, using original command")
+
+        # Step 2: Command inference
         # Build system prompt with optional voice command for preprocessing
         system_prompt = system_prompt_provider.build_system_prompt(
             request.node_context, 
             request.available_commands, 
-            request.voice_command
+            cleaned_voice_command
         )
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": request.voice_command}
+            {"role": "user", "content": cleaned_voice_command}
         ]
 
         llm_api_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
@@ -341,7 +372,7 @@ async def handle_voice(
                 raise ValueError("Empty response from LLM")
             
             # Use enhanced validation
-            response_data, validation_issues, json_valid = await validate_and_clean_json_response(response_content, request.voice_command)
+            response_data, validation_issues, json_valid = await validate_and_clean_json_response(response_content, cleaned_voice_command)
             
             if not json_valid:
                 # Log validation issues for debugging
@@ -393,7 +424,7 @@ async def handle_voice(
         logger.error(f"❌ Unexpected error processing voice command: {e}")
         logger.error(f"   Response time: {response_time:.2f}s")
         logger.error(f"   Node: {node_context_provider.node.node_id}")
-        logger.error(f"   Command: '{request.voice_command}'")
+        logger.error(f"   Command: '{request.voice_command}' → '{cleaned_voice_command}'")
         
         return VoiceCommandResponse(
             commands=[SingleCommandResponse(

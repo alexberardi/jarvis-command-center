@@ -3,7 +3,7 @@
 Example usage of the new keyword-based command filtering system
 """
 import os
-from app.context_providers.standard_system_prompt_provider import StandardSystemPromptProvider
+from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
 from app.request_models.voice_command_request import CommandDefinition, CommandParameter
 
 def create_example_commands():
@@ -95,7 +95,7 @@ def demonstrate_usage():
     # Example 1: Enable preprocessing
     print("\n1️⃣ Enabling command preprocessing:")
     os.environ["COMMAND_PREPROCESSING_ENABLED"] = "true"
-    provider = StandardSystemPromptProvider()
+    provider = StandardCommandInferenceSystemPromptProvider()
     
     test_commands = [
         "turn on the lights",
@@ -137,7 +137,7 @@ def demonstrate_usage():
     print(f"\n" + "=" * 60)
     print("2️⃣ Disabling command preprocessing:")
     os.environ["COMMAND_PREPROCESSING_ENABLED"] = "false"
-    provider_no_filter = StandardSystemPromptProvider()
+    provider_no_filter = StandardCommandInferenceSystemPromptProvider()
     
     voice_command = "turn on the lights"
     system_prompt_no_filter = provider_no_filter.build_system_prompt(
@@ -152,7 +152,7 @@ def demonstrate_usage():
     
     # Compare with preprocessing enabled
     os.environ["COMMAND_PREPROCESSING_ENABLED"] = "true"
-    provider_with_filter = StandardSystemPromptProvider()
+    provider_with_filter = StandardCommandInferenceSystemPromptProvider()
     system_prompt_with_filter = provider_with_filter.build_system_prompt(
         node_context, 
         commands, 

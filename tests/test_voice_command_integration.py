@@ -338,10 +338,10 @@ class TestVoiceCommandIntegration:
     
     def test_system_prompt_generation(self):
         """Test that system prompts are generated correctly"""
-        from app.context_providers.standard_system_prompt_provider import StandardSystemPromptProvider
+        from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
         from app.request_models.voice_command_request import CommandDefinition, CommandParameter
         
-        provider = StandardSystemPromptProvider()
+        provider = StandardCommandInferenceSystemPromptProvider()
         
         node_context = {"room": "living room", "node_id": "test-node"}
         commands = [

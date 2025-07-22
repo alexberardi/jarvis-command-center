@@ -31,6 +31,265 @@ def get_response_errors(data):
     return data.get("errors")
 
 
+class TestTranscriptionCleanup:
+    """Test transcription cleanup functionality and performance"""
+    
+    @pytest.fixture(scope="class")
+    def client(self):
+        """Create a test client with authentication override"""
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
+        
+        # Create a mock node for authentication
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="living room",
+            user="test-user"
+        )
+        
+        # Override the dependency
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
+        
+        app.dependency_overrides[verify_api_key] = mock_verify_api_key
+        
+        client = TestClient(app)
+        yield client
+        
+        # Clean up
+        app.dependency_overrides.clear()
+    
+    @pytest.fixture
+    def sample_commands(self):
+        """Sample commands for testing"""
+        return [
+            CommandDefinition(
+                command_name="turn_on_lights",
+                description="Turn on lights in a specific room",
+                parameters=[CommandParameter(name="room", type="str")]
+            ),
+            CommandDefinition(
+                command_name="set_temperature",
+                description="Set temperature in a room",
+                parameters=[
+                    CommandParameter(name="room", type="str"),
+                    CommandParameter(name="degrees", type="int")
+                ]
+            ),
+            CommandDefinition(
+                command_name="play_music",
+                description="Play music",
+                parameters=[CommandParameter(name="song", type="str")]
+            )
+        ]
+    
+    def setup_method(self):
+        """Setup before each test - add delay to avoid overwhelming LLM"""
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
+        
+        # Ensure authentication override is set for each test
+        if verify_api_key not in app.dependency_overrides:
+            mock_node = Node(
+                node_id="test-node",
+                api_key="test-key",
+                room="living room",
+                user="test-user"
+            )
+            
+            def mock_verify_api_key():
+                return NodeContextProvider(mock_node)
+            
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
+        
+        time.sleep(0.5)  # Small delay between tests
+    
+    @pytest.mark.skipif(
+        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
+        reason="LLM API URL not configured"
+    )
+    def test_transcription_cleanup_with_filler_words(self, client, sample_commands):
+        """Test transcription cleanup with common filler words and transcription errors"""
+        test_cases = [
+            {
+                "original": "um turn on the like in the kitchen please",
+                "expected_cleaned": "turn on the lights in the kitchen",
+                "description": "Fix 'like' to 'lights' and remove filler words"
+            },
+            {
+                "original": "can you set the temperature to like seventy two degrees",
+                "expected_cleaned": "set the temperature to 72 degrees",
+                "description": "Convert words to numbers and remove filler words"
+            },
+            {
+                "original": "I want to play some music maybe jazz",
+                "expected_cleaned": "play jazz music",
+                "description": "Simplify and make more direct"
+            },
+            {
+                "original": "um can you like make it warmer in here",
+                "expected_cleaned": "make it warmer in here",
+                "description": "Remove filler words 'um', 'can you', 'like'"
+            }
+        ]
+        
+        # Test with cleanup enabled
+        os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "true"
+        
+        for case in test_cases:
+            print(f"\n🧪 Testing: {case['description']}")
+            print(f"   Original: '{case['original']}'")
+            
+            start_time = time.time()
+            
+            response = client.post("/api/v0/voice/command", json={
+                "voice_command": case["original"],
+                "node_context": {"room": "kitchen", "node_id": "test-node"},
+                "available_commands": [cmd.model_dump() for cmd in sample_commands]
+            }, headers={"x-api-key": "test-key"})
+            
+            end_time = time.time()
+            latency = end_time - start_time
+            
+            assert response.status_code == 200
+            data = response.json()
+            
+            print(f"   Latency: {latency:.2f}s")
+            print(f"   Success: {get_response_success(data)}")
+            
+            # Check if the command was successfully processed
+            if get_response_success(data):
+                first_command = extract_first_command(data)
+                print(f"   Command: {first_command['command_name']}")
+                print(f"   Parameters: {first_command['parameters']}")
+            else:
+                errors = get_response_errors(data)
+                print(f"   Error: {errors['type'] if errors else 'Unknown'}")
+            
+            # Verify it meets the 5-second target
+            assert latency < 5.0, f"Latency {latency:.2f}s exceeds 5-second target"
+            print(f"   ✅ Under 5-second target")
+    
+    @pytest.mark.skipif(
+        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
+        reason="LLM API URL not configured"
+    )
+    def test_transcription_cleanup_performance_comparison(self, client, sample_commands):
+        """Compare performance with and without transcription cleanup"""
+        test_command = "um turn on the like in the kitchen please"
+        
+        print(f"\n📊 Performance Comparison for: '{test_command}'")
+        print("="*60)
+        
+        # Test with cleanup enabled
+        os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "true"
+        
+        start_time = time.time()
+        response_with_cleanup = client.post("/api/v0/voice/command", json={
+            "voice_command": test_command,
+            "node_context": {"room": "kitchen", "node_id": "test-node"},
+            "available_commands": [cmd.model_dump() for cmd in sample_commands]
+        }, headers={"x-api-key": "test-key"})
+        end_time = time.time()
+        latency_with_cleanup = end_time - start_time
+        
+        assert response_with_cleanup.status_code == 200
+        data_with_cleanup = response_with_cleanup.json()
+        
+        print(f"WITH cleanup:")
+        print(f"   Latency: {latency_with_cleanup:.2f}s")
+        print(f"   Success: {get_response_success(data_with_cleanup)}")
+        if get_response_success(data_with_cleanup):
+            first_command = extract_first_command(data_with_cleanup)
+            print(f"   Command: {first_command['command_name']}")
+        
+        # Test without cleanup
+        os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "false"
+        
+        start_time = time.time()
+        response_without_cleanup = client.post("/api/v0/voice/command", json={
+            "voice_command": test_command,
+            "node_context": {"room": "kitchen", "node_id": "test-node"},
+            "available_commands": [cmd.model_dump() for cmd in sample_commands]
+        }, headers={"x-api-key": "test-key"})
+        end_time = time.time()
+        latency_without_cleanup = end_time - start_time
+        
+        assert response_without_cleanup.status_code == 200
+        data_without_cleanup = response_without_cleanup.json()
+        
+        print(f"WITHOUT cleanup:")
+        print(f"   Latency: {latency_without_cleanup:.2f}s")
+        print(f"   Success: {get_response_success(data_without_cleanup)}")
+        if get_response_success(data_without_cleanup):
+            first_command = extract_first_command(data_without_cleanup)
+            print(f"   Command: {first_command['command_name']}")
+        
+        # Calculate overhead
+        overhead = latency_with_cleanup - latency_without_cleanup
+        overhead_percent = (overhead / latency_without_cleanup) * 100 if latency_without_cleanup > 0 else 0
+        
+        print(f"\n📈 OVERHEAD ANALYSIS:")
+        print(f"   Additional Latency: {overhead:.2f}s ({overhead_percent:.1f}%)")
+        print(f"   Baseline: {latency_without_cleanup:.2f}s")
+        print(f"   With Cleanup: {latency_with_cleanup:.2f}s")
+        
+        # Verify both meet the 5-second target
+        assert latency_with_cleanup < 5.0, f"With cleanup latency {latency_with_cleanup:.2f}s exceeds 5-second target"
+        assert latency_without_cleanup < 5.0, f"Without cleanup latency {latency_without_cleanup:.2f}s exceeds 5-second target"
+        
+        print(f"   ✅ Both scenarios meet 5-second target")
+    
+    @pytest.mark.skipif(
+        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
+        reason="LLM API URL not configured"
+    )
+    def test_clean_already_clean_commands(self, client, sample_commands):
+        """Test that already clean commands work well with cleanup enabled"""
+        clean_commands = [
+            "turn on the lights",
+            "set temperature to 72 degrees",
+            "play jazz music"
+        ]
+        
+        # Test with cleanup enabled
+        os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "true"
+        
+        for command in clean_commands:
+            print(f"\n🧪 Testing clean command: '{command}'")
+            
+            start_time = time.time()
+            
+            response = client.post("/api/v0/voice/command", json={
+                "voice_command": command,
+                "node_context": {"room": "kitchen", "node_id": "test-node"},
+                "available_commands": [cmd.model_dump() for cmd in sample_commands]
+            }, headers={"x-api-key": "test-key"})
+            
+            end_time = time.time()
+            latency = end_time - start_time
+            
+            assert response.status_code == 200
+            data = response.json()
+            
+            print(f"   Latency: {latency:.2f}s")
+            print(f"   Success: {get_response_success(data)}")
+            
+            # Clean commands should work well
+            assert latency < 5.0, f"Latency {latency:.2f}s exceeds 5-second target"
+            
+            if get_response_success(data):
+                first_command = extract_first_command(data)
+                print(f"   Command: {first_command['command_name']}")
+                print(f"   ✅ Successfully processed")
+            else:
+                errors = get_response_errors(data)
+                print(f"   ⚠️  Error: {errors['type'] if errors else 'Unknown'}")
+
+
 class TestLLMIntegration:
     """Real LLM integration tests - actually calls the LLM API"""
     

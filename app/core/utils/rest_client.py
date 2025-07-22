@@ -1,7 +1,7 @@
 import httpx
 import json
 from typing import Optional 
-from app.core.interfaces.ijarvis_context_provider import ISystemPromptProvider
+from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider
 
 async def post(
     url: str,

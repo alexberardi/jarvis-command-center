@@ -1,7 +1,7 @@
-from app.core.interfaces.ijarvis_context_provider import ISystemPromptProvider
+from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider
 from app.request_models.voice_command_request import CommandDefinition
 
-class DummyCustomSystemPromptProvider(ISystemPromptProvider):
+class DummyCustomSystemPromptProvider(ICommandInferenceSystemPromptProvider):
     @property
     def name(self) -> str:
         return "CUSTOM"

@@ -1,5 +1,5 @@
 import os
-from app.core.interfaces.ijarvis_context_provider import ISystemPromptProvider
+from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider
 from app.request_models.voice_command_request import CommandDefinition
 from app.context_providers.command_filter import CommandFilter
 from typing import List, Optional
@@ -7,7 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class StandardSystemPromptProvider(ISystemPromptProvider):
+class StandardCommandInferenceSystemPromptProvider(ICommandInferenceSystemPromptProvider):
     def __init__(self):
         self.command_filter = CommandFilter()
         self.preprocessing_enabled = os.getenv("COMMAND_PREPROCESSING_ENABLED", "false").lower() == "true"

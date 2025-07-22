@@ -9,14 +9,16 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import inspect
 import pkgutil
 import logging
+from typing import Optional
 
 from fastapi import Header, HTTPException, Depends
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
 from .models import Node
-from app.core.interfaces.ijarvis_context_provider import ISystemPromptProvider
-from app.context_providers.standard_system_prompt_provider import StandardSystemPromptProvider
+from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider, ITranscriptionCleanupSystemPromptProvider
+from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
+from app.context_providers.no_op_transcription_cleanup_provider import NoOpTranscriptionCleanupProvider
 
 
 from dotenv import load_dotenv
@@ -48,13 +50,13 @@ def verify_admin_key(x_api_key: str = Header(...)):
         raise HTTPException(status_code=401, detail="Invalid Admin API Key")
 
 
-def get_system_prompt_provider() -> ISystemPromptProvider:
+def get_command_inference_system_prompt_provider() -> ICommandInferenceSystemPromptProvider:
     import os
     import importlib
     provider_name = os.getenv("JARVIS_SYSTEM_PROMPT_PROVIDER", "STANDARD")
 
     if provider_name == "STANDARD":
-        return StandardSystemPromptProvider()
+        return StandardCommandInferenceSystemPromptProvider()
     
     base_path = [
         os.path.join(os.path.dirname(__file__), "context_providers"),
@@ -71,10 +73,45 @@ def get_system_prompt_provider() -> ISystemPromptProvider:
                 print(e)
                 continue
             for _, cls in inspect.getmembers(imported_module, inspect.isclass):
-                if issubclass(cls, ISystemPromptProvider) and cls is not ISystemPromptProvider:
+                if issubclass(cls, ICommandInferenceSystemPromptProvider) and cls is not ICommandInferenceSystemPromptProvider:
                     instance = cls()
                     if instance.name.upper() == provider_name.upper():
                         return instance
-    return StandardSystemPromptProvider()
+    return StandardCommandInferenceSystemPromptProvider()
+
+
+def get_transcription_cleanup_system_prompt_provider() -> ITranscriptionCleanupSystemPromptProvider:
+    import os
+    import importlib
+    
+    # Check if transcription cleanup is enabled
+    if os.getenv("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", "false").lower() != "true":
+        return NoOpTranscriptionCleanupProvider()
+    
+    provider_name = os.getenv("JARVIS_TRANSCRIPTION_CLEANUP_PROMPT_PROVIDER", "STANDARD")
+    
+    base_path = [
+        os.path.join(os.path.dirname(__file__), "context_providers"),
+        os.path.join(os.path.dirname(__file__), "context_providers", "custom")
+    ]
+    prefix = "app.context_providers."
+    for path in base_path:
+        if not os.path.exists(path):
+            continue
+        for finder, module_name, ispkg in pkgutil.walk_packages(path=[path], prefix=prefix):
+            try:
+                imported_module = importlib.import_module(module_name)
+            except Exception as e:
+                print(e)
+                continue
+            for _, cls in inspect.getmembers(imported_module, inspect.isclass):
+                if issubclass(cls, ITranscriptionCleanupSystemPromptProvider) and cls is not ITranscriptionCleanupSystemPromptProvider:
+                    instance = cls()
+                    if instance.name.upper() == provider_name.upper():
+                        return instance
+    
+    # Return standard provider if no custom provider found
+    from app.context_providers.standard_transcription_cleanup_prompt_provider import StandardTranscriptionCleanupPromptProvider
+    return StandardTranscriptionCleanupPromptProvider()
 
 

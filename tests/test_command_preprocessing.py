@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import patch
 
 from app.context_providers.command_filter import CommandFilter
-from app.context_providers.standard_system_prompt_provider import StandardSystemPromptProvider
+from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
 from app.request_models.voice_command_request import CommandDefinition, CommandParameter
 
 
@@ -156,8 +156,8 @@ class TestCommandFilter:
         assert stats["reduction_percentage"] == 0.0  # No reduction since all commands match
 
 
-class TestStandardSystemPromptProviderPreprocessing:
-    """Test the StandardSystemPromptProvider with preprocessing functionality"""
+class TestStandardCommandInferenceSystemPromptProviderPreprocessing:
+    """Test the StandardCommandInferenceSystemPromptProvider with preprocessing functionality"""
 
     def setup_method(self):
         """Set up test fixtures"""
@@ -195,7 +195,7 @@ class TestStandardSystemPromptProviderPreprocessing:
     def test_preprocessing_enabled(self):
         """Test that preprocessing works when enabled"""
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "true"}):
-            provider = StandardSystemPromptProvider()
+            provider = StandardCommandInferenceSystemPromptProvider()
             
             voice_command = "turn on the lights"
             prompt = provider.build_system_prompt(self.node_context, self.sample_commands, voice_command)
@@ -208,7 +208,7 @@ class TestStandardSystemPromptProviderPreprocessing:
     def test_preprocessing_disabled(self):
         """Test that preprocessing is disabled when configured"""
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "false"}):
-            provider = StandardSystemPromptProvider()
+            provider = StandardCommandInferenceSystemPromptProvider()
             
             voice_command = "turn on the lights"
             prompt = provider.build_system_prompt(self.node_context, self.sample_commands, voice_command)
@@ -220,7 +220,7 @@ class TestStandardSystemPromptProviderPreprocessing:
     def test_preprocessing_without_voice_command(self):
         """Test that preprocessing is skipped when no voice command is provided"""
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "true"}):
-            provider = StandardSystemPromptProvider()
+            provider = StandardCommandInferenceSystemPromptProvider()
             
             # No voice command provided
             prompt = provider.build_system_prompt(self.node_context, self.sample_commands, None)
@@ -235,14 +235,14 @@ class TestStandardSystemPromptProviderPreprocessing:
         
         # Without preprocessing
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "false"}):
-            provider_no_preprocessing = StandardSystemPromptProvider()
+            provider_no_preprocessing = StandardCommandInferenceSystemPromptProvider()
             prompt_no_preprocessing = provider_no_preprocessing.build_system_prompt(
                 self.node_context, self.sample_commands, voice_command
             )
         
         # With preprocessing
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "true"}):
-            provider_with_preprocessing = StandardSystemPromptProvider()
+            provider_with_preprocessing = StandardCommandInferenceSystemPromptProvider()
             prompt_with_preprocessing = provider_with_preprocessing.build_system_prompt(
                 self.node_context, self.sample_commands, voice_command
             )
@@ -252,13 +252,13 @@ class TestStandardSystemPromptProviderPreprocessing:
 
     def test_provider_name(self):
         """Test that the provider name is correct"""
-        provider = StandardSystemPromptProvider()
+        provider = StandardCommandInferenceSystemPromptProvider()
         assert provider.name == "STANDARD"
 
     def test_logging_integration(self):
         """Test that filtering statistics are logged"""
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "true"}):
-            provider = StandardSystemPromptProvider()
+            provider = StandardCommandInferenceSystemPromptProvider()
             
             with patch('app.context_providers.standard_system_prompt_provider.logger') as mock_logger:
                 voice_command = "turn on the lights"
@@ -316,11 +316,11 @@ class TestIntegrationWithExistingSystem:
 
     def test_interface_compatibility(self):
         """Test that the updated interface is compatible"""
-        from app.core.interfaces.ijarvis_context_provider import ISystemPromptProvider
-        from app.context_providers.standard_system_prompt_provider import StandardSystemPromptProvider
+        from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider
+        from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
         
-        provider = StandardSystemPromptProvider()
-        assert isinstance(provider, ISystemPromptProvider)
+        provider = StandardCommandInferenceSystemPromptProvider()
+        assert isinstance(provider, ICommandInferenceSystemPromptProvider)
         
         # Test that the method signature is correct
         node_context = {"room": "test", "node_id": "test"}
@@ -346,22 +346,22 @@ class TestIntegrationWithExistingSystem:
     def test_environment_variable_integration(self):
         """Test that environment variable integration works correctly"""
         # Test default behavior (should be disabled by default)
-        provider = StandardSystemPromptProvider()
+        provider = StandardCommandInferenceSystemPromptProvider()
         assert provider.preprocessing_enabled == False
         
         # Test enabling via environment variable
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "true"}):
-            provider_enabled = StandardSystemPromptProvider()
+            provider_enabled = StandardCommandInferenceSystemPromptProvider()
             assert provider_enabled.preprocessing_enabled == True
         
         # Test case insensitive
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "TRUE"}):
-            provider_enabled_upper = StandardSystemPromptProvider()
+            provider_enabled_upper = StandardCommandInferenceSystemPromptProvider()
             assert provider_enabled_upper.preprocessing_enabled == True
         
         # Test explicit disable
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "false"}):
-            provider_disabled = StandardSystemPromptProvider()
+            provider_disabled = StandardCommandInferenceSystemPromptProvider()
             assert provider_disabled.preprocessing_enabled == False
 
 
