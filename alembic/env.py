@@ -8,8 +8,9 @@ import os
 import sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'app')))
-from db import SQLITE_URL
+from db import get_database_url, create_database_engine
 from models import Base
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
@@ -29,9 +30,6 @@ target_metadata = Base.metadata
 # can be acquired:
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
-# Add app to path
-
-
 
 
 def run_migrations_offline() -> None:
@@ -46,10 +44,11 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    print("Using db url: ", SQLITE_URL)
-    url = config.get_main_option("sqlalchemy.url", SQLITE_URL)
+    database_url = get_database_url()
+    print("Using database URL: ", database_url)
+    
     context.configure(
-        url=url,
+        url=database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -66,7 +65,11 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    print("Final DB URL:", repr(SQLITE_URL))
+    database_url = get_database_url()
+    print("Final database URL:", repr(database_url))
+
+    # Override the URL in the config with our dynamic URL
+    config.set_main_option("sqlalchemy.url", database_url)
 
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),

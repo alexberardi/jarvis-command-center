@@ -1,0 +1,42 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: jarvis_command_center
+      POSTGRES_USER: jarvis_user
+      POSTGRES_PASSWORD: jarvis_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jarvis_user -d jarvis_command_center"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  jarvis-voice-api:
+    build: .
+    ports:
+      - "9998:9998"
+      - "5678:5678"
+    volumes:
+      - ./app:/app/app
+      - ./data:/app/data
+      - ./.env:/app/.env
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DEBUG=true
+      - DB_TYPE=postgres
+      - DB_URL=postgresql://jarvis_user:jarvis_password@postgres:5432/jarvis_command_center
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-Xfrozen_modules=off", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9998", "--reload"]
+
+volumes:
+  postgres_data: 

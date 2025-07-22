@@ -8,4 +8,5 @@ python-dotenv
 httpx
 websockets
 debugpy
-rapidfuzz 
+rapidfuzz
+psycopg2-binary 

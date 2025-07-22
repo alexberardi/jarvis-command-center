@@ -14,7 +14,7 @@ from typing import Optional
 from fastapi import Header, HTTPException, Depends
 from sqlalchemy.orm import Session
 
-from .db import SessionLocal
+from .db import get_session_local
 from .models import Node
 from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider, ITranscriptionCleanupSystemPromptProvider
 from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
@@ -30,6 +30,8 @@ logger = logging.getLogger("uvicorn")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
 
 def get_db():
+    """Get database session with dynamic configuration"""
+    SessionLocal = get_session_local()
     db = SessionLocal()
     try:
         yield db
@@ -109,9 +111,6 @@ def get_transcription_cleanup_system_prompt_provider() -> ITranscriptionCleanupS
                     instance = cls()
                     if instance.name.upper() == provider_name.upper():
                         return instance
-    
-    # Return standard provider if no custom provider found
-    from app.context_providers.standard_transcription_cleanup_prompt_provider import StandardTranscriptionCleanupPromptProvider
-    return StandardTranscriptionCleanupPromptProvider()
+    return NoOpTranscriptionCleanupProvider()
 
 
