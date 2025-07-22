@@ -75,7 +75,7 @@ class TestVoiceCommandDatabase:
             "errors": None
         })
         
-        response = client_with_test_db.post("/voice/command", json={
+        response = client_with_test_db.post("/api/v0/voice/command", json={
             "voice_command": "turn on the lights",
             "node_context": {"room": test_node.room, "node_id": test_node.node_id},
             "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -104,7 +104,7 @@ class TestVoiceCommandDatabase:
             }
         })
         
-        response = client_with_test_db.post("/voice/command", json={
+        response = client_with_test_db.post("/api/v0/voice/command", json={
             "voice_command": "turn on the lights",
             "node_context": {"room": test_node_empty_room.room, "node_id": test_node_empty_room.node_id},
             "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -129,7 +129,7 @@ class TestVoiceCommandDatabase:
             "errors": None
         })
         
-        response = client_with_test_db.post("/voice/command", json={
+        response = client_with_test_db.post("/api/v0/voice/command", json={
             "voice_command": "set temperature to 72 degrees",
             "node_context": {"room": test_node.room, "node_id": test_node.node_id},
             "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -171,7 +171,7 @@ class TestVoiceCommandDatabase:
                 })
                 expected_success = True
             
-            response = client_with_test_db.post("/voice/command", json={
+            response = client_with_test_db.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",
                 "node_context": {"room": node.room, "node_id": node.node_id},
                 "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -196,7 +196,7 @@ class TestVoiceCommandDatabase:
             "errors": None
         })
         
-        response1 = client_with_test_db.post("/voice/command", json={
+        response1 = client_with_test_db.post("/api/v0/voice/command", json={
             "voice_command": "turn on the lights",
             "node_context": {"room": test_node.room, "node_id": test_node.node_id},
             "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -214,7 +214,7 @@ class TestVoiceCommandDatabase:
             "errors": None
         })
         
-        response2 = client_with_test_db.post("/voice/command", json={
+        response2 = client_with_test_db.post("/api/v0/voice/command", json={
             "voice_command": "set temperature to 68",
             "node_context": {"room": test_node.room, "node_id": test_node.node_id},
             "available_commands": [cmd.model_dump() for cmd in sample_commands]

@@ -51,7 +51,7 @@ turn on the kitchen lights"""
             mock_post.return_value = {"response": malformed_response}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -89,7 +89,7 @@ turn on the kitchen lights"""
             mock_post.return_value = {"response": malformed_response}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -114,7 +114,7 @@ turn on the kitchen lights"""
             mock_post.return_value = {"response": ""}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -147,7 +147,7 @@ turn on the kitchen lights"""
             
             # Should raise a validation error due to missing required fields
             with pytest.raises(Exception) as exc_info:
-                response = client.post("/voice/command", json={
+                response = client.post("/api/v0/voice/command", json={
                     "voice_command": "turn on the lights",
                     "node_context": {"room": "living room", "node_id": "test-node"},
                     "available_commands": [
@@ -179,7 +179,7 @@ turn on the kitchen lights"""
             mock_post.return_value = {"response": malformed_response}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -210,7 +210,7 @@ Let me know if you need anything else!"""
             mock_post.return_value = {"response": malformed_response}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -238,7 +238,7 @@ Let me know if you need anything else!"""
             mock_post.return_value = {"response": malformed_response}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -277,7 +277,7 @@ Let me know if you need anything else!"""
             
             # Make the same request multiple times
             for i in range(3):
-                response = client.post("/voice/command", json={
+                response = client.post("/api/v0/voice/command", json={
                     "voice_command": "turn on the lights",
                     "node_context": {"room": "living room", "node_id": "test-node"},
                     "available_commands": [

@@ -69,7 +69,7 @@ class TestMultiCommandScenarios:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights and set temperature to 72",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -121,7 +121,7 @@ class TestMultiCommandScenarios:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn off the lights then play relaxing music",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -174,7 +174,7 @@ class TestMultiCommandScenarios:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights and make coffee",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -224,7 +224,7 @@ class TestMultiCommandScenarios:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on lights, set temperature to 72, and play jazz music",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -282,7 +282,7 @@ class TestMultiCommandScenarios:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on living room lights and turn off bedroom lights",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [

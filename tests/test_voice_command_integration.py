@@ -71,7 +71,7 @@ class TestVoiceCommandIntegration:
                 mock_post.return_value = {"response": json.dumps(mock_llm_response)}
                 
                 client = TestClient(app)
-                response = client.post("/voice/command", json={
+                response = client.post("/api/v0/voice/command", json={
                     "voice_command": "turn on the lights",
                     "node_context": {"room": "living room", "node_id": "test-node"},
                     "available_commands": [
@@ -132,7 +132,7 @@ class TestVoiceCommandIntegration:
                 mock_post.return_value = {"response": json.dumps(mock_llm_response)}
                 
                 client = TestClient(app)
-                response = client.post("/voice/command", json={
+                response = client.post("/api/v0/voice/command", json={
                     "voice_command": "set temperature to 72 degrees",
                     "node_context": {"room": "bedroom", "node_id": "test-node"},
                     "available_commands": [
@@ -201,7 +201,7 @@ class TestVoiceCommandIntegration:
                 mock_post.return_value = {"response": json.dumps(mock_llm_response)}
                 
                 client = TestClient(app)
-                response = client.post("/voice/command", json={
+                response = client.post("/api/v0/voice/command", json={
                     "voice_command": "turn on the lights",
                     "node_context": {"room": "", "node_id": "test-node"},
                     "available_commands": [
@@ -251,7 +251,7 @@ class TestVoiceCommandIntegration:
                 mock_post.return_value = {"response": "invalid json {"}
                 
                 client = TestClient(app)
-                response = client.post("/voice/command", json={
+                response = client.post("/api/v0/voice/command", json={
                     "voice_command": "turn on the lights",
                     "node_context": {"room": "living room", "node_id": "test-node"},
                     "available_commands": [
@@ -314,7 +314,7 @@ class TestVoiceCommandIntegration:
                     mock_post.return_value = {"response": json.dumps(mock_llm_response)}
                     
                     client = TestClient(app)
-                    response = client.post("/voice/command", json={
+                    response = client.post("/api/v0/voice/command", json={
                         "voice_command": "turn on the lights",
                         "node_context": {"room": room, "node_id": "test-node"},
                         "available_commands": [
@@ -361,4 +361,4 @@ class TestVoiceCommandIntegration:
         assert "living room" in system_prompt
         
         # Should contain the new response format examples
-        assert '{"commands": [' in system_prompt 
+        assert '{"c": [' in system_prompt 

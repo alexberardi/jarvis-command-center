@@ -95,7 +95,7 @@ class TestVoiceCommandWithRealDB:
         
         mock_post.return_value = {"response": json.dumps(mock_llm_response)}
         
-        response = client_with_test_db.post("/voice/command", json={
+        response = client_with_test_db.post("/api/v0/voice/command", json={
             "voice_command": "turn on the lights",
             "node_context": {"room": "living room", "node_id": "test-node"},
             "available_commands": [
@@ -156,7 +156,7 @@ class TestVoiceCommandWithRealDB:
         
         mock_post.return_value = {"response": json.dumps(mock_llm_response)}
         
-        response = client_with_test_db.post("/voice/command", json={
+        response = client_with_test_db.post("/api/v0/voice/command", json={
             "voice_command": "turn on the lights",
             "node_context": {"room": "", "node_id": "empty-room-node"},
             "available_commands": [
@@ -238,7 +238,7 @@ class TestVoiceCommandWithRealDB:
             
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
-            response = client_with_test_db.post("/voice/command", json={
+            response = client_with_test_db.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",
                 "node_context": {"room": room, "node_id": f"node-{api_key.split('-')[1]}"},
                 "available_commands": [
@@ -260,7 +260,7 @@ class TestVoiceCommandWithRealDB:
     
     def test_invalid_api_key(self, client_with_test_db):
         """Test with invalid API key"""
-        response = client_with_test_db.post("/voice/command", json={
+        response = client_with_test_db.post("/api/v0/voice/command", json={
             "voice_command": "turn on the lights",
             "node_context": {"room": "living room", "node_id": "test-node"},
                          "available_commands": [

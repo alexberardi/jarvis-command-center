@@ -52,7 +52,7 @@ class TestEdgeCases:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -90,7 +90,7 @@ class TestEdgeCases:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": long_command,
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -134,7 +134,7 @@ class TestEdgeCases:
             client = TestClient(app)
             
             for command in special_commands:
-                response = client.post("/voice/command", json={
+                response = client.post("/api/v0/voice/command", json={
                     "voice_command": command,
                     "node_context": {"room": "living room", "node_id": "test-node"},
                     "available_commands": [
@@ -171,7 +171,7 @@ class TestEdgeCases:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": []
@@ -200,7 +200,7 @@ class TestEdgeCases:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "stop the music",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -239,7 +239,7 @@ class TestEdgeCases:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [
@@ -292,7 +292,7 @@ class TestEdgeCases:
             mock_post.return_value = {"response": json.dumps(mock_llm_response)}
             
             client = TestClient(app)
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": "turn on the lights",  # No keywords match
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [cmd.model_dump() for cmd in commands]
@@ -311,23 +311,26 @@ class TestEdgeCases:
             
             client = TestClient(app)
             
-            # The exception should be raised and not handled gracefully
-            # This test verifies that timeouts are properly propagated
-            with pytest.raises(Exception) as exc_info:
-                response = client.post("/voice/command", json={
-                    "voice_command": "turn on the lights",
-                    "node_context": {"room": "living room", "node_id": "test-node"},
-                    "available_commands": [
-                        {
-                            "command_name": "turn_on_lights",
-                            "description": "Turn on lights",
-                            "parameters": [{"name": "room", "type": "str"}]
-                        }
-                    ]
-                }, headers={"x-api-key": "test-key"})
+            # The application should handle the exception gracefully and return an error response
+            response = client.post("/api/v0/voice/command", json={
+                "voice_command": "turn on the lights",
+                "node_context": {"room": "living room", "node_id": "test-node"},
+                "available_commands": [
+                    {
+                        "command_name": "turn_on_lights",
+                        "description": "Turn on lights",
+                        "parameters": [{"name": "room", "type": "str"}]
+                    }
+                ]
+            }, headers={"x-api-key": "test-key"})
             
-            # Verify the exception message
-            assert "Request timeout" in str(exc_info.value)
+            # Should return 200 with error response
+            assert response.status_code == 200
+            data = response.json()
+            assert len(data["commands"]) == 1
+            assert data["commands"][0]["success"] is False
+            assert data["commands"][0]["errors"]["type"] == "system_error"
+            assert "Request timeout" in data["commands"][0]["errors"]["message"]
     
     def test_node_context_edge_cases(self):
         """Test edge cases in node context handling"""
@@ -355,7 +358,7 @@ class TestEdgeCases:
             client = TestClient(app)
             
             for node_context in edge_cases:
-                response = client.post("/voice/command", json={
+                response = client.post("/api/v0/voice/command", json={
                     "voice_command": "turn on the lights",
                     "node_context": node_context,
                     "available_commands": [

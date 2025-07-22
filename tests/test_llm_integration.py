@@ -158,7 +158,7 @@ class TestLLMIntegration:
         ]
         
         for case in test_cases:
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": case["command"],
                 "node_context": {"room": case["room"], "node_id": "test-node"},
                 "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -199,7 +199,7 @@ class TestLLMIntegration:
         ]
         
         for case in test_cases:
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": case["command"],
                 "node_context": {"room": case["room"], "node_id": "test-node"},
                 "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -248,7 +248,7 @@ class TestLLMIntegration:
         ]
         
         for case in test_cases:
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": case["command"],
                 "node_context": {"room": "kitchen", "node_id": "test-node"},
                 "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -297,7 +297,7 @@ class TestLLMIntegration:
         ]
         
         for case in test_cases:
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": case["command"],
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -329,7 +329,7 @@ class TestLLMIntegration:
     )
     def test_missing_room_context(self, client, sample_commands):
         """Test commands when room context is missing"""
-        response = client.post("/voice/command", json={
+        response = client.post("/api/v0/voice/command", json={
             "voice_command": "turn on the lights",
             "node_context": {"room": "", "node_id": "test-node"},
             "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -365,7 +365,7 @@ class TestLLMIntegration:
         ]
         
         for command in ambiguous_commands:
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": command,
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -402,7 +402,7 @@ class TestLLMIntegration:
         ]
         
         for command in unrecognized_commands:
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": command,
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -435,7 +435,7 @@ class TestLLMIntegration:
         ]
         
         for command in variations:
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": command,
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -473,7 +473,7 @@ class TestLLMIntegration:
         ]
         
         for case in complex_cases:
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": case["command"],
                 "node_context": {"room": case["expected_room"], "node_id": "test-node"},
                 "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -511,7 +511,7 @@ class TestLLMIntegration:
         ]
         
         for case in multiple_command_cases:
-            response = client.post("/voice/command", json={
+            response = client.post("/api/v0/voice/command", json={
                 "voice_command": case["command"],
                 "node_context": {"room": "living room", "node_id": "test-node"},
                 "available_commands": [cmd.model_dump() for cmd in sample_commands]
@@ -575,7 +575,7 @@ class TestLLMPerformance:
         
         start_time = time.time()
         
-        response = client_with_test_db.post("/voice/command", json={
+        response = client_with_test_db.post("/api/v0/voice/command", json={
             "voice_command": "turn on the lights",
             "node_context": {"room": "living room", "node_id": "test-node"},
             "available_commands": [cmd.model_dump() for cmd in commands]
