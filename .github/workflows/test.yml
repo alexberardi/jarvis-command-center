@@ -78,7 +78,7 @@ jobs:
     - name: Run database configuration tests
       env:
         DB_TYPE: sqlite
-        DB_URL: sqlite:///:memory:
+        DB_URL: "sqlite:///:memory:"
       run: |
         python -m pytest tests/test_database_config.py -v \
           --tb=short \
