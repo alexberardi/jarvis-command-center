@@ -329,8 +329,17 @@ async def handle_voice(
             lightweight_chat_url = f"{llm_api_url}/api/v{llm_api_version}/lightweight/chat"
             
             try:
-                cleanup_response = await post(url=lightweight_chat_url, json_data={"messages": cleanup_messages})
-                cleanup_content = cleanup_response.get('content', cleanup_response.get('response', ''))
+                cleanup_payload = {
+                    "model": "jarvis-llm",
+                    "temperature": 0,
+                    "messages": cleanup_messages
+                }
+                cleanup_response = await post(url=lightweight_chat_url, json_data=cleanup_payload)
+                cleanup_content = (
+                    cleanup_response.get('choices', [{}])[0].get('message', {}).get('content', '') or  # OpenAI-style format
+                    cleanup_response.get('content', '') or  # Alternative format
+                    cleanup_response.get('response', '')  # Legacy format
+                )
                 
                 if cleanup_content and cleanup_content.strip():
                     cleaned_voice_command = cleanup_content.strip()
@@ -360,12 +369,17 @@ async def handle_voice(
         chat_url = f"{llm_api_url}/api/v{llm_api_version}/chat"
 
         # Make LLM request
-        llm_response = await post(url=chat_url, json_data={"messages": messages})
+        llm_payload = {
+            "model": "jarvis-llm",
+            "temperature": 0,
+            "messages": messages
+        }
+        llm_response = await post(url=chat_url, json_data=llm_payload)
 
         # Enhanced JSON validation and parsing
         try:
-            # Extract response content from LLM response
-            response_content = llm_response.get('content', llm_response.get('response', ''))
+            # Extract response content from LLM response (OpenAI-style format)
+            response_content = llm_response.get('choices', [{}])[0].get('message', {}).get('content', '')
             
             if not response_content:
                 logger.error("Empty response from LLM")

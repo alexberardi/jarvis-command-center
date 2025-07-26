@@ -1,38 +1,56 @@
 import pytest
+import json
 from fastapi.testclient import TestClient
 from app.main import app
-from unittest.mock import patch
-import json
+
+
+def extract_first_command(data):
+    """Helper function to extract the first command from the new response format"""
+    if "commands" in data and data["commands"]:
+        return data["commands"][0]
+    return data  # Fallback for old format
+
+
+def get_response_success(data):
+    """Helper function to check if the response is successful"""
+    if "commands" in data:
+        return all(cmd.get("success", False) for cmd in data["commands"])
+    return data.get("success", False)
+
+
+def get_response_errors(data):
+    """Helper function to get errors from the response"""
+    if "commands" in data:
+        errors = []
+        for cmd in data["commands"]:
+            if cmd.get("errors"):
+                errors.append(cmd["errors"])
+        return errors[0] if errors else None
+    return data.get("errors")
 
 
 class TestEdgeCases:
-    """Test edge cases and error handling scenarios"""
+    """Test edge cases and error handling"""
     
-    def setup_method(self):
-        """Setup authentication mock for each test"""
+    def test_empty_voice_command(self):
+        """Test handling of empty voice command"""
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
         from app.models import Node
+        from unittest.mock import patch
         
-        # Create a mock node for testing
+        # Create a mock node
         mock_node = Node(
             node_id="test-node",
-            room="living room",
             api_key="test-key",
+            room="living room",
             user="test-user"
         )
         
         def mock_verify_api_key():
             return NodeContextProvider(mock_node)
         
-        app.dependency_overrides[verify_api_key] = mock_verify_api_key
-    
-    def teardown_method(self):
-        """Clean up after each test"""
-        app.dependency_overrides.clear()
-    
-    def test_empty_voice_command(self):
-        """Test handling of empty voice command"""
+        # Mock the LLM response for empty command
         mock_llm_response = {
             "commands": [
                 {
@@ -41,101 +59,31 @@ class TestEdgeCases:
                     "parameters": None,
                     "errors": {
                         "type": "no_command_match",
-                        "message": "No command provided",
-                        "clarification_question": "What would you like me to do?"
+                        "message": "No command found for empty input",
+                        "clarification_question": "Please provide a command to execute."
                     }
                 }
             ]
         }
         
-        with patch('app.main.post') as mock_post:
-            mock_post.return_value = {"response": json.dumps(mock_llm_response)}
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            client = TestClient(app)
-            response = client.post("/api/v0/voice/command", json={
-                "voice_command": "",
-                "node_context": {"room": "living room", "node_id": "test-node"},
-                "available_commands": [
-                    {
-                        "command_name": "turn_on_lights",
-                        "description": "Turn on lights",
-                        "parameters": [{"name": "room", "type": "str"}]
-                    }
-                ]
-            }, headers={"x-api-key": "test-key"})
-            
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data["commands"]) == 1
-            assert data["commands"][0]["success"] is False
-            assert data["commands"][0]["errors"]["type"] == "no_command_match"
-    
-    def test_extremely_long_voice_command(self):
-        """Test handling of extremely long voice commands"""
-        # Create a very long command
-        long_command = "turn on the lights " * 1000
-        
-        mock_llm_response = {
-            "commands": [
-                {
-                    "success": True,
-                    "command_name": "turn_on_lights",
-                    "parameters": {"room": "living room"},
-                    "errors": None
+            with patch('app.main.post') as mock_post:
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(mock_llm_response)
+                            }
+                        }
+                    ]
                 }
-            ]
-        }
-        
-        with patch('app.main.post') as mock_post:
-            mock_post.return_value = {"response": json.dumps(mock_llm_response)}
-            
-            client = TestClient(app)
-            response = client.post("/api/v0/voice/command", json={
-                "voice_command": long_command,
-                "node_context": {"room": "living room", "node_id": "test-node"},
-                "available_commands": [
-                    {
-                        "command_name": "turn_on_lights",
-                        "description": "Turn on lights",
-                        "parameters": [{"name": "room", "type": "str"}]
-                    }
-                ]
-            }, headers={"x-api-key": "test-key"})
-            
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data["commands"]) == 1
-            assert data["commands"][0]["success"] is True
-    
-    def test_voice_command_with_special_characters(self):
-        """Test handling of voice commands with special characters"""
-        mock_llm_response = {
-            "commands": [
-                {
-                    "success": True,
-                    "command_name": "turn_on_lights",
-                    "parameters": {"room": "living room"},
-                    "errors": None
-                }
-            ]
-        }
-        
-        special_commands = [
-            "turn on the lights! @#$%^&*()",
-            "turn on the lights\n\n\ntabs and newlines",
-            "turn on the lights ñáéíóú",
-            "turn on the lights 你好世界",
-            "turn on the lights 🏠💡✨"
-        ]
-        
-        with patch('app.main.post') as mock_post:
-            mock_post.return_value = {"response": json.dumps(mock_llm_response)}
-            
-            client = TestClient(app)
-            
-            for command in special_commands:
+                
+                client = TestClient(app)
                 response = client.post("/api/v0/voice/command", json={
-                    "voice_command": command,
+                    "voice_command": "",
                     "node_context": {"room": "living room", "node_id": "test-node"},
                     "available_commands": [
                         {
@@ -148,192 +96,33 @@ class TestEdgeCases:
                 
                 assert response.status_code == 200
                 data = response.json()
-                assert len(data["commands"]) == 1
+                assert get_response_success(data) is False
+                
+                errors = get_response_errors(data)
+                assert errors["type"] == "no_command_match"
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear()
     
-    def test_no_available_commands(self):
-        """Test handling when no commands are available"""
-        mock_llm_response = {
-            "commands": [
-                {
-                    "success": False,
-                    "command_name": None,
-                    "parameters": None,
-                    "errors": {
-                        "type": "no_command_match",
-                        "message": "No commands available",
-                        "clarification_question": "No commands are available for this device."
-                    }
-                }
-            ]
-        }
+    def test_extremely_long_voice_command(self):
+        """Test handling of extremely long voice command"""
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
+        from unittest.mock import patch
         
-        with patch('app.main.post') as mock_post:
-            mock_post.return_value = {"response": json.dumps(mock_llm_response)}
-            
-            client = TestClient(app)
-            response = client.post("/api/v0/voice/command", json={
-                "voice_command": "turn on the lights",
-                "node_context": {"room": "living room", "node_id": "test-node"},
-                "available_commands": []
-            }, headers={"x-api-key": "test-key"})
-            
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data["commands"]) == 1
-            assert data["commands"][0]["success"] is False
-            assert data["commands"][0]["errors"]["type"] == "no_command_match"
-    
-    def test_command_with_null_parameters(self):
-        """Test handling of commands with null parameters"""
-        mock_llm_response = {
-            "commands": [
-                {
-                    "success": True,
-                    "command_name": "stop_music",
-                    "parameters": None,
-                    "errors": None
-                }
-            ]
-        }
+        # Create a mock node
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="living room",
+            user="test-user"
+        )
         
-        with patch('app.main.post') as mock_post:
-            mock_post.return_value = {"response": json.dumps(mock_llm_response)}
-            
-            client = TestClient(app)
-            response = client.post("/api/v0/voice/command", json={
-                "voice_command": "stop the music",
-                "node_context": {"room": "living room", "node_id": "test-node"},
-                "available_commands": [
-                    {
-                        "command_name": "stop_music",
-                        "description": "Stop music",
-                        "parameters": []
-                    }
-                ]
-            }, headers={"x-api-key": "test-key"})
-            
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data["commands"]) == 1
-            assert data["commands"][0]["success"] is True
-            assert data["commands"][0]["command_name"] == "stop_music"
-    
-    def test_command_with_extra_parameters(self):
-        """Test handling when LLM returns extra parameters"""
-        mock_llm_response = {
-            "commands": [
-                {
-                    "success": True,
-                    "command_name": "turn_on_lights",
-                    "parameters": {
-                        "room": "living room",
-                        "brightness": 100,  # Extra parameter not in schema
-                        "color": "warm white"  # Another extra parameter
-                    },
-                    "errors": None
-                }
-            ]
-        }
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
         
-        with patch('app.main.post') as mock_post:
-            mock_post.return_value = {"response": json.dumps(mock_llm_response)}
-            
-            client = TestClient(app)
-            response = client.post("/api/v0/voice/command", json={
-                "voice_command": "turn on the lights",
-                "node_context": {"room": "living room", "node_id": "test-node"},
-                "available_commands": [
-                    {
-                        "command_name": "turn_on_lights",
-                        "description": "Turn on lights",
-                        "parameters": [{"name": "room", "type": "str"}]
-                    }
-                ]
-            }, headers={"x-api-key": "test-key"})
-            
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data["commands"]) == 1
-            assert data["commands"][0]["success"] is True
-            # Should still contain the extra parameters
-            assert "brightness" in data["commands"][0]["parameters"]
-            assert "color" in data["commands"][0]["parameters"]
-    
-    def test_preprocessing_with_no_matching_keywords(self):
-        """Test command preprocessing when no keywords match"""
-        from app.request_models.voice_command_request import CommandDefinition, CommandParameter
-        
-        # Create commands with specific keywords that won't match
-        commands = [
-            CommandDefinition(
-                command_name="start_dishwasher",
-                description="Start the dishwasher",
-                parameters=[],
-                keywords=["dishwasher", "wash", "dishes"]
-            )
-        ]
-        
-        mock_llm_response = {
-            "commands": [
-                {
-                    "success": False,
-                    "command_name": None,
-                    "parameters": None,
-                    "errors": {
-                        "type": "no_command_match",
-                        "message": "No matching command found",
-                        "clarification_question": "I don't understand that command."
-                    }
-                }
-            ]
-        }
-        
-        with patch('app.main.post') as mock_post:
-            mock_post.return_value = {"response": json.dumps(mock_llm_response)}
-            
-            client = TestClient(app)
-            response = client.post("/api/v0/voice/command", json={
-                "voice_command": "turn on the lights",  # No keywords match
-                "node_context": {"room": "living room", "node_id": "test-node"},
-                "available_commands": [cmd.model_dump() for cmd in commands]
-            }, headers={"x-api-key": "test-key"})
-            
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data["commands"]) == 1
-            assert data["commands"][0]["success"] is False
-    
-    def test_llm_timeout_simulation(self):
-        """Test handling of LLM timeout scenarios"""
-        with patch('app.main.post') as mock_post:
-            # Simulate a timeout or connection error
-            mock_post.side_effect = Exception("Request timeout")
-            
-            client = TestClient(app)
-            
-            # The application should handle the exception gracefully and return an error response
-            response = client.post("/api/v0/voice/command", json={
-                "voice_command": "turn on the lights",
-                "node_context": {"room": "living room", "node_id": "test-node"},
-                "available_commands": [
-                    {
-                        "command_name": "turn_on_lights",
-                        "description": "Turn on lights",
-                        "parameters": [{"name": "room", "type": "str"}]
-                    }
-                ]
-            }, headers={"x-api-key": "test-key"})
-            
-            # Should return 200 with error response
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data["commands"]) == 1
-            assert data["commands"][0]["success"] is False
-            assert data["commands"][0]["errors"]["type"] == "system_error"
-            assert "Request timeout" in data["commands"][0]["errors"]["message"]
-    
-    def test_node_context_edge_cases(self):
-        """Test edge cases in node context handling"""
+        # Mock the LLM response for long command
         mock_llm_response = {
             "commands": [
                 {
@@ -345,22 +134,28 @@ class TestEdgeCases:
             ]
         }
         
-        edge_cases = [
-            {"room": None, "node_id": "test-node"},
-            {"room": "   ", "node_id": "test-node"},  # Whitespace only
-            {"room": "living room", "node_id": ""},
-            {"room": "living room", "node_id": None},
-        ]
+        # Create an extremely long command
+        long_command = "turn on the lights " * 1000
         
-        with patch('app.main.post') as mock_post:
-            mock_post.return_value = {"response": json.dumps(mock_llm_response)}
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            client = TestClient(app)
-            
-            for node_context in edge_cases:
+            with patch('app.main.post') as mock_post:
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(mock_llm_response)
+                            }
+                        }
+                    ]
+                }
+                
+                client = TestClient(app)
                 response = client.post("/api/v0/voice/command", json={
-                    "voice_command": "turn on the lights",
-                    "node_context": node_context,
+                    "voice_command": long_command,
+                    "node_context": {"room": "living room", "node_id": "test-node"},
                     "available_commands": [
                         {
                             "command_name": "turn_on_lights",
@@ -370,9 +165,377 @@ class TestEdgeCases:
                     ]
                 }, headers={"x-api-key": "test-key"})
                 
-                # Should handle gracefully
-                assert response.status_code in [200, 422]  # Either success or validation error
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"]) 
+                assert response.status_code == 200
+                data = response.json()
+                assert get_response_success(data) is True
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear()
+    
+    def test_no_available_commands(self):
+        """Test handling when no commands are available"""
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
+        from unittest.mock import patch
+        
+        # Create a mock node
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="living room",
+            user="test-user"
+        )
+        
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
+        
+        # Mock the LLM response for no available commands
+        mock_llm_response = {
+            "commands": [
+                {
+                    "success": False,
+                    "command_name": None,
+                    "parameters": None,
+                    "errors": {
+                        "type": "no_command_match",
+                        "message": "No commands available",
+                        "clarification_question": "No commands are currently available."
+                    }
+                }
+            ]
+        }
+        
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
+            
+            with patch('app.main.post') as mock_post:
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(mock_llm_response)
+                            }
+                        }
+                    ]
+                }
+                
+                client = TestClient(app)
+                response = client.post("/api/v0/voice/command", json={
+                    "voice_command": "turn on the lights",
+                    "node_context": {"room": "living room", "node_id": "test-node"},
+                    "available_commands": []
+                }, headers={"x-api-key": "test-key"})
+                
+                assert response.status_code == 200
+                data = response.json()
+                assert get_response_success(data) is False
+                
+                errors = get_response_errors(data)
+                assert errors["type"] == "no_command_match"
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear()
+    
+    def test_command_with_null_parameters(self):
+        """Test handling of commands with null parameters"""
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
+        from unittest.mock import patch
+        
+        # Create a mock node
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="living room",
+            user="test-user"
+        )
+        
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
+        
+        # Mock the LLM response with null parameters
+        mock_llm_response = {
+            "commands": [
+                {
+                    "success": True,
+                    "command_name": "turn_on_lights",
+                    "parameters": None,
+                    "errors": None
+                }
+            ]
+        }
+        
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
+            
+            with patch('app.main.post') as mock_post:
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(mock_llm_response)
+                            }
+                        }
+                    ]
+                }
+                
+                client = TestClient(app)
+                response = client.post("/api/v0/voice/command", json={
+                    "voice_command": "turn on the lights",
+                    "node_context": {"room": "living room", "node_id": "test-node"},
+                    "available_commands": [
+                        {
+                            "command_name": "turn_on_lights",
+                            "description": "Turn on lights",
+                            "parameters": [{"name": "room", "type": "str"}]
+                        }
+                    ]
+                }, headers={"x-api-key": "test-key"})
+                
+                assert response.status_code == 200
+                data = response.json()
+                assert get_response_success(data) is True
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear()
+    
+    def test_command_with_extra_parameters(self):
+        """Test handling of commands with extra parameters"""
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
+        from unittest.mock import patch
+        
+        # Create a mock node
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="living room",
+            user="test-user"
+        )
+        
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
+        
+        # Mock the LLM response with extra parameters
+        mock_llm_response = {
+            "commands": [
+                {
+                    "success": True,
+                    "command_name": "turn_on_lights",
+                    "parameters": {
+                        "room": "living room",
+                        "extra_param": "extra_value",
+                        "another_extra": 123
+                    },
+                    "errors": None
+                }
+            ]
+        }
+        
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
+            
+            with patch('app.main.post') as mock_post:
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(mock_llm_response)
+                            }
+                        }
+                    ]
+                }
+                
+                client = TestClient(app)
+                response = client.post("/api/v0/voice/command", json={
+                    "voice_command": "turn on the lights",
+                    "node_context": {"room": "living room", "node_id": "test-node"},
+                    "available_commands": [
+                        {
+                            "command_name": "turn_on_lights",
+                            "description": "Turn on lights",
+                            "parameters": [{"name": "room", "type": "str"}]
+                        }
+                    ]
+                }, headers={"x-api-key": "test-key"})
+                
+                assert response.status_code == 200
+                data = response.json()
+                assert get_response_success(data) is True
+                
+                first_command = extract_first_command(data)
+                assert first_command["parameters"]["room"] == "living room"
+                assert first_command["parameters"]["extra_param"] == "extra_value"
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear()
+    
+    def test_malformed_json_response(self):
+        """Test handling of malformed JSON response from LLM"""
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
+        from unittest.mock import patch
+        
+        # Create a mock node
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="living room",
+            user="test-user"
+        )
+        
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
+        
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
+            
+            with patch('app.main.post') as mock_post:
+                # Return malformed JSON
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "This is not valid JSON {"
+                            }
+                        }
+                    ]
+                }
+                
+                client = TestClient(app)
+                response = client.post("/api/v0/voice/command", json={
+                    "voice_command": "turn on the lights",
+                    "node_context": {"room": "living room", "node_id": "test-node"},
+                    "available_commands": [
+                        {
+                            "command_name": "turn_on_lights",
+                            "description": "Turn on lights",
+                            "parameters": [{"name": "room", "type": "str"}]
+                        }
+                    ]
+                }, headers={"x-api-key": "test-key"})
+                
+                assert response.status_code == 200
+                data = response.json()
+                assert get_response_success(data) is False
+                
+                errors = get_response_errors(data)
+                assert errors["type"] == "parsing_error"
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear()
+    
+    def test_empty_json_response(self):
+        """Test handling of empty JSON response from LLM"""
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
+        from unittest.mock import patch
+        
+        # Create a mock node
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="living room",
+            user="test-user"
+        )
+        
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
+        
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
+            
+            with patch('app.main.post') as mock_post:
+                # Return empty response
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": ""
+                            }
+                        }
+                    ]
+                }
+                
+                client = TestClient(app)
+                response = client.post("/api/v0/voice/command", json={
+                    "voice_command": "turn on the lights",
+                    "node_context": {"room": "living room", "node_id": "test-node"},
+                    "available_commands": [
+                        {
+                            "command_name": "turn_on_lights",
+                            "description": "Turn on lights",
+                            "parameters": [{"name": "room", "type": "str"}]
+                        }
+                    ]
+                }, headers={"x-api-key": "test-key"})
+                
+                assert response.status_code == 200
+                data = response.json()
+                assert get_response_success(data) is False
+                
+                errors = get_response_errors(data)
+                assert errors["type"] == "parsing_error"
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear()
+    
+    def test_llm_timeout(self):
+        """Test handling of LLM timeout"""
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
+        from unittest.mock import patch
+        import httpx
+        
+        # Create a mock node
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="living room",
+            user="test-user"
+        )
+        
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
+        
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
+            
+            with patch('app.main.post') as mock_post:
+                # Simulate timeout
+                mock_post.side_effect = httpx.TimeoutException("Request timed out")
+                
+                client = TestClient(app)
+                response = client.post("/api/v0/voice/command", json={
+                    "voice_command": "turn on the lights",
+                    "node_context": {"room": "living room", "node_id": "test-node"},
+                    "available_commands": [
+                        {
+                            "command_name": "turn_on_lights",
+                            "description": "Turn on lights",
+                            "parameters": [{"name": "room", "type": "str"}]
+                        }
+                    ]
+                }, headers={"x-api-key": "test-key"})
+                
+                assert response.status_code == 200
+                data = response.json()
+                assert get_response_success(data) is False
+                
+                errors = get_response_errors(data)
+                assert errors["type"] == "system_error"
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear() 

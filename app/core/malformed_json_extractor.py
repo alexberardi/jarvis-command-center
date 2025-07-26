@@ -8,7 +8,7 @@ import logging
 import os
 from typing import Optional, Dict, Any, Tuple
 from app.core.json_schema import create_fallback_prompt, get_json_format_examples
-from app.core.utils.rest_client import post
+from app.core.utils.rest_client import post, get
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,8 @@ class MalformedJsonExtractorService:
             
             # Call the lightweight chat endpoint
             payload = {
+                "model": "jarvis-llm",
+                "temperature": 0.1,
                 "messages": [
                     {
                         "role": "system",
@@ -61,21 +63,18 @@ class MalformedJsonExtractorService:
                         "role": "user", 
                         "content": extraction_prompt
                     }
-                ],
-                "model": self.lightweight_model,  # Lightweight local model for speed
-                "temperature": 0.1,  # Low temperature for consistent formatting
-                "max_tokens": 300
+                ]
             }
             
             logger.info(f"Attempting JSON extraction with malformed JSON extractor")
             
             response_data = await post(self.extract_endpoint, json_data=payload)
             
-            # Try different response formats
+            # Extract content from response (handle both old and new formats)
             extracted_content = (
-                response_data.get("choices", [{}])[0].get("message", {}).get("content", "") or  # OpenAI format
-                response_data.get("response", "") or  # Direct response format
-                response_data.get("content", "")  # Alternative format
+                response_data.get("choices", [{}])[0].get("message", {}).get("content", "") or  # OpenAI-style format
+                response_data.get("content", "") or  # Alternative format
+                response_data.get("response", "")  # Legacy format
             )
             
             if not extracted_content:
@@ -111,7 +110,8 @@ class MalformedJsonExtractorService:
         """Check if the JSON extractor service is available"""
         try:
             llm_api_version = os.getenv("JARVIS_LLM_PROXY_API_VERSION", "0")
-            await post(f"{self.api_url}/api/v{llm_api_version}/health", timeout=5)
+            # Health check is a GET request
+            await get(f"{self.api_url}/api/v{llm_api_version}/health", timeout=5)
             return True
         except Exception:
             return False 

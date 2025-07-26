@@ -30,3 +30,25 @@ async def post(
         return response.json()
 
 
+async def get(
+    url: str,
+    headers: Optional[dict] = None,
+    timeout: int = 30
+) -> dict:
+    # Default headers
+    default_headers = {
+        "Content-Type": "application/json",
+    }
+
+    # Merge with user headers (user overrides take precedence)
+    merged_headers = {**default_headers, **(headers or {})}
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(
+            url,
+            headers=merged_headers
+        )
+        response.raise_for_status()
+        return response.json()
+
+

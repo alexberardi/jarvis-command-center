@@ -9,56 +9,37 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-@pytest.fixture(scope="session")
-def test_engine():
-    """Create a test database engine"""
-    # Use in-memory SQLite for tests with threading support
-    engine = create_engine(
-        "sqlite:///:memory:",
-        echo=False,
-        connect_args={"check_same_thread": False}  # Allow SQLite to work across threads
-    )
-    Base.metadata.create_all(bind=engine)
-    return engine
-
-
-@pytest.fixture(scope="session")
-def test_engine_file():
-    """Create a file-based test database engine (alternative if memory doesn't work)"""
+@pytest.fixture
+def test_db():
+    """Create a fresh test database for each test"""
     # Create a temporary file for the test database
     db_fd, db_path = tempfile.mkstemp(suffix='.db')
     os.close(db_fd)  # Close the file descriptor, we just need the path
     
+    # Create engine for this specific test
     engine = create_engine(
         f"sqlite:///{db_path}",
         echo=False,
         connect_args={"check_same_thread": False}
     )
+    
+    # Create all tables
     Base.metadata.create_all(bind=engine)
     
-    yield engine
+    # Create session factory
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    session = SessionLocal()
     
-    # Cleanup: remove the temporary database file
-    try:
-        os.unlink(db_path)
-    except OSError:
-        pass
-
-
-@pytest.fixture(scope="session")
-def test_session_factory(test_engine_file):
-    """Create a test session factory"""
-    return sessionmaker(autocommit=False, autoflush=False, bind=test_engine_file)
-
-
-@pytest.fixture
-def test_db(test_session_factory):
-    """Create a test database session"""
-    session = test_session_factory()
     try:
         yield session
     finally:
         session.close()
+        engine.dispose()
+        # Cleanup: remove the temporary database file
+        try:
+            os.unlink(db_path)
+        except OSError:
+            pass
 
 
 @pytest.fixture

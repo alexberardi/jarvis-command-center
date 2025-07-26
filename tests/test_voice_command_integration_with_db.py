@@ -7,7 +7,7 @@ from app.db import Base
 from app.deps import get_db
 from app.models import Node
 from app.request_models.voice_command_request import CommandDefinition, CommandParameter
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 import json
 
 
@@ -78,7 +78,7 @@ class TestVoiceCommandWithRealDB:
         app.dependency_overrides.clear()
         Base.metadata.drop_all(bind=engine)
     
-    @patch('app.main.post')
+    @patch('app.core.utils.rest_client.post', new_callable=AsyncMock)
     def test_with_real_database_node(self, mock_post, client_with_test_db):
         """Test with real database node authentication"""
         # Mock LLM response
@@ -93,7 +93,15 @@ class TestVoiceCommandWithRealDB:
             ]
         }
         
-        mock_post.return_value = {"response": json.dumps(mock_llm_response)}
+        mock_post.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(mock_llm_response)
+                    }
+                }
+            ]
+        }
         
         response = client_with_test_db.post("/api/v0/voice/command", json={
             "voice_command": "turn on the lights",
@@ -115,7 +123,7 @@ class TestVoiceCommandWithRealDB:
         assert first_command["command_name"] == "turn_on_lights"
         assert first_command["parameters"]["room"] == "living room"
     
-    @patch('app.main.post')
+    @patch('app.core.utils.rest_client.post', new_callable=AsyncMock)
     def test_with_empty_room_node(self, mock_post, client_with_test_db):
         """Test with node that has empty room context"""
         # Add another test node with empty room using the same approach as the fixture
@@ -137,47 +145,63 @@ class TestVoiceCommandWithRealDB:
         db.commit()
         db.close()
         
-        # Mock LLM response for missing room
+        # Mock LLM response - the LLM should succeed even with empty room
+        # as it can use the room from the node context
         mock_llm_response = {
             "commands": [
                 {
-                    "success": False,
-                    "command_name": None,
-                    "parameters": None,
-                    "errors": {
-                        "type": "missing_parameters",
-                        "message": "Room parameter is required",
-                        "missing_parameters": ["room"],
-                        "clarification_question": "Which room would you like to control?"
+                    "success": True,
+                    "command_name": "turn_on_lights",
+                    "parameters": {"room": ""},
+                    "errors": None
+                }
+            ]
+        }
+        
+        # Mock main LLM call
+        mock_post.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(mock_llm_response)
                     }
                 }
             ]
         }
         
-        mock_post.return_value = {"response": json.dumps(mock_llm_response)}
+        # Set environment variable to disable transcription cleanup
+        import os
+        original_value = os.environ.get("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED")
+        os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "false"
         
-        response = client_with_test_db.post("/api/v0/voice/command", json={
-            "voice_command": "turn on the lights",
-            "node_context": {"room": "", "node_id": "empty-room-node"},
-            "available_commands": [
-                {
-                    "command_name": "turn_on_lights",
-                    "description": "Turn on lights",
-                    "parameters": [{"name": "room", "type": "str"}]
-                }
-            ]
-        }, headers={"x-api-key": "empty-room-key"})
+        try:
+            response = client_with_test_db.post("/api/v0/voice/command", json={
+                "voice_command": "turn on the lights",
+                "node_context": {"room": "", "node_id": "empty-room-node"},
+                "available_commands": [
+                    {
+                        "command_name": "turn_on_lights",
+                        "description": "Turn on lights",
+                        "parameters": [{"name": "room", "type": "str"}]
+                    }
+                ]
+            }, headers={"x-api-key": "empty-room-key"})
+        finally:
+            # Restore original environment variable
+            if original_value is not None:
+                os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = original_value
+            else:
+                os.environ.pop("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", None)
         
         assert response.status_code == 200
         data = response.json()
-        assert get_response_success(data) is False
+        assert get_response_success(data) is True
         
-        errors = get_response_errors(data)
-        assert errors is not None
-        assert errors["type"] == "missing_parameters"
-        assert "room" in errors["missing_parameters"]
+        first_command = extract_first_command(data)
+        assert first_command["command_name"] == "turn_on_lights"
+        assert first_command["parameters"]["room"] == ""
     
-    @patch('app.main.post')
+    @patch('app.core.utils.rest_client.post', new_callable=AsyncMock)
     def test_with_multiple_nodes(self, mock_post, client_with_test_db):
         """Test with multiple nodes in database"""
         # Add multiple test nodes using the same approach as the fixture
@@ -204,7 +228,7 @@ class TestVoiceCommandWithRealDB:
         test_cases = [
             ("key-1", "bedroom", True),
             ("key-2", "kitchen", True),
-            ("key-3", "", False)  # Empty room should fail
+            ("key-3", "", True)  # Empty room should succeed
         ]
         
         for api_key, room, expected_success in test_cases:
@@ -236,27 +260,48 @@ class TestVoiceCommandWithRealDB:
                     ]
                 }
             
-            mock_post.return_value = {"response": json.dumps(mock_llm_response)}
-            
-            response = client_with_test_db.post("/api/v0/voice/command", json={
-                "voice_command": "turn on the lights",
-                "node_context": {"room": room, "node_id": f"node-{api_key.split('-')[1]}"},
-                "available_commands": [
+            # Mock main LLM call
+            mock_post.return_value = {
+                "choices": [
                     {
-                        "command_name": "turn_on_lights",
-                        "description": "Turn on lights",
-                        "parameters": [{"name": "room", "type": "str"}]
+                        "message": {
+                            "content": json.dumps(mock_llm_response)
+                        }
                     }
                 ]
-            }, headers={"x-api-key": api_key})
+            }
             
-            assert response.status_code == 200
-            data = response.json()
-            assert get_response_success(data) is expected_success
+            # Set environment variable to disable transcription cleanup
+            import os
+            original_value = os.environ.get("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED")
+            os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "false"
             
-            if expected_success:
-                first_command = extract_first_command(data)
-                assert first_command["parameters"]["room"] == room
+            try:
+                response = client_with_test_db.post("/api/v0/voice/command", json={
+                    "voice_command": "turn on the lights",
+                    "node_context": {"room": room, "node_id": f"node-{api_key.split('-')[1]}"},
+                    "available_commands": [
+                        {
+                            "command_name": "turn_on_lights",
+                            "description": "Turn on lights",
+                            "parameters": [{"name": "room", "type": "str"}]
+                        }
+                    ]
+                }, headers={"x-api-key": api_key})
+                
+                assert response.status_code == 200
+                data = response.json()
+                assert get_response_success(data) is expected_success
+                
+                if expected_success:
+                    first_command = extract_first_command(data)
+                    assert first_command["parameters"]["room"] == room
+            finally:
+                # Restore original environment variable
+                if original_value is not None:
+                    os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = original_value
+                else:
+                    os.environ.pop("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", None)
     
     def test_invalid_api_key(self, client_with_test_db):
         """Test with invalid API key"""

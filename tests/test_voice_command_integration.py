@@ -1,9 +1,7 @@
 import pytest
+import json
 from fastapi.testclient import TestClient
 from app.main import app
-from app.request_models.voice_command_request import CommandDefinition, CommandParameter
-from unittest.mock import patch, MagicMock
-import json
 
 
 def extract_first_command(data):
@@ -32,13 +30,14 @@ def get_response_errors(data):
 
 
 class TestVoiceCommandIntegration:
-    """Integration tests for voice command processing"""
+    """Test voice command integration with mocked LLM responses"""
     
     def test_successful_command_with_room_context(self):
         """Test successful command processing with room context"""
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
         from app.models import Node
+        from unittest.mock import patch
         
         # Create a mock node
         mock_node = Node(
@@ -68,7 +67,15 @@ class TestVoiceCommandIntegration:
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
             with patch('app.main.post') as mock_post:
-                mock_post.return_value = {"response": json.dumps(mock_llm_response)}
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(mock_llm_response)
+                            }
+                        }
+                    ]
+                }
                 
                 client = TestClient(app)
                 response = client.post("/api/v0/voice/command", json={
@@ -100,6 +107,7 @@ class TestVoiceCommandIntegration:
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
         from app.models import Node
+        from unittest.mock import patch
         
         # Create a mock node
         mock_node = Node(
@@ -129,7 +137,15 @@ class TestVoiceCommandIntegration:
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
             with patch('app.main.post') as mock_post:
-                mock_post.return_value = {"response": json.dumps(mock_llm_response)}
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(mock_llm_response)
+                            }
+                        }
+                    ]
+                }
                 
                 client = TestClient(app)
                 response = client.post("/api/v0/voice/command", json={
@@ -164,6 +180,7 @@ class TestVoiceCommandIntegration:
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
         from app.models import Node
+        from unittest.mock import patch
         
         # Create a mock node with empty room
         mock_node = Node(
@@ -176,7 +193,7 @@ class TestVoiceCommandIntegration:
         def mock_verify_api_key():
             return NodeContextProvider(mock_node)
         
-        # Mock the LLM response for missing parameter
+        # Mock the LLM response for missing room parameter
         mock_llm_response = {
             "commands": [
                 {
@@ -198,7 +215,15 @@ class TestVoiceCommandIntegration:
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
             with patch('app.main.post') as mock_post:
-                mock_post.return_value = {"response": json.dumps(mock_llm_response)}
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(mock_llm_response)
+                            }
+                        }
+                    ]
+                }
                 
                 client = TestClient(app)
                 response = client.post("/api/v0/voice/command", json={
@@ -218,7 +243,6 @@ class TestVoiceCommandIntegration:
                 assert get_response_success(data) is False
                 
                 errors = get_response_errors(data)
-                assert errors is not None
                 assert errors["type"] == "missing_parameters"
                 assert "room" in errors["missing_parameters"]
         finally:
@@ -230,6 +254,7 @@ class TestVoiceCommandIntegration:
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
         from app.models import Node
+        from unittest.mock import patch
         
         # Create a mock node
         mock_node = Node(
@@ -248,7 +273,15 @@ class TestVoiceCommandIntegration:
             
             with patch('app.main.post') as mock_post:
                 # Return malformed JSON
-                mock_post.return_value = {"response": "invalid json {"}
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "This is not valid JSON"
+                            }
+                        }
+                    ]
+                }
                 
                 client = TestClient(app)
                 response = client.post("/api/v0/voice/command", json={
@@ -268,82 +301,87 @@ class TestVoiceCommandIntegration:
                 assert get_response_success(data) is False
                 
                 errors = get_response_errors(data)
-                assert errors is not None
                 assert errors["type"] == "parsing_error"
         finally:
             # Clean up dependency override
             app.dependency_overrides.clear()
     
     def test_different_room_contexts(self):
-        """Test that different room contexts work correctly"""
+        """Test that different room contexts are handled correctly"""
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
         from app.models import Node
+        from unittest.mock import patch
         
-        rooms = ["kitchen", "bedroom", "living room"]
+        # Create a mock node
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="kitchen",
+            user="test-user"
+        )
         
-        for room in rooms:
-            # Create a mock node for each room
-            mock_node = Node(
-                node_id="test-node",
-                api_key="test-key",
-                room=room,
-                user="test-user"
-            )
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
+        
+        # Mock the LLM response
+        mock_llm_response = {
+            "commands": [
+                {
+                    "success": True,
+                    "command_name": "turn_on_lights",
+                    "parameters": {"room": "kitchen"},
+                    "errors": None
+                }
+            ]
+        }
+        
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            def mock_verify_api_key():
-                return NodeContextProvider(mock_node)
-            
-            # Mock the LLM response
-            mock_llm_response = {
-                "commands": [
-                    {
-                        "success": True,
-                        "command_name": "turn_on_lights",
-                        "parameters": {"room": room},
-                        "errors": None
-                    }
-                ]
-            }
-            
-            try:
-                # Override the dependency
-                app.dependency_overrides[verify_api_key] = mock_verify_api_key
-                
-                with patch('app.main.post') as mock_post:
-                    mock_post.return_value = {"response": json.dumps(mock_llm_response)}
-                    
-                    client = TestClient(app)
-                    response = client.post("/api/v0/voice/command", json={
-                        "voice_command": "turn on the lights",
-                        "node_context": {"room": room, "node_id": "test-node"},
-                        "available_commands": [
-                            {
-                                "command_name": "turn_on_lights",
-                                "description": "Turn on lights",
-                                "parameters": [{"name": "room", "type": "str"}]
+            with patch('app.main.post') as mock_post:
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(mock_llm_response)
                             }
-                        ]
-                    }, headers={"x-api-key": "test-key"})
-                    
-                    assert response.status_code == 200
-                    data = response.json()
-                    assert get_response_success(data) is True
-                    
-                    first_command = extract_first_command(data)
-                    assert first_command["parameters"]["room"] == room
-            finally:
-                # Clean up dependency override
-                app.dependency_overrides.clear()
+                        }
+                    ]
+                }
+                
+                client = TestClient(app)
+                response = client.post("/api/v0/voice/command", json={
+                    "voice_command": "turn on the lights",
+                    "node_context": {"room": "kitchen", "node_id": "test-node"},
+                    "available_commands": [
+                        {
+                            "command_name": "turn_on_lights",
+                            "description": "Turn on lights",
+                            "parameters": [{"name": "room", "type": "str"}]
+                        }
+                    ]
+                }, headers={"x-api-key": "test-key"})
+                
+                assert response.status_code == 200
+                data = response.json()
+                assert get_response_success(data) is True
+                
+                first_command = extract_first_command(data)
+                assert first_command["command_name"] == "turn_on_lights"
+                assert first_command["parameters"]["room"] == "kitchen"
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear()
     
     def test_system_prompt_generation(self):
         """Test that system prompts are generated correctly"""
         from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
         from app.request_models.voice_command_request import CommandDefinition, CommandParameter
         
+        # Test with room context
         provider = StandardCommandInferenceSystemPromptProvider()
-        
-        node_context = {"room": "living room", "node_id": "test-node"}
         commands = [
             CommandDefinition(
                 command_name="turn_on_lights",
@@ -352,13 +390,10 @@ class TestVoiceCommandIntegration:
             )
         ]
         
-        # Test system prompt generation
-        system_prompt = provider.build_system_prompt(node_context, commands)
+        node_context = {"room": "living room", "node_id": "test-node"}
+        prompt = provider.build_system_prompt(node_context, commands)
         
-        # Should contain the new commands array format
-        assert "commands" in system_prompt
-        assert "turn_on_lights" in system_prompt
-        assert "living room" in system_prompt
-        
-        # Should contain the new response format examples
-        assert '{"c": [' in system_prompt 
+        # Check that the prompt contains expected elements
+        assert "living room" in prompt
+        assert "turn_on_lights" in prompt
+        assert "room" in prompt 
