@@ -78,7 +78,7 @@ class TestVoiceCommandWithRealDB:
         app.dependency_overrides.clear()
         Base.metadata.drop_all(bind=engine)
     
-    @patch('app.core.utils.rest_client.post', new_callable=AsyncMock)
+    @patch('app.main.post', new_callable=AsyncMock)
     def test_with_real_database_node(self, mock_post, client_with_test_db):
         """Test with real database node authentication"""
         # Mock LLM response
@@ -123,7 +123,7 @@ class TestVoiceCommandWithRealDB:
         assert first_command["command_name"] == "turn_on_lights"
         assert first_command["parameters"]["room"] == "living room"
     
-    @patch('app.core.utils.rest_client.post', new_callable=AsyncMock)
+    @patch('app.main.post', new_callable=AsyncMock)
     def test_with_empty_room_node(self, mock_post, client_with_test_db):
         """Test with node that has empty room context"""
         # Add another test node with empty room using the same approach as the fixture
@@ -201,7 +201,7 @@ class TestVoiceCommandWithRealDB:
         assert first_command["command_name"] == "turn_on_lights"
         assert first_command["parameters"]["room"] == ""
     
-    @patch('app.core.utils.rest_client.post', new_callable=AsyncMock)
+    @patch('app.main.post', new_callable=AsyncMock)
     def test_with_multiple_nodes(self, mock_post, client_with_test_db):
         """Test with multiple nodes in database"""
         # Add multiple test nodes using the same approach as the fixture
