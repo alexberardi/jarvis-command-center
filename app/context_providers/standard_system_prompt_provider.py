@@ -1,29 +1,15 @@
-import os
 from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider
 from app.request_models.voice_command_request import CommandDefinition
-from app.context_providers.command_filter import CommandFilter
 from typing import List, Optional
-import logging
-
-logger = logging.getLogger(__name__)
 
 class StandardCommandInferenceSystemPromptProvider(ICommandInferenceSystemPromptProvider):
-    def __init__(self):
-        self.command_filter = CommandFilter()
-        self.preprocessing_enabled = os.getenv("COMMAND_PREPROCESSING_ENABLED", "false").lower() == "true"
-    
     @property
     def name(self) -> str:
         return "STANDARD"
 
     def build_system_prompt(self, node_context: dict, available_commands: List[CommandDefinition], voice_command: Optional[str] = None) -> str:
-        # Apply command filtering if enabled and voice_command is provided
-        if self.preprocessing_enabled and voice_command:
-            filtered_commands, stats = self.command_filter.extract_relevant_commands(voice_command, available_commands)
-            logger.info(f"Command filtering: {stats['total_commands']} -> {stats['filtered_commands']} commands ({stats['reduction_percentage']:.1f}% reduction, ~{stats['tokens_saved']} tokens saved)")
-            commands_to_use = filtered_commands
-        else:
-            commands_to_use = available_commands
+        # Use whatever commands are passed in - preprocessing is handled by the caller
+        commands_to_use = available_commands
         
         context_str = f"Node context: {node_context}"
         commands_str = '\n'.join(

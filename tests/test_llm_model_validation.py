@@ -2,6 +2,7 @@ import pytest
 import json
 from fastapi.testclient import TestClient
 from app.main import app
+from unittest.mock import patch, AsyncMock
 
 
 def extract_first_command(data):
@@ -59,7 +60,7 @@ turn on the kitchen lights"""
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -115,7 +116,7 @@ turn on the kitchen lights"""
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -172,7 +173,7 @@ turn on the kitchen lights"""
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -229,7 +230,7 @@ turn on the kitchen lights"""
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -295,7 +296,7 @@ turn on the kitchen lights"""
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {

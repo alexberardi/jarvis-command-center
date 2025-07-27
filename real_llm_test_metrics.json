@@ -1,0 +1,39 @@
+{
+  "total_tests": 14,
+  "passed": 14,
+  "failed": 0,
+  "skipped": 0,
+  "errors": 0,
+  "response_times": [],
+  "token_usage": [],
+  "costs": [],
+  "success_rate": 100.0,
+  "test_results": {
+    "start_time": "2025-07-26T22:03:09.239310",
+    "end_time": "2025-07-26T22:04:34.237601",
+    "duration_seconds": 84.998291,
+    "return_code": 0,
+    "stdout": "============================= test session starts ==============================\nplatform darwin -- Python 3.11.8, pytest-8.4.1, pluggy-1.6.0 -- /Users/alexanderberardi/.pyenv/versions/3.11.8/bin/python\ncachedir: .pytest_cache\nrootdir: /Users/alexanderberardi/jarvis-command-center\nconfigfile: pytest.ini\nplugins: anyio-4.9.0\ncollecting ... collected 14 items\n\ntests/test_llm_integration.py::TestTranscriptionCleanup::test_transcription_cleanup_with_filler_words PASSED [  7%]\ntests/test_llm_integration.py::TestTranscriptionCleanup::test_transcription_cleanup_performance_comparison PASSED [ 14%]\ntests/test_llm_integration.py::TestTranscriptionCleanup::test_clean_already_clean_commands PASSED [ 21%]\ntests/test_llm_integration.py::TestLLMIntegration::test_basic_light_commands PASSED [ 28%]\ntests/test_llm_integration.py::TestLLMIntegration::test_temperature_commands PASSED [ 35%]\ntests/test_llm_integration.py::TestLLMIntegration::test_timer_commands PASSED [ 42%]\ntests/test_llm_integration.py::TestLLMIntegration::test_music_commands PASSED [ 50%]\ntests/test_llm_integration.py::TestLLMIntegration::test_missing_room_context PASSED [ 57%]\ntests/test_llm_integration.py::TestLLMIntegration::test_ambiguous_commands PASSED [ 64%]\ntests/test_llm_integration.py::TestLLMIntegration::test_unrecognized_commands PASSED [ 71%]\ntests/test_llm_integration.py::TestLLMIntegration::test_natural_language_variations PASSED [ 78%]\ntests/test_llm_integration.py::TestLLMIntegration::test_complex_scenarios PASSED [ 85%]\ntests/test_llm_integration.py::TestLLMIntegration::test_multiple_commands PASSED [ 92%]\ntests/test_llm_integration.py::TestLLMPerformance::test_response_time PASSED [100%]\n\n=============================== warnings summary ===============================\ntests/test_llm_integration.py:799\n  /Users/alexanderberardi/jarvis-command-center/tests/test_llm_integration.py:799: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html\n    @pytest.mark.slow\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=================== 14 passed, 1 warning in 84.18s (0:01:24) ===================\n",
+    "stderr": "",
+    "tests_run": 14,
+    "test_paths": [
+      "tests/test_llm_integration.py::TestTranscriptionCleanup::test_transcription_cleanup_with_filler_words",
+      "tests/test_llm_integration.py::TestTranscriptionCleanup::test_transcription_cleanup_performance_comparison",
+      "tests/test_llm_integration.py::TestTranscriptionCleanup::test_clean_already_clean_commands",
+      "tests/test_llm_integration.py::TestLLMIntegration::test_basic_light_commands",
+      "tests/test_llm_integration.py::TestLLMIntegration::test_temperature_commands",
+      "tests/test_llm_integration.py::TestLLMIntegration::test_timer_commands",
+      "tests/test_llm_integration.py::TestLLMIntegration::test_music_commands",
+      "tests/test_llm_integration.py::TestLLMIntegration::test_missing_room_context",
+      "tests/test_llm_integration.py::TestLLMIntegration::test_ambiguous_commands",
+      "tests/test_llm_integration.py::TestLLMIntegration::test_unrecognized_commands",
+      "tests/test_llm_integration.py::TestLLMIntegration::test_natural_language_variations",
+      "tests/test_llm_integration.py::TestLLMIntegration::test_complex_scenarios",
+      "tests/test_llm_integration.py::TestLLMIntegration::test_multiple_commands",
+      "tests/test_llm_integration.py::TestLLMPerformance::test_response_time"
+    ],
+    "json_report_note": "Install pytest-json-report for detailed JSON reports"
+  },
+  "llm_api_url": "http://10.0.0.69:8000",
+  "timestamp": "2025-07-26T22:04:34.237799"
+}

@@ -10,6 +10,13 @@ from app.main import app
 
 
 @pytest.fixture
+def client():
+    """Create a test client without database overrides"""
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.fixture
 def test_db():
     """Create a fresh test database for each test"""
     # Create a temporary file for the test database

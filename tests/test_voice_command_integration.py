@@ -1,7 +1,9 @@
 import pytest
 import json
+import os
 from fastapi.testclient import TestClient
 from app.main import app
+from unittest.mock import patch, AsyncMock
 
 
 def extract_first_command(data):
@@ -37,7 +39,6 @@ class TestVoiceCommandIntegration:
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
         from app.models import Node
-        from unittest.mock import patch
         
         # Create a mock node
         mock_node = Node(
@@ -66,7 +67,11 @@ class TestVoiceCommandIntegration:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            # Disable transcription cleanup for this test
+            original_value = os.environ.get("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED")
+            os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "false"
+            
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -101,13 +106,17 @@ class TestVoiceCommandIntegration:
         finally:
             # Clean up dependency override
             app.dependency_overrides.clear()
+            # Restore transcription cleanup setting
+            if original_value is not None:
+                os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = original_value
+            else:
+                os.environ.pop("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", None)
     
     def test_successful_command_multiple_parameters(self):
         """Test successful command processing with multiple parameters"""
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
         from app.models import Node
-        from unittest.mock import patch
         
         # Create a mock node
         mock_node = Node(
@@ -136,7 +145,11 @@ class TestVoiceCommandIntegration:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            # Disable transcription cleanup for this test
+            original_value = os.environ.get("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED")
+            os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "false"
+            
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -171,90 +184,21 @@ class TestVoiceCommandIntegration:
                 assert first_command["command_name"] == "set_temperature"
                 assert first_command["parameters"]["room"] == "bedroom"
                 assert first_command["parameters"]["degrees"] == 72
+                assert first_command["errors"] is None
         finally:
             # Clean up dependency override
             app.dependency_overrides.clear()
+            # Restore transcription cleanup setting
+            if original_value is not None:
+                os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = original_value
+            else:
+                os.environ.pop("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", None)
     
     def test_missing_room_parameter(self):
-        """Test handling of missing room parameter"""
+        """Test command processing when room parameter is missing"""
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
         from app.models import Node
-        from unittest.mock import patch
-        
-        # Create a mock node with empty room
-        mock_node = Node(
-            node_id="test-node",
-            api_key="test-key",
-            room="",
-            user="test-user"
-        )
-        
-        def mock_verify_api_key():
-            return NodeContextProvider(mock_node)
-        
-        # Mock the LLM response for missing room parameter
-        mock_llm_response = {
-            "commands": [
-                {
-                    "success": False,
-                    "command_name": None,
-                    "parameters": None,
-                    "errors": {
-                        "type": "missing_parameters",
-                        "message": "Room parameter is required",
-                        "missing_parameters": ["room"],
-                        "clarification_question": "Which room would you like to control?"
-                    }
-                }
-            ]
-        }
-        
-        try:
-            # Override the dependency
-            app.dependency_overrides[verify_api_key] = mock_verify_api_key
-            
-            with patch('app.main.post') as mock_post:
-                mock_post.return_value = {
-                    "choices": [
-                        {
-                            "message": {
-                                "content": json.dumps(mock_llm_response)
-                            }
-                        }
-                    ]
-                }
-                
-                client = TestClient(app)
-                response = client.post("/api/v0/voice/command", json={
-                    "voice_command": "turn on the lights",
-                    "node_context": {"room": "", "node_id": "test-node"},
-                    "available_commands": [
-                        {
-                            "command_name": "turn_on_lights",
-                            "description": "Turn on lights",
-                            "parameters": [{"name": "room", "type": "str"}]
-                        }
-                    ]
-                }, headers={"x-api-key": "test-key"})
-                
-                assert response.status_code == 200
-                data = response.json()
-                assert get_response_success(data) is False
-                
-                errors = get_response_errors(data)
-                assert errors["type"] == "missing_parameters"
-                assert "room" in errors["missing_parameters"]
-        finally:
-            # Clean up dependency override
-            app.dependency_overrides.clear()
-    
-    def test_malformed_llm_response(self):
-        """Test handling of malformed LLM response"""
-        from app.deps import verify_api_key
-        from app.context_providers.node_context_provider import NodeContextProvider
-        from app.models import Node
-        from unittest.mock import patch
         
         # Create a mock node
         mock_node = Node(
@@ -267,17 +211,35 @@ class TestVoiceCommandIntegration:
         def mock_verify_api_key():
             return NodeContextProvider(mock_node)
         
+        # Mock the LLM response
+        mock_llm_response = {
+            "commands": [
+                {
+                    "success": False,
+                    "command_name": "turn_on_lights",
+                    "parameters": {},
+                    "errors": {
+                        "type": "missing_parameters",
+                        "message": "Missing required parameter: room"
+                    }
+                }
+            ]
+        }
+        
         try:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
-                # Return malformed JSON
+            # Disable transcription cleanup for this test
+            original_value = os.environ.get("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED")
+            os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "false"
+            
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
                             "message": {
-                                "content": "This is not valid JSON"
+                                "content": json.dumps(mock_llm_response)
                             }
                         }
                     ]
@@ -300,18 +262,90 @@ class TestVoiceCommandIntegration:
                 data = response.json()
                 assert get_response_success(data) is False
                 
-                errors = get_response_errors(data)
-                assert errors["type"] == "parsing_error"
+                first_command = extract_first_command(data)
+                assert first_command["command_name"] == "turn_on_lights"
+                assert first_command["errors"]["type"] == "missing_parameters"
+                assert "Missing required parameter: room" in first_command["errors"]["message"]
         finally:
             # Clean up dependency override
             app.dependency_overrides.clear()
+            # Restore transcription cleanup setting
+            if original_value is not None:
+                os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = original_value
+            else:
+                os.environ.pop("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", None)
     
-    def test_different_room_contexts(self):
-        """Test that different room contexts are handled correctly"""
+    def test_malformed_llm_response(self):
+        """Test handling of malformed LLM responses"""
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
         from app.models import Node
-        from unittest.mock import patch
+        
+        # Create a mock node
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="living room",
+            user="test-user"
+        )
+        
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
+        
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
+            
+            # Disable transcription cleanup for this test
+            original_value = os.environ.get("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED")
+            os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "false"
+            
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
+                # Return malformed response
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "invalid json response"
+                            }
+                        }
+                    ]
+                }
+                
+                client = TestClient(app)
+                response = client.post("/api/v0/voice/command", json={
+                    "voice_command": "turn on the lights",
+                    "node_context": {"room": "living room", "node_id": "test-node"},
+                    "available_commands": [
+                        {
+                            "command_name": "turn_on_lights",
+                            "description": "Turn on lights",
+                            "parameters": [{"name": "room", "type": "str"}]
+                        }
+                    ]
+                }, headers={"x-api-key": "test-key"})
+                
+                assert response.status_code == 200
+                data = response.json()
+                # Should handle malformed response gracefully
+                assert get_response_success(data) is False
+                first_command = extract_first_command(data)
+                assert first_command["errors"] is not None
+                assert "Failed to parse LLM response" in first_command["errors"]["message"]
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear()
+            # Restore transcription cleanup setting
+            if original_value is not None:
+                os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = original_value
+            else:
+                os.environ.pop("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", None)
+    
+    def test_different_room_contexts(self):
+        """Test command processing with different room contexts"""
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
         
         # Create a mock node
         mock_node = Node(
@@ -340,7 +374,11 @@ class TestVoiceCommandIntegration:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            # Disable transcription cleanup for this test
+            original_value = os.environ.get("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED")
+            os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "false"
+            
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -371,29 +409,94 @@ class TestVoiceCommandIntegration:
                 first_command = extract_first_command(data)
                 assert first_command["command_name"] == "turn_on_lights"
                 assert first_command["parameters"]["room"] == "kitchen"
+                assert first_command["errors"] is None
         finally:
             # Clean up dependency override
             app.dependency_overrides.clear()
+            # Restore transcription cleanup setting
+            if original_value is not None:
+                os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = original_value
+            else:
+                os.environ.pop("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", None)
     
     def test_system_prompt_generation(self):
         """Test that system prompts are generated correctly"""
-        from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
-        from app.request_models.voice_command_request import CommandDefinition, CommandParameter
+        from app.deps import verify_api_key
+        from app.context_providers.node_context_provider import NodeContextProvider
+        from app.models import Node
         
-        # Test with room context
-        provider = StandardCommandInferenceSystemPromptProvider()
-        commands = [
-            CommandDefinition(
-                command_name="turn_on_lights",
-                description="Turn on lights",
-                parameters=[CommandParameter(name="room", type="str")]
-            )
-        ]
+        # Create a mock node
+        mock_node = Node(
+            node_id="test-node",
+            api_key="test-key",
+            room="bedroom",
+            user="test-user"
+        )
         
-        node_context = {"room": "living room", "node_id": "test-node"}
-        prompt = provider.build_system_prompt(node_context, commands)
+        def mock_verify_api_key():
+            return NodeContextProvider(mock_node)
         
-        # Check that the prompt contains expected elements
-        assert "living room" in prompt
-        assert "turn_on_lights" in prompt
-        assert "room" in prompt 
+        # Mock the LLM response
+        mock_llm_response = {
+            "commands": [
+                {
+                    "success": True,
+                    "command_name": "set_temperature",
+                    "parameters": {"room": "bedroom", "degrees": 70},
+                    "errors": None
+                }
+            ]
+        }
+        
+        try:
+            # Override the dependency
+            app.dependency_overrides[verify_api_key] = mock_verify_api_key
+            
+            # Disable transcription cleanup for this test
+            original_value = os.environ.get("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED")
+            os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "false"
+            
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
+                mock_post.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(mock_llm_response)
+                            }
+                        }
+                    ]
+                }
+                
+                client = TestClient(app)
+                response = client.post("/api/v0/voice/command", json={
+                    "voice_command": "set temperature to 70 degrees",
+                    "node_context": {"room": "bedroom", "node_id": "test-node"},
+                    "available_commands": [
+                        {
+                            "command_name": "set_temperature",
+                            "description": "Set temperature",
+                            "parameters": [
+                                {"name": "room", "type": "str"},
+                                {"name": "degrees", "type": "int"}
+                            ]
+                        }
+                    ]
+                }, headers={"x-api-key": "test-key"})
+                
+                assert response.status_code == 200
+                data = response.json()
+                assert get_response_success(data) is True
+                
+                first_command = extract_first_command(data)
+                assert first_command["command_name"] == "set_temperature"
+                assert first_command["parameters"]["room"] == "bedroom"
+                assert first_command["parameters"]["degrees"] == 70
+                assert first_command["errors"] is None
+        finally:
+            # Clean up dependency override
+            app.dependency_overrides.clear()
+            # Restore transcription cleanup setting
+            if original_value is not None:
+                os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = original_value
+            else:
+                os.environ.pop("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", None) 

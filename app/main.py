@@ -351,11 +351,20 @@ async def handle_voice(
         else:
             logger.info("⏭️ Transcription cleanup disabled, using original command")
 
-        # Step 2: Command inference
-        # Build system prompt with optional voice command for preprocessing
+        # Step 2: Command preprocessing (if enabled)
+        commands_to_use = request.available_commands
+        if os.getenv("COMMAND_PREPROCESSING_ENABLED", "false").lower() == "true" and cleaned_voice_command:
+            from app.context_providers.command_filter import CommandFilter
+            command_filter = CommandFilter()
+            filtered_commands, stats = command_filter.extract_relevant_commands(cleaned_voice_command, request.available_commands)
+            logger.info(f"Command filtering: {stats['total_commands']} -> {stats['filtered_commands']} commands ({stats['reduction_percentage']:.1f}% reduction, ~{stats['tokens_saved']} tokens saved)")
+            commands_to_use = filtered_commands
+
+        # Step 3: Command inference
+        # Build system prompt with preprocessed commands
         system_prompt = system_prompt_provider.build_system_prompt(
             request.node_context, 
-            request.available_commands, 
+            commands_to_use, 
             cleaned_voice_command
         )
 

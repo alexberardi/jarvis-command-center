@@ -1,10 +1,12 @@
 import pytest
 import json
+import os
 from fastapi.testclient import TestClient
 from app.main import app
 from app.models import Node
 from app.deps import get_db
 from sqlalchemy.orm import Session
+from unittest.mock import patch, AsyncMock
 
 
 def extract_first_command(data):
@@ -39,7 +41,6 @@ class TestVoiceCommandDatabase:
         """Test authentication with real database node"""
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
-        from unittest.mock import patch
         
         # Create a real node in the database using the test session
         test_node = Node(
@@ -71,7 +72,7 @@ class TestVoiceCommandDatabase:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -161,7 +162,11 @@ class TestVoiceCommandDatabase:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            # Disable transcription cleanup for this test
+            original_value = os.environ.get("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED")
+            os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = "false"
+            
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -209,6 +214,11 @@ class TestVoiceCommandDatabase:
         finally:
             # Clean up dependency override
             app.dependency_overrides.clear()
+            # Restore transcription cleanup setting
+            if original_value is not None:
+                os.environ["JARVIS_TRANSCRIPTION_CLEANUP_ENABLED"] = original_value
+            else:
+                os.environ.pop("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", None)
             # Clean up database
             test_db.delete(test_node)
             test_db.commit()
@@ -217,7 +227,6 @@ class TestVoiceCommandDatabase:
         """Test command processing with parameters using database node"""
         from app.deps import verify_api_key
         from app.context_providers.node_context_provider import NodeContextProvider
-        from unittest.mock import patch
         
         # Create a real node in the database
         test_node = Node(
@@ -249,7 +258,7 @@ class TestVoiceCommandDatabase:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -341,7 +350,7 @@ class TestVoiceCommandDatabase:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -428,7 +437,7 @@ class TestVoiceCommandDatabase:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
