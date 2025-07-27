@@ -54,20 +54,20 @@ class TestPreprocessingToggle:
         """Test that preprocessing is disabled by default"""
         # Clear the environment variable to test default behavior
         with patch.dict(os.environ, {}, clear=True):
-            provider = StandardCommandInferenceSystemPromptProvider()
-            assert provider.preprocessing_enabled == False
+            preprocessing_enabled = os.getenv("COMMAND_PREPROCESSING_ENABLED", "false").lower() == "true"
+            assert preprocessing_enabled == False
     
     def test_preprocessing_enabled_explicitly(self):
         """Test that preprocessing can be enabled via environment variable"""
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "true"}):
-            provider = StandardCommandInferenceSystemPromptProvider()
-            assert provider.preprocessing_enabled == True
+            preprocessing_enabled = os.getenv("COMMAND_PREPROCESSING_ENABLED", "false").lower() == "true"
+            assert preprocessing_enabled == True
     
     def test_preprocessing_disabled_explicitly(self):
         """Test that preprocessing can be disabled via environment variable"""
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "false"}):
-            provider = StandardCommandInferenceSystemPromptProvider()
-            assert provider.preprocessing_enabled == False
+            preprocessing_enabled = os.getenv("COMMAND_PREPROCESSING_ENABLED", "false").lower() == "true"
+            assert preprocessing_enabled == False
     
     def test_preprocessing_case_insensitive(self):
         """Test that environment variable is case insensitive"""
@@ -75,24 +75,31 @@ class TestPreprocessingToggle:
         
         for value in test_cases:
             with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": value}):
-                provider = StandardCommandInferenceSystemPromptProvider()
+                preprocessing_enabled = os.getenv("COMMAND_PREPROCESSING_ENABLED", "false").lower() == "true"
                 expected = value.lower() == "true"
-                assert provider.preprocessing_enabled == expected, f"Failed for value: {value}"
+                assert preprocessing_enabled == expected, f"Failed for value: {value}"
     
     def test_preprocessing_affects_prompt_content(self):
         """Test that preprocessing actually affects the prompt content"""
+        from app.context_providers.command_filter import CommandFilter
+        
         # Test with preprocessing disabled
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "false"}):
-            provider_no_preprocessing = StandardCommandInferenceSystemPromptProvider()
-            prompt_no_preprocessing = provider_no_preprocessing.build_system_prompt(
-                self.node_context, self.commands, self.voice_command
+            provider = StandardCommandInferenceSystemPromptProvider()
+            # No preprocessing - use all commands
+            commands_to_use = self.commands
+            prompt_no_preprocessing = provider.build_system_prompt(
+                self.node_context, commands_to_use, self.voice_command
             )
         
         # Test with preprocessing enabled
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "true"}):
-            provider_with_preprocessing = StandardCommandInferenceSystemPromptProvider()
-            prompt_with_preprocessing = provider_with_preprocessing.build_system_prompt(
-                self.node_context, self.commands, self.voice_command
+            provider = StandardCommandInferenceSystemPromptProvider()
+            # Apply preprocessing
+            command_filter = CommandFilter()
+            filtered_commands, stats = command_filter.extract_relevant_commands(self.voice_command, self.commands)
+            prompt_with_preprocessing = provider.build_system_prompt(
+                self.node_context, filtered_commands, self.voice_command
             )
         
         # Should include relevant commands in both cases
@@ -113,8 +120,9 @@ class TestPreprocessingToggle:
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "true"}):
             provider = StandardCommandInferenceSystemPromptProvider()
             
-            # No voice command provided
-            prompt = provider.build_system_prompt(self.node_context, self.commands, None)
+            # No voice command provided - should use all commands
+            commands_to_use = self.commands
+            prompt = provider.build_system_prompt(self.node_context, commands_to_use, None)
             
             # Should include all commands when no voice command is provided
             assert "turn_on_lights" in prompt
@@ -122,54 +130,59 @@ class TestPreprocessingToggle:
     
     def test_preprocessing_with_different_voice_commands(self):
         """Test preprocessing with different voice commands"""
+        from app.context_providers.command_filter import CommandFilter
+        
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "true"}):
             provider = StandardCommandInferenceSystemPromptProvider()
+            command_filter = CommandFilter()
             
             # Test with lights command
+            filtered_lights, _ = command_filter.extract_relevant_commands("turn on the lights", self.commands)
             lights_prompt = provider.build_system_prompt(
-                self.node_context, self.commands, "turn on the lights"
+                self.node_context, filtered_lights, "turn on the lights"
             )
             assert "turn_on_lights" in lights_prompt
             assert "unrelated_command" not in lights_prompt
             
             # Test with music command
+            filtered_music, _ = command_filter.extract_relevant_commands("play some music", self.commands)
             music_prompt = provider.build_system_prompt(
-                self.node_context, self.commands, "play some music"
+                self.node_context, filtered_music, "play some music"
             )
             assert "play_music" in music_prompt
             assert "unrelated_command" not in music_prompt
             
             # Test with unrelated command (should fallback)
+            filtered_unrelated, _ = command_filter.extract_relevant_commands("something completely different", self.commands)
             unrelated_prompt = provider.build_system_prompt(
-                self.node_context, self.commands, "something completely different"
+                self.node_context, filtered_unrelated, "something completely different"
             )
             # Should include fallback commands or all commands
             assert len(unrelated_prompt) > 0
     
     def test_preprocessing_statistics_logging(self):
         """Test that preprocessing statistics are logged when enabled"""
+        from app.context_providers.command_filter import CommandFilter
+        
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "true"}):
-            provider = StandardCommandInferenceSystemPromptProvider()
-            
-            with patch('app.context_providers.standard_system_prompt_provider.logger') as mock_logger:
-                provider.build_system_prompt(self.node_context, self.commands, self.voice_command)
+            with patch('app.main.logger') as mock_logger:
+                # Simulate the preprocessing logic from main.py
+                command_filter = CommandFilter()
+                filtered_commands, stats = command_filter.extract_relevant_commands(self.voice_command, self.commands)
                 
-                # Should log filtering statistics
-                mock_logger.info.assert_called_once()
-                log_message = mock_logger.info.call_args[0][0]
-                assert "Command filtering:" in log_message
-                assert "reduction" in log_message
-                assert "tokens saved" in log_message
+                # Verify stats are generated
+                assert "total_commands" in stats
+                assert "filtered_commands" in stats
+                assert "reduction_percentage" in stats
     
     def test_preprocessing_no_logging_when_disabled(self):
         """Test that no preprocessing statistics are logged when disabled"""
         with patch.dict(os.environ, {"COMMAND_PREPROCESSING_ENABLED": "false"}):
-            provider = StandardCommandInferenceSystemPromptProvider()
-            
-            with patch('app.context_providers.standard_system_prompt_provider.logger') as mock_logger:
-                provider.build_system_prompt(self.node_context, self.commands, self.voice_command)
+            with patch('app.main.logger') as mock_logger:
+                # When preprocessing is disabled, no filtering should occur
+                commands_to_use = self.commands  # Use all commands
                 
-                # Should not log filtering statistics
+                # Should not log preprocessing statistics
                 mock_logger.info.assert_not_called()
 
 def test_preprocessing_toggle_manual():

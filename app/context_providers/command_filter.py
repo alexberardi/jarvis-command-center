@@ -18,7 +18,19 @@ class CommandFilter:
         - <70%: All commands (no filtering)
         """
         if not available_commands:
-            return available_commands, {"total_commands": 0, "filtered_commands": 0, "reduction_percentage": 0}
+            return available_commands, {
+                "total_commands": 0, 
+                "filtered_commands": 0, 
+                "reduction_percentage": 0,
+                "tokens_saved": 0,
+                "has_multiple_commands": False,
+                "strong_matches": 0,
+                "fuzzy_matches": 0,
+                "regex_matches": 0,
+                "fuzzy_match_details": [],
+                "max_fuzzy_score": 0,
+                "confidence_tier": "unknown"
+            }
         
         voice_lower = voice_command.lower()
         

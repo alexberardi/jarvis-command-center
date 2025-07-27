@@ -1,0 +1,176 @@
+[
+  {
+    "request_id": "Perf-1-05",
+    "timestamp": "2025-07-26T23:33:04.088558",
+    "voice_command": "lock front door",
+    "node_context": {
+      "room": "entryway",
+      "node_id": "perf-5"
+    },
+    "provider_name": "JARVIS",
+    "response_time_ms": 1044.6200370788574,
+    "total_latency_ms": 1044.6200370788574,
+    "input_tokens": 281,
+    "output_tokens": 17,
+    "total_tokens": 298,
+    "system_prompt_tokens": 278,
+    "user_prompt_tokens": 3,
+    "estimated_cost_usd": 0.00945,
+    "response_success": true,
+    "json_parse_success": true,
+    "command_extraction_success": true,
+    "expected_command_match": false,
+    "raw_response": "{\"c\":[{\"s\":true,\"n\":\"lock_door\",\"p\":{\"door\":\"front door\"},\"e\":null}]}",
+    "parsed_response": {
+      "c": [
+        {
+          "s": true,
+          "n": "lock_door",
+          "p": {
+            "door": "front door"
+          },
+          "e": null
+        }
+      ]
+    },
+    "extracted_commands": [
+      {
+        "c": [
+          {
+            "s": true,
+            "n": "lock_door",
+            "p": {
+              "door": "front door"
+            },
+            "e": null
+          }
+        ]
+      }
+    ],
+    "errors": [],
+    "warnings": [
+      "Command filtering: 44 -> 10 commands (77.3% reduction)"
+    ],
+    "system_prompt_length": 1114,
+    "user_prompt_length": 15,
+    "response_length": 69,
+    "tokens_per_second": 285.271188970602,
+    "cost_per_request_usd": 0.00945
+  },
+  {
+    "request_id": "Perf-2-05",
+    "timestamp": "2025-07-26T23:33:11.535420",
+    "voice_command": "lock front door",
+    "node_context": {
+      "room": "entryway",
+      "node_id": "perf-5"
+    },
+    "provider_name": "JARVIS",
+    "response_time_ms": 1051.9390106201172,
+    "total_latency_ms": 1051.9390106201172,
+    "input_tokens": 281,
+    "output_tokens": 17,
+    "total_tokens": 298,
+    "system_prompt_tokens": 278,
+    "user_prompt_tokens": 3,
+    "estimated_cost_usd": 0.00945,
+    "response_success": true,
+    "json_parse_success": true,
+    "command_extraction_success": true,
+    "expected_command_match": false,
+    "raw_response": "{\"c\":[{\"s\":true,\"n\":\"lock_door\",\"p\":{\"door\":\"front door\"},\"e\":null}]}",
+    "parsed_response": {
+      "c": [
+        {
+          "s": true,
+          "n": "lock_door",
+          "p": {
+            "door": "front door"
+          },
+          "e": null
+        }
+      ]
+    },
+    "extracted_commands": [
+      {
+        "c": [
+          {
+            "s": true,
+            "n": "lock_door",
+            "p": {
+              "door": "front door"
+            },
+            "e": null
+          }
+        ]
+      }
+    ],
+    "errors": [],
+    "warnings": [
+      "Command filtering: 44 -> 10 commands (77.3% reduction)"
+    ],
+    "system_prompt_length": 1114,
+    "user_prompt_length": 15,
+    "response_length": 69,
+    "tokens_per_second": 283.28638541917866,
+    "cost_per_request_usd": 0.00945
+  },
+  {
+    "request_id": "Perf-3-05",
+    "timestamp": "2025-07-26T23:33:18.811817",
+    "voice_command": "lock front door",
+    "node_context": {
+      "room": "entryway",
+      "node_id": "perf-5"
+    },
+    "provider_name": "JARVIS",
+    "response_time_ms": 1842.3540592193604,
+    "total_latency_ms": 1842.3540592193604,
+    "input_tokens": 281,
+    "output_tokens": 17,
+    "total_tokens": 298,
+    "system_prompt_tokens": 278,
+    "user_prompt_tokens": 3,
+    "estimated_cost_usd": 0.00945,
+    "response_success": true,
+    "json_parse_success": true,
+    "command_extraction_success": true,
+    "expected_command_match": false,
+    "raw_response": "{\"c\":[{\"s\":true,\"n\":\"lock_door\",\"p\":{\"door\":\"front door\"},\"e\":null}]}",
+    "parsed_response": {
+      "c": [
+        {
+          "s": true,
+          "n": "lock_door",
+          "p": {
+            "door": "front door"
+          },
+          "e": null
+        }
+      ]
+    },
+    "extracted_commands": [
+      {
+        "c": [
+          {
+            "s": true,
+            "n": "lock_door",
+            "p": {
+              "door": "front door"
+            },
+            "e": null
+          }
+        ]
+      }
+    ],
+    "errors": [],
+    "warnings": [
+      "Command filtering: 44 -> 10 commands (77.3% reduction)"
+    ],
+    "system_prompt_length": 1114,
+    "user_prompt_length": 15,
+    "response_length": 69,
+    "tokens_per_second": 161.7495825564974,
+    "cost_per_request_usd": 0.00945
+  }
+]

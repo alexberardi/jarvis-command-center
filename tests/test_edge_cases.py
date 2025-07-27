@@ -2,6 +2,7 @@ import pytest
 import json
 from fastapi.testclient import TestClient
 from app.main import app
+from unittest.mock import patch, AsyncMock
 
 
 def extract_first_command(data):
@@ -70,7 +71,7 @@ class TestEdgeCases:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -141,7 +142,7 @@ class TestEdgeCases:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -210,7 +211,7 @@ class TestEdgeCases:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -272,7 +273,7 @@ class TestEdgeCases:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -341,7 +342,7 @@ class TestEdgeCases:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 mock_post.return_value = {
                     "choices": [
                         {
@@ -398,7 +399,7 @@ class TestEdgeCases:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 # Return malformed JSON
                 mock_post.return_value = {
                     "choices": [
@@ -455,7 +456,7 @@ class TestEdgeCases:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 # Return empty response
                 mock_post.return_value = {
                     "choices": [
@@ -513,7 +514,7 @@ class TestEdgeCases:
             # Override the dependency
             app.dependency_overrides[verify_api_key] = mock_verify_api_key
             
-            with patch('app.main.post') as mock_post:
+            with patch('app.main.post', new_callable=AsyncMock) as mock_post:
                 # Simulate timeout
                 mock_post.side_effect = httpx.TimeoutException("Request timed out")
                 
