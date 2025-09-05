@@ -3,7 +3,8 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, ConfigDict
 from .models import Node
 from .deps import get_db, verify_admin_key
-from typing import List
+from .core.conversation_cache import conversation_cache
+from typing import List, Optional
 import logging
 
 
@@ -28,9 +29,9 @@ class NodeCreate(BaseModel):
     voice_mode: str = "brief"
 
 class NodeUpdate(BaseModel):
-    room: str | None = None
-    user: str | None = None
-    voice_mode: str | None = None
+    room: Optional[str] = None
+    user: Optional[str] = None
+    voice_mode: Optional[str] = None
 
 
 
@@ -79,3 +80,23 @@ def update_node(node_id: str, payload: NodeUpdate, db: Session = Depends(get_db)
     db.refresh(node)
     logger.info(f"Node updated: {node.node_id}")
     return node
+
+
+@router.get("/cache/stats")
+def get_cache_stats():
+    """Get conversation cache statistics."""
+    return conversation_cache.stats()
+
+
+@router.post("/cache/clear")
+def clear_cache():
+    """Clear all expired conversation cache entries."""
+    cleared_count = conversation_cache.clear_expired()
+    return {"message": f"Cleared {cleared_count} expired entries", "cleared_count": cleared_count}
+
+
+@router.delete("/cache/{conversation_id}")
+def remove_conversation(conversation_id: str):
+    """Remove a specific conversation from the cache."""
+    conversation_cache.remove(conversation_id)
+    return {"message": f"Removed conversation {conversation_id[:8]}... from cache"}

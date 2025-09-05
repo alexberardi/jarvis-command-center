@@ -3,7 +3,7 @@
 Example usage of the new keyword-based command filtering system
 """
 import os
-from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
+from app.context_providers.standard_command_inference_prompt_provider import StandardCommandInferenceSystemPromptProvider
 from app.request_models.voice_command_request import CommandDefinition, CommandParameter
 
 def create_example_commands():

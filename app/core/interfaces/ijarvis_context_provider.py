@@ -18,6 +18,15 @@ class ICommandInferenceSystemPromptProvider(ABC):
     def build_system_prompt(self, node_context: Dict[str, str], available_commands: list[CommandDefinition], voice_command: Optional[str] = None) -> str:
         ...
 
+class IParameterInferenceSystemPromptProvider(ABC):
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        ...
+
+    @abstractmethod
+    def build_parameter_inference(self, node_context: Dict[str, str], selected_command: CommandDefinition, voice_command: Optional[str] = None) -> str:
+        ...
 
 class ITranscriptionCleanupSystemPromptProvider(ABC):
     @property

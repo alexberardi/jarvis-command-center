@@ -89,3 +89,5 @@ temp_*.py
 # Logs
 logs/
 *.log
+
+.continue/

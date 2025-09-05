@@ -15,9 +15,15 @@ class SingleCommandResponse(BaseModel):
     parameters: Optional[Dict[str, Any]] = None
     errors: Optional[VoiceCommandError] = None
 
+class RequestInformation(BaseModel):
+    """Information about the original request"""
+    voice_command: str
+    conversation_id: Optional[str] = None
+
 class VoiceCommandResponse(BaseModel):
     """Response that can contain one or multiple commands"""
     commands: List[SingleCommandResponse]
+    request_information: Optional[RequestInformation] = None
     
     @property
     def success(self) -> bool:
