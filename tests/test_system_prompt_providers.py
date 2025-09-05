@@ -1,7 +1,7 @@
 import pytest
 import os
 from unittest.mock import patch
-from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
+from app.context_providers.standard_command_inference_prompt_provider import StandardCommandInferenceSystemPromptProvider
 from app.context_providers.custom.dummy_custom_system_prompt_provider import DummyCustomSystemPromptProvider
 from app.deps import get_command_inference_system_prompt_provider
 from app.request_models.voice_command_request import CommandDefinition, CommandParameter

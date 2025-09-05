@@ -9,4 +9,5 @@ httpx
 websockets
 debugpy
 rapidfuzz
-psycopg2-binary 
+psycopg2-binary
+pytz

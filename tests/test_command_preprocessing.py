@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import patch
 
 from app.context_providers.command_filter import CommandFilter
-from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
+from app.context_providers.standard_command_inference_prompt_provider import StandardCommandInferenceSystemPromptProvider
 from app.request_models.voice_command_request import CommandDefinition, CommandParameter
 
 
@@ -329,7 +329,7 @@ class TestIntegrationWithExistingSystem:
     def test_interface_compatibility(self):
         """Test that the updated interface is compatible"""
         from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider
-        from app.context_providers.standard_system_prompt_provider import StandardCommandInferenceSystemPromptProvider
+        from app.context_providers.standard_command_inference_prompt_provider import StandardCommandInferenceSystemPromptProvider
         
         provider = StandardCommandInferenceSystemPromptProvider()
         assert isinstance(provider, ICommandInferenceSystemPromptProvider)

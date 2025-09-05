@@ -807,7 +807,6 @@ class TestLLMIntegration:
                         assert expected_cmd in returned_commands, f"Expected {expected_cmd} in {returned_commands}"
 
 
-@pytest.mark.slow
 class TestLLMPerformance:
     """Performance tests for LLM integration"""
     
