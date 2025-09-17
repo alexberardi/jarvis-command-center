@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 class CommandParameter(BaseModel):
     name: str
@@ -8,16 +8,21 @@ class CommandParameter(BaseModel):
     description: Optional[str] = None
     enum_values: Optional[List[str]] = None  # Enum values for this parameter
 
+class CommandExample(BaseModel):
+    voice_command: str
+    expected_parameters: Dict[str, Any]
+    is_primary: bool = False
+
 class CommandDefinition(BaseModel):
     command_name: str
     description: str
     parameters: List[CommandParameter]
     keywords: Optional[List[str]] = None  # Keywords for command filtering
     enum_values: Optional[List[str]] = None  # Enum values for command filtering
-    example: Optional[str] = None  # Example usage for the LLM to follow
+    examples: Optional[List[CommandExample]] = None  # Structured examples format
     rules: Optional[List[str]] = None  # General rules for this command
     critical_rules: Optional[List[str]] = None  # Critical rules that must be followed
 
 class VoiceCommandRequest(BaseModel):
     voice_command: str
-    conversation_id: Optional[str] = None
+    conversation_id: str  # Required in new architecture

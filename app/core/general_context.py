@@ -70,12 +70,12 @@ def generate_date_context_object(timezone_str: str = None) -> dict:
             else:
                 # Already timezone-aware - just convert to UTC
                 last_night_utc = last_night.astimezone(pytz.UTC)
-            last_night_iso = last_night_utc.isoformat()
+            last_night_iso = last_night_utc.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         except Exception as e:
             logger.error(f"❌ Error calculating last_night UTC: {e}")
-            last_night_iso = last_night.isoformat()
+            last_night_iso = last_night.astimezone(pytz.UTC).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
     else:
-        last_night_iso = last_night.isoformat()
+        last_night_iso = last_night.astimezone(pytz.UTC).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
     
     # Calculate weekend dates (Saturday and Sunday)
     # now.weekday() returns 0 for Monday, 5 for Saturday, 6 for Sunday
@@ -153,7 +153,7 @@ def generate_date_context_object(timezone_str: str = None) -> dict:
             "date": now.strftime("%A, %B %d %Y"),
             "date_iso": now.strftime("%Y-%m-%d"),
             "time": now.strftime("%I:%M %p"),
-            "datetime": now.isoformat(),
+            "datetime": now.astimezone(pytz.UTC).replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
             "weekday": now.strftime("%A").lower(),
             "weekday_number": now.weekday(),
             "utc_start_of_day": get_utc_start_of_day(now, timezone_str)
@@ -327,11 +327,91 @@ def generate_date_context_object(timezone_str: str = None) -> dict:
             "user_timezone": timezone_str,
             "current_timezone": str(now.tzinfo) if now.tzinfo else "local",
             "is_dst": now.dst() != timedelta(0) if now.tzinfo else None
-        }
+        },
+        "time_expressions": _generate_time_expressions(now, timezone_str)
     }
     
     logger.info(f"📅 Generated comprehensive date context object with {len(date_context)} main categories")
     return date_context
+
+def _generate_time_expressions(now: datetime, timezone_str: str = None) -> dict:
+    """
+    Generate pre-calculated time expressions for common natural language times.
+    This eliminates the need for complex parsing logic in training data generation.
+    
+    Args:
+        now: Current datetime in the user's timezone
+        timezone_str: Optional timezone string for UTC conversion
+        
+    Returns:
+        dict: Mapping of time expressions to UTC ISO timestamps
+    """
+    def to_utc_iso(dt: datetime) -> str:
+        """Convert datetime to UTC ISO string."""
+        if timezone_str and dt.tzinfo is None:
+            # Localize to user timezone first, then convert to UTC
+            user_tz = pytz.timezone(timezone_str)
+            dt = user_tz.localize(dt)
+        return dt.astimezone(pytz.UTC).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+    
+    # Get base dates
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow = today + timedelta(days=1)
+    yesterday = today - timedelta(days=1)
+    
+    time_expressions = {}
+    
+    # Natural language times for today
+    time_expressions.update({
+        'this morning': to_utc_iso(today.replace(hour=7, minute=0)),
+        'this afternoon': to_utc_iso(today.replace(hour=14, minute=0)),
+        'this evening': to_utc_iso(today.replace(hour=19, minute=0)),
+        'tonight': to_utc_iso(today.replace(hour=20, minute=0)),
+        'during lunch': to_utc_iso(today.replace(hour=12, minute=0)),
+        'at breakfast': to_utc_iso(today.replace(hour=8, minute=0)),
+        'at dinner': to_utc_iso(today.replace(hour=18, minute=0)),
+        'at noon': to_utc_iso(today.replace(hour=12, minute=0)),
+        'at midnight': to_utc_iso(today.replace(hour=0, minute=0)),
+    })
+    
+    # Natural language times for tomorrow
+    time_expressions.update({
+        'tomorrow morning': to_utc_iso(tomorrow.replace(hour=7, minute=0)),
+        'tomorrow afternoon': to_utc_iso(tomorrow.replace(hour=14, minute=0)),
+        'tomorrow evening': to_utc_iso(tomorrow.replace(hour=19, minute=0)),
+        'tomorrow night': to_utc_iso(tomorrow.replace(hour=20, minute=0)),
+    })
+    
+    # Natural language times for yesterday
+    time_expressions.update({
+        'yesterday morning': to_utc_iso(yesterday.replace(hour=7, minute=0)),
+        'yesterday afternoon': to_utc_iso(yesterday.replace(hour=14, minute=0)),
+        'yesterday evening': to_utc_iso(yesterday.replace(hour=19, minute=0)),
+        'last night': to_utc_iso(yesterday.replace(hour=20, minute=0)),
+    })
+    
+    # Exact times - 12 hour format
+    for hour in range(1, 13):
+        # AM times
+        am_hour = hour if hour != 12 else 0
+        time_expressions[f'at {hour}am'] = to_utc_iso(today.replace(hour=am_hour, minute=0))
+        
+        # PM times  
+        pm_hour = hour if hour == 12 else hour + 12
+        time_expressions[f'at {hour}pm'] = to_utc_iso(today.replace(hour=pm_hour, minute=0))
+        
+        # Half hours
+        time_expressions[f'at {hour}:30am'] = to_utc_iso(today.replace(hour=am_hour, minute=30))
+        time_expressions[f'at {hour}:30pm'] = to_utc_iso(today.replace(hour=pm_hour, minute=30))
+        
+        # Quarter hours for common times
+        if hour in [9, 10, 11, 1, 2, 3]:
+            time_expressions[f'at {hour}:15am'] = to_utc_iso(today.replace(hour=am_hour, minute=15))
+            time_expressions[f'at {hour}:45am'] = to_utc_iso(today.replace(hour=am_hour, minute=45))
+            time_expressions[f'at {hour}:15pm'] = to_utc_iso(today.replace(hour=pm_hour, minute=15))
+            time_expressions[f'at {hour}:45pm'] = to_utc_iso(today.replace(hour=pm_hour, minute=45))
+    
+    return time_expressions
 
 def get_general_context(timezone_str: str = None) -> str:
     """

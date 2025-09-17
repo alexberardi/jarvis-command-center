@@ -20,7 +20,8 @@ async def post(
     # Merge with user headers (user overrides take precedence)
     merged_headers = {**default_headers, **(headers or {})}
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    # Use individual HTTP client for each request (like before) but disable HTTP/2
+    async with httpx.AsyncClient(timeout=timeout, http2=False) as client:
         response = await client.post(
             url,
             json=json_data,
@@ -43,7 +44,8 @@ async def get(
     # Merge with user headers (user overrides take precedence)
     merged_headers = {**default_headers, **(headers or {})}
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    # Use individual HTTP client for each request (like before) but disable HTTP/2
+    async with httpx.AsyncClient(timeout=timeout, http2=False) as client:
         response = await client.get(
             url,
             headers=merged_headers
