@@ -14,12 +14,13 @@ from typing import Optional
 from fastapi import Header, HTTPException, Depends
 from sqlalchemy.orm import Session
 
-from db import get_session_local
-from models import Node
+from app.db import get_session_local
+from app.models import Node
 from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider, ITranscriptionCleanupSystemPromptProvider, IParameterInferenceSystemPromptProvider
 from app.context_providers.standard_command_inference_prompt_provider import StandardCommandInferenceSystemPromptProvider
 from app.context_providers.standard_parameter_inference_system_prompt_provider import StandardParameterInferenceSystemPromptProvider
 from app.context_providers.no_op_transcription_cleanup_provider import NoOpTranscriptionCleanupProvider
+from app.core.model_service import ModelService
 
 
 from dotenv import load_dotenv
@@ -144,4 +145,19 @@ def get_transcription_cleanup_system_prompt_provider() -> ITranscriptionCleanupS
                         return instance
     return NoOpTranscriptionCleanupProvider()
 
+
+def get_model_service() -> ModelService:
+    """
+    Get the configured model service instance.
+    
+    Uses JARVIS_MODEL_INTERFACE environment variable to determine which model to use.
+    Defaults to BASE_MODEL if not specified.
+    
+    Available models:
+    - BASE_MODEL: Reference implementation showing full system complexity
+    - JarvisLlama3B: Fine-tuned Llama 3.2 3B with single-shot inference  
+    - JarvisParallelLlama3B: Llama 3.2 3B with parallel double-shot inference
+    - Custom models can be added to app/core/models/custom/
+    """
+    return ModelService()
 

@@ -50,7 +50,7 @@ GENERAL RULES FOR COMMAND INFERENCE:
 - Only extract the command name, do not attempt to extract parameters
 - Choose only from the available commands listed below, if there is no match, return the command name as null and "e": {{"type": "no_command_match"}}
 
-AVAILABLE COMMANDS:
+AVAILABLE COMMANDS (You MUST respond with exactly one of these command names or null):
 {available_commands_str}
 
 

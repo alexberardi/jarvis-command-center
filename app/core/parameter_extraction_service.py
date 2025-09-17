@@ -465,11 +465,16 @@ Remember: ONLY JSON, no explanations. Look up the EXACT mapping value."""
         if hasattr(selected_command, 'critical_rules') and selected_command.critical_rules:
             critical_rules_str += f"\n\nCRITICAL RULES:\n" + "\n".join(f"- {rule}" for rule in selected_command.critical_rules)
         
-        # Build examples
-        example = selected_command.example if hasattr(selected_command, 'example') else None
+        # Build examples using structured format
         examples_str = ""
-        if example:
-            examples_str = f"\n\nEXAMPLES:\n{example}"
+        if hasattr(selected_command, 'examples') and selected_command.examples:
+            import json
+            examples_list = []
+            for example in selected_command.examples:
+                # Format the expected parameters as JSON output format
+                params_json = json.dumps(example.expected_parameters) if example.expected_parameters else "{}"
+                examples_list.append(f'Input: "{example.voice_command}"\nOutput: {{"s": true, "p": {params_json}, "e": null}}')
+            examples_str = f"\n\nEXAMPLES:\n" + "\n\n".join(examples_list)
         
         # Build the simple command details message
         command_details = f"""COMMAND DETAILS:
