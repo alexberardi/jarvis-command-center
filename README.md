@@ -38,6 +38,13 @@ export DB_TYPE=postgres
 export DB_URL=postgresql://username:password@localhost:5432/jarvis_command_center
 ```
 
+#### PostgreSQL (Docker container connecting to host DB)
+If the API container should connect to a PostgreSQL instance running on your host:
+```bash
+export DB_TYPE=postgres
+export DB_URL=postgresql://postgres:postgres@host.docker.internal:5432/jarvis_command_center_db
+```
+
 ## Testing
 
 The project includes comprehensive database tests to ensure both SQLite and PostgreSQL work correctly.
@@ -87,7 +94,11 @@ The database test suite covers:
 
 ## Dev Run
 ```bash
-uvicorn app.main:app --reload --port 8001
+uvicorn app.main:app --reload --port 8002
+```
+Optional debugger port override:
+```bash
+export DEBUG_PORT=5680
 ```
 
 ## Docker Dev Run with Hot Reload
@@ -103,7 +114,7 @@ docker-compose -f docker-compose.postgres.yaml up --build
 ## Docker Run (Production-style)
 ```bash
 docker build -t voice-api .
-docker run -p 8001:8001 voice-api
+docker run -p 8002:8002 voice-api
 ```
 
 ## Endpoints

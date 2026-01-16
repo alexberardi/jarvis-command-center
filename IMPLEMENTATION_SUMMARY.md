@@ -72,20 +72,16 @@ Successfully implemented a complete tool-based conversation architecture for Jar
 ### 4. API Endpoints
 
 #### Updated `/api/v0/conversation/start` ✅
-- Accepts optional `client_tools` parameter
-- Automatically detects tool-based vs legacy mode
-- Merges client tools with server tools
+- Accepts `client_tools` (optional; server tools still available)
+- Always uses tool-based warmup
 - Stores combined tool list in cache
 - Passes tools to LLM proxy warmup
 
 #### Updated `/api/v0/voice/command` ✅
-- Detects conversation type (tool-based vs legacy)
-- **Tool-Based Flow**:
-  - Calls model service tool methods
-  - Returns new response format with stop_reason
-  - Includes tool_calls for client execution
-  - Handles validation requests
-- **Legacy Flow**: Still supported for backward compatibility
+- Tool-based flow only
+- Returns response format with `stop_reason`
+- Includes `tool_calls` for client execution
+- Handles validation requests
 
 #### New `/api/v0/voice/command/continue` ✅
 - Accepts tool execution results
@@ -169,10 +165,8 @@ Client → /voice/command/continue             │
 - Proper error responses
 - Logging throughout
 
-### 5. Backward Compatibility
-- Legacy command inference still works
-- Automatic mode detection
-- No breaking changes for existing clients
+### 5. Breaking Change
+- Tool-based flow only (legacy command inference removed)
 
 ## Testing Status
 
@@ -305,7 +299,7 @@ Client → /voice/command/continue             │
 - **New Code**: ~970 lines
 - **Modified Code**: ~522 lines
 - **Documentation**: ~1500 lines
-- **No Breaking Changes**: Legacy system still works
+- **Breaking Change**: Tool-based flow only
 
 ## Success Criteria
 

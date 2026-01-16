@@ -6,7 +6,7 @@ This module handles the optional debugpy import and setup to avoid linter errors
 import os
 from typing import Optional
 
-def setup_debugger(host: str = "0.0.0.0", port: int = 5678) -> Optional[bool]:
+def setup_debugger(host: str = "0.0.0.0", port: Optional[int] = None) -> Optional[bool]:
     """
     Set up debugpy debugger if DEBUG environment variable is set.
     
@@ -20,6 +20,14 @@ def setup_debugger(host: str = "0.0.0.0", port: int = 5678) -> Optional[bool]:
     """
     if not os.getenv("DEBUG", "").lower() in ("true", "1", "yes"):
         return None
+
+    if port is None:
+        debug_port = os.getenv("DEBUG_PORT", "5678")
+        try:
+            port = int(debug_port)
+        except ValueError:
+            print(f"⚠️  Invalid DEBUG_PORT '{debug_port}', falling back to 5678")
+            port = 5678
     
     try:
         import debugpy

@@ -6,17 +6,11 @@ with the Jarvis system. Each model implements the IModelInterface and
 can have different inference strategies.
 
 Available Models:
-- BaseModel: Reference implementation showing full system complexity
-- JarvisLlama3B: Fine-tuned Llama 3.2 3B with single-shot inference
-- JarvisParallelLlama3B: Llama 3.2 3B with parallel double-shot inference
+- JarvisToolModel: Tool-based model for prompt-driven tool calling
 """
 
-from app.core.models.base_model import BaseModel
-from app.core.models.jarvis_llama3b import JarvisLlama3B
-from app.core.models.jarvis_parallel_llama3b import JarvisParallelLlama3B
+from app.core.models.jarvis_tool_model import JarvisToolModel
 
 __all__ = [
-    "BaseModel",
-    "JarvisLlama3B",
-    "JarvisParallelLlama3B"
+    "JarvisToolModel"
 ]

@@ -61,12 +61,12 @@ class JarvisToolModel(IModelInterface):
         """
         Warm up a tool-based conversation.
         
-        Note: available_commands are legacy and converted to tools internally.
+        Note: available_commands are converted to tools internally when provided.
         For pure tool-based usage, use warmup_conversation_with_tools instead.
         """
         logger.info(f"🚀 Warming up tool conversation {conversation_id[:8]}")
         
-        # Convert legacy commands to tools (if provided)
+        # Convert CommandDefinition commands to tools (if provided)
         client_tools = self._convert_commands_to_tools(available_commands or [])
         
         # Get server tools and merge
@@ -163,8 +163,8 @@ class JarvisToolModel(IModelInterface):
             # Update cache
             conversation_cache.update_messages(conversation_id, messages)
             
-            # Convert to legacy response format
-            return self._convert_to_legacy_format(result)
+            # Convert to Jarvis response format
+            return self._convert_to_response_format(result)
             
         except Exception as e:
             logger.error(f"❌ Inference failed: {e}")
@@ -378,7 +378,7 @@ You MUST respond with valid JSON only. No comments, no explanations, no markdown
     
     def _convert_commands_to_tools(self, commands: List[CommandDefinition]) -> List[Dict[str, Any]]:
         """
-        Convert legacy CommandDefinition format to OpenAI tool format.
+        Convert CommandDefinition format to OpenAI tool format.
         
         This allows backward compatibility with existing command definitions.
         """
@@ -419,11 +419,11 @@ You MUST respond with valid JSON only. No comments, no explanations, no markdown
         
         return tools
     
-    def _convert_to_legacy_format(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _convert_to_response_format(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Convert tool-based result to legacy format for backward compatibility.
+        Convert tool-based result to Jarvis response format.
         
-        Legacy format:
+        Response format:
         {
             "s": bool,
             "n": str or None,
@@ -480,7 +480,7 @@ You MUST respond with valid JSON only. No comments, no explanations, no markdown
             }
     
     def _error_response(self, message: str) -> Dict[str, Any]:
-        """Generate error response in legacy format."""
+        """Generate error response in Jarvis response format."""
         return {
             "s": False,
             "n": None,

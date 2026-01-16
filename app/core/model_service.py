@@ -285,9 +285,9 @@ class ModelService:
         # Convert to list format for cache
         available_commands_to_cache = list(command_examples_map.values())
         
-        # Also include legacy available_commands if provided (for backward compatibility)
+        # Also include available_commands if provided (for examples/metadata)
         if available_commands:
-            logger.info(f"📚 Also received {len(available_commands)} legacy available commands")
+            logger.info(f"📚 Also received {len(available_commands)} available commands")
             for cmd in available_commands:
                 cmd_dict = cmd.model_dump()
                 cmd_name = cmd_dict.get("command_name")
@@ -302,7 +302,7 @@ class ModelService:
         if hasattr(self.model, "_build_system_prompt"):
             system_message = self.model._build_system_prompt(node_context, timezone, all_tools, [])  # type: ignore[attr-defined]
         else:
-            # Fallback to legacy builder
+            # Fallback to default builder
             system_message = self._build_tool_system_message(node_context, timezone, all_tools, [])
 
         # Format tools without examples (examples available via get_command_examples tool)

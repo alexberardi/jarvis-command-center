@@ -161,7 +161,7 @@ if response["stop_reason"] == "tool_calls":
     })
 ```
 
-### Legacy API (Through Model Service)
+### ModelService API
 
 If using the model directly through `ModelService`:
 
@@ -170,12 +170,12 @@ from app.core.model_service import ModelService
 
 model_service = ModelService("JarvisToolModel")
 
-# Warmup
-await model_service.warmup_conversation(
+# Warmup (tool-based)
+await model_service.warmup_conversation_with_tools(
     node_context={"room": "bedroom", "user": "Alex", "voice_mode": "brief"},
-    available_commands=[...],  # Legacy format
     conversation_id="conv-123",
-    timezone="America/New_York"
+    timezone="America/New_York",
+    client_tools=[...]
 )
 
 # Process command
@@ -357,34 +357,9 @@ Ask specific questions:
 "Which room's light would you like me to control? You can say bedroom, living room, or kitchen."
 ```
 
-## Comparison with Other Models
+## Model Support
 
-| Feature | JarvisToolModel | JarvisLlama3B | BaseModel |
-|---------|----------------|---------------|-----------|
-| Tool Support | ✅ Native | ❌ Command-based | ❌ Command-based |
-| Natural Responses | ✅ Yes | ❌ Technical | ❌ Technical |
-| Multi-turn | ✅ Yes | ⚠️ Limited | ⚠️ Limited |
-| Clarifications | ✅ Built-in | ❌ No | ❌ No |
-| Setup | ✅ Easy | ⚠️ Moderate | ✅ Easy |
-| Fine-tuning | ❌ Not needed | ✅ Recommended | ❌ Not needed |
-
-## Migration from Other Models
-
-### From JarvisLlama3B
-
-```bash
-# Before
-export JARVIS_MODEL_INTERFACE="JarvisLlama3B"
-
-# After  
-export JARVIS_MODEL_INTERFACE="JarvisToolModel"
-```
-
-No code changes needed! The model handles the conversion from legacy command format to tools internally.
-
-### From BaseModel
-
-Same as above - just change the environment variable.
+The tool-based flow is now the only supported runtime path. Legacy command/parameter inference models have been removed.
 
 ## Future Enhancements
 

@@ -50,8 +50,8 @@ The system has been refactored to support an OpenAI-compatible tool-based conver
   "node_context": {
     "timezone": "America/New_York"
   },
-  "available_commands": [...],  // Legacy, optional
-  "client_tools": [              // NEW: Tool definitions
+  "available_commands": [...],  // Optional: used for examples/metadata
+  "client_tools": [             // Tool definitions
     {
       "type": "function",
       "function": {
@@ -370,29 +370,9 @@ curl -X POST http://localhost:8000/api/v0/voice/command \
 
 ## Migration Notes
 
-### From Old System
+### Breaking Change
 
-The old command inference system still works if `client_tools` is not provided:
-
-```python
-# OLD: Still works
-{
-  "conversation_id": "conv-123",
-  "available_commands": [...]  # CommandDefinition format
-}
-
-# NEW: Tool-based
-{
-  "conversation_id": "conv-123",
-  "client_tools": [...]  # OpenAI function format
-}
-```
-
-The system automatically detects which mode to use based on presence of tools in the cache.
-
-### Breaking Changes
-
-None - both systems can coexist. However, the tool-based system is the recommended approach going forward.
+The legacy command/parameter inference pipeline has been removed. All conversations now use the tool-based flow. Provide `client_tools` (or rely on server tools) during `/conversation/start`.
 
 ## Benefits
 

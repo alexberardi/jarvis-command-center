@@ -2,7 +2,7 @@
 export $(grep -v '^#' .env | xargs)
 
 # Kill any existing process on the port
-PORT=${PORT:-9998}
+PORT=${PORT:-8002}
 echo "Killing any existing process on port $PORT..."
 lsof -ti:$PORT | xargs kill -9 2>/dev/null || echo "No process found on port $PORT"
 
