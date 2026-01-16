@@ -49,9 +49,6 @@ data/
 *.sqlite
 *.sqlite3
 
-# Alembic
-alembic/versions/
-
 # Docker
 *.log
 docker-compose.override.yml
