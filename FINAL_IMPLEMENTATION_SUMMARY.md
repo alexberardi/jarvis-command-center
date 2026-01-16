@@ -37,7 +37,7 @@ The tool-based architecture with prompt-based tool calling has been **fully impl
   - Automatic tool execution loop
   - Natural language final responses
   - Clarification support
-  - Legacy format compatibility
+  - Tool-based JSON-only responses
 
 - ✅ **Updated Model Factory** (`app/core/model_factory.py`)
   - Dynamic model discovery
@@ -352,7 +352,7 @@ FINAL_IMPLEMENTATION_SUMMARY.md (this file)
 - Clean architecture
 - Comprehensive documentation
 - Error handling throughout
-- Backward compatible (legacy system still works)
+- Tool-based flow only
 - Well-tested patterns
 - Logging and observability
 

@@ -16,12 +16,8 @@ class IModelInterface(ABC):
     Abstract base class for model implementations.
     
     This interface allows different models to implement their own inference strategies:
-    - Single-shot inference (one LLM call)
-    - Multi-step inference (command → parameters → dates)
+    - Tool-based inference with JSON tool calls
     - Custom pipelines (whatever works for the model)
-    
-    The base implementation demonstrates the full current system complexity.
-    Custom implementations can override specific methods to optimize.
     """
     
     @property
@@ -31,7 +27,7 @@ class IModelInterface(ABC):
         Model implementation name for environment variable matching.
         
         Examples:
-        - "JarvisLlama3B" (first-party fine-tuned model)
+        - "JarvisToolModel" (tool-based model)
         - "CustomLlama7B" (third-party implementation)
         - "OpenAIGPT4" (API-based implementation)
         
@@ -48,7 +44,7 @@ class IModelInterface(ABC):
         timezone: Optional[str] = None
     ) -> None:
         """
-        Initialize the model with context and available commands.
+        Initialize the model with context and available commands/tools.
         
         This method should:
         1. Build the complete system context (date context, node context, etc.)
@@ -72,7 +68,7 @@ class IModelInterface(ABC):
         node_context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Perform complete command inference and parameter extraction.
+        Perform tool-based inference and return model results.
         
         This is the main entry point for processing voice commands.
         Implementation can use any strategy:

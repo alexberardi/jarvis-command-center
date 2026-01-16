@@ -3,10 +3,24 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.models import Base
 
+
+def _infer_db_type(database_url: str) -> str:
+    if database_url.startswith("postgresql://") or database_url.startswith("postgres://"):
+        return "postgres"
+    if database_url.startswith("sqlite://"):
+        return "sqlite"
+    return "sqlite"
+
+
+def _resolve_database_config() -> tuple[str, str]:
+    database_url = os.getenv("DATABASE_URL") or os.getenv("DB_URL", "sqlite:///./data/voice_api.db")
+    db_type_env = os.getenv("DB_TYPE")
+    db_type = db_type_env.lower() if db_type_env else _infer_db_type(database_url)
+    return db_type, database_url
+
 def get_database_url():
     """Get the appropriate database URL based on configuration"""
-    db_type = os.getenv("DB_TYPE", "sqlite").lower()
-    db_url = os.getenv("DB_URL", "sqlite:///./data/voice_api.db")
+    db_type, db_url = _resolve_database_config()
     
     if db_type == "postgres":
         # Use the provided DB_URL for PostgreSQL
@@ -24,7 +38,7 @@ def get_database_url():
 def create_database_engine():
     """Create the appropriate database engine based on configuration"""
     database_url = get_database_url()
-    db_type = os.getenv("DB_TYPE", "sqlite").lower()
+    db_type, _ = _resolve_database_config()
     
     if db_type == "postgres":
         # PostgreSQL configuration

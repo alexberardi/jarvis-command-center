@@ -20,8 +20,8 @@ services:
   jarvis-voice-api:
     build: .
     ports:
-      - "9998:9998"
-      - "5678:5678"
+      - "8002:8002"
+      - "${DEBUG_PORT:-5678}:${DEBUG_PORT:-5678}"
     volumes:
       - ./app:/app/app
       - ./data:/app/data
@@ -31,12 +31,15 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DEBUG=true
+      - DEBUG_PORT=${DEBUG_PORT:-5678}
       - DB_TYPE=postgres
-      - DB_URL=postgresql://jarvis_user:jarvis_password@postgres:5432/jarvis_command_center
+      - DB_URL=${DB_URL:-postgresql://jarvis_user:jarvis_password@postgres:5432/jarvis_command_center}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["python", "-Xfrozen_modules=off", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9998", "--reload"]
+    command: ["python", "-Xfrozen_modules=off", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002", "--reload"]
 
 volumes:
   postgres_data: 

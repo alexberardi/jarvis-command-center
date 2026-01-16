@@ -45,7 +45,7 @@ class ModelFactory:
         """
         # Determine model name from env or parameter
         if model_name is None:
-            model_name = os.getenv("JARVIS_MODEL_INTERFACE", "BASE_MODEL")
+            model_name = os.getenv("JARVIS_MODEL_INTERFACE", "JarvisToolModel")
         
         logger.info(f"🏭 Creating model: {model_name}")
         

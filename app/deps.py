@@ -1,29 +1,19 @@
 import os
 import sys
-
-from app.context_providers.node_context_provider import NodeContextProvider
-# Add the root project path to sys.path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-import inspect
-import pkgutil
 import logging
-from typing import Optional
 
 from fastapi import Header, HTTPException, Depends
 from sqlalchemy.orm import Session
 
+from app.context_providers.node_context_provider import NodeContextProvider
 from app.db import get_session_local
 from app.models import Node
-from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider, ITranscriptionCleanupSystemPromptProvider, IParameterInferenceSystemPromptProvider
-from app.context_providers.standard_command_inference_prompt_provider import StandardCommandInferenceSystemPromptProvider
-from app.context_providers.standard_parameter_inference_system_prompt_provider import StandardParameterInferenceSystemPromptProvider
-from app.context_providers.no_op_transcription_cleanup_provider import NoOpTranscriptionCleanupProvider
 from app.core.model_service import ModelService
-
-
 from dotenv import load_dotenv
+
+# Add the root project path to sys.path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 load_dotenv()
 
@@ -54,98 +44,6 @@ def verify_admin_key(x_api_key: str = Header(...)):
         raise HTTPException(status_code=401, detail="Invalid Admin API Key")
 
 
-def get_command_inference_system_prompt_provider() -> ICommandInferenceSystemPromptProvider:
-    import os
-    import importlib
-    provider_name = os.getenv("JARVIS_SYSTEM_PROMPT_PROVIDER", "STANDARD")
-
-    if provider_name == "STANDARD":
-        return StandardCommandInferenceSystemPromptProvider()
-    
-    base_path = [
-        os.path.join(os.path.dirname(__file__), "context_providers"),
-        os.path.join(os.path.dirname(__file__), "context_providers", "custom")
-    ]
-    prefix = "app.context_providers."
-    for path in base_path:
-        if not os.path.exists(path):
-            continue
-        for finder, module_name, ispkg in pkgutil.walk_packages(path=[path], prefix=prefix):
-            try:
-                imported_module = importlib.import_module(module_name)
-            except Exception as e:
-                print(e)
-                continue
-            for _, cls in inspect.getmembers(imported_module, inspect.isclass):
-                if issubclass(cls, ICommandInferenceSystemPromptProvider) and cls is not ICommandInferenceSystemPromptProvider:
-                    instance = cls()
-                    if instance.name.upper() == provider_name.upper():
-                        return instance
-    return StandardCommandInferenceSystemPromptProvider()
-
-
-def get_parameter_inference_system_prompt_provider() -> IParameterInferenceSystemPromptProvider:
-    import os
-    import importlib
-    provider_name = os.getenv("JARVIS_PARAMETER_INFERENCE_PROMPT_PROVIDER", "STANDARD")
-
-    if provider_name == "STANDARD":
-        return StandardParameterInferenceSystemPromptProvider()
-    
-    base_path = [
-        os.path.join(os.path.dirname(__file__), "context_providers"),
-        os.path.join(os.path.dirname(__file__), "context_providers", "custom")
-    ]
-    prefix = "app.context_providers."
-    for path in base_path:
-        if not os.path.exists(path):
-            continue
-        for finder, module_name, ispkg in pkgutil.walk_packages(path=[path], prefix=prefix):
-            try:
-                imported_module = importlib.import_module(module_name)
-            except Exception as e:
-                print(e)
-                continue
-            for _, cls in inspect.getmembers(imported_module, inspect.isclass):
-                if issubclass(cls, IParameterInferenceSystemPromptProvider) and cls is not IParameterInferenceSystemPromptProvider:
-                    instance = cls()
-                    if instance.name.upper() == provider_name.upper():
-                        return instance
-    return StandardParameterInferenceSystemPromptProvider()
-
-
-def get_transcription_cleanup_system_prompt_provider() -> ITranscriptionCleanupSystemPromptProvider:
-    import os
-    import importlib
-    
-    # Check if transcription cleanup is enabled
-    if os.getenv("JARVIS_TRANSCRIPTION_CLEANUP_ENABLED", "false").lower() != "true":
-        return NoOpTranscriptionCleanupProvider()
-    
-    provider_name = os.getenv("JARVIS_TRANSCRIPTION_CLEANUP_PROMPT_PROVIDER", "STANDARD")
-    
-    base_path = [
-        os.path.join(os.path.dirname(__file__), "context_providers"),
-        os.path.join(os.path.dirname(__file__), "context_providers", "custom")
-    ]
-    prefix = "app.context_providers."
-    for path in base_path:
-        if not os.path.exists(path):
-            continue
-        for finder, module_name, ispkg in pkgutil.walk_packages(path=[path], prefix=prefix):
-            try:
-                imported_module = importlib.import_module(module_name)
-            except Exception as e:
-                print(e)
-                continue
-            for _, cls in inspect.getmembers(imported_module, inspect.isclass):
-                if issubclass(cls, ITranscriptionCleanupSystemPromptProvider) and cls is not ITranscriptionCleanupSystemPromptProvider:
-                    instance = cls()
-                    if instance.name.upper() == provider_name.upper():
-                        return instance
-    return NoOpTranscriptionCleanupProvider()
-
-
 def get_model_service() -> ModelService:
     """
     Get the configured model service instance.
@@ -154,9 +52,7 @@ def get_model_service() -> ModelService:
     Defaults to BASE_MODEL if not specified.
     
     Available models:
-    - BASE_MODEL: Reference implementation showing full system complexity
-    - JarvisLlama3B: Fine-tuned Llama 3.2 3B with single-shot inference  
-    - JarvisParallelLlama3B: Llama 3.2 3B with parallel double-shot inference
+    - JarvisToolModel: Tool-based model using JSON tool calls
     - Custom models can be added to app/core/models/custom/
     """
     return ModelService()

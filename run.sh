@@ -5,4 +5,4 @@ export $(grep -v '^#' .env | xargs)
 source venv/bin/activate
 
 # run app
-uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-9998} --reload
+uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8002} --reload

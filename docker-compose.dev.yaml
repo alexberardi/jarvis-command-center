@@ -4,8 +4,8 @@ services:
   jarvis-voice-api:
     build: .
     ports:
-      - "9998:9998"
-      - "5678:5678"
+      - "8002:8002"
+      - "${DEBUG_PORT:-5678}:${DEBUG_PORT:-5678}"
     volumes:
       - ./app:/app/app
       - ./data:/app/data
@@ -15,6 +15,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DEBUG=true
+      - DEBUG_PORT=${DEBUG_PORT:-5678}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: ["python", "-Xfrozen_modules=off", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9998", "--reload"]
+    command: ["python", "-Xfrozen_modules=off", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002", "--reload"]

@@ -1,8 +1,5 @@
-import json
 import time
-import os
 import logging
-import uuid
 from fastapi import FastAPI, HTTPException, Depends, Request, APIRouter, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -14,9 +11,6 @@ from app.response_models.voice_command_response import VoiceCommandResponse, Voi
 from app.debug_setup import setup_debugger
 from app.core.malformed_json_extractor import MalformedJsonExtractorService
 from app.core.conversation_cache import conversation_cache
-from app.core.llm_manager import LLMManager
-from app.core.command_validation_service import CommandValidationService
-from app.core.parameter_extraction_service import ParameterExtractionService
 from . import admin, chat, date_context
 from app.deps import verify_api_key, get_model_service
 from app.core.model_service import ModelService
@@ -130,35 +124,15 @@ async def start_conversation(
         else:
             client_timezone = None
         
-        # Use tool-based warmup if client provides tools, otherwise use legacy approach
-        if request.client_tools is not None:
-            logger.info(f"🔧 Starting tool-based conversation with {len(request.client_tools)} client tools")
-            
-            # Debug: Print structure of first client tool to see what we're receiving
-            if request.client_tools:
-                import json
-                first_tool = request.client_tools[0]
-                logger.info(f"🔍 DEBUG: First client tool structure:")
-                logger.info(f"   Type: {type(first_tool)}")
-                logger.info(f"   Keys: {list(first_tool.keys()) if isinstance(first_tool, dict) else 'N/A'}")
-                
-                # Check for example properties
-            await model_service.warmup_conversation_with_tools(
-                node_context=node_context,
-                conversation_id=request.conversation_id,
-                timezone=client_timezone,
-                client_tools=request.client_tools,
-                available_commands=request.available_commands
-            )
-        else:
-            # Legacy warmup (for backward compatibility during transition)
-            logger.info(f"🔄 Starting legacy conversation")
-            await model_service.warmup_conversation(
-                node_context=node_context,
-                available_commands=request.available_commands,
-                conversation_id=request.conversation_id,
-                timezone=client_timezone
-            )
+        client_tools = request.client_tools or []
+        logger.info(f"🔧 Starting tool-based conversation with {len(client_tools)} client tools")
+        await model_service.warmup_conversation_with_tools(
+            node_context=node_context,
+            conversation_id=request.conversation_id,
+            timezone=client_timezone,
+            client_tools=client_tools,
+            available_commands=request.available_commands
+        )
         
         # Return success immediately - LLM warm-up and cache population will happen in background
         return {"status": "success", "conversation_id": request.conversation_id}
@@ -182,93 +156,37 @@ async def handle_voice(
     logger.info(f"Command: '{request.voice_command}'")
 
     try:
-        # Check if this is a tool-based conversation
-        from app.core.conversation_cache import conversation_cache
         tools = conversation_cache.get_tools(request.conversation_id)
+        if tools is None:
+            raise HTTPException(status_code=400, detail="Conversation not initialized for tool-based flow")
+
+        logger.info(f"🔧 Processing as tool-based conversation")
+        result = await model_service.process_voice_command_with_tools(
+            voice_command=request.voice_command,
+            conversation_id=request.conversation_id
+        )
         
-        if tools is not None:
-            # Tool-based conversation
-            logger.info(f"🔧 Processing as tool-based conversation")
-            result = await model_service.process_voice_command_with_tools(
+        # Build response based on stop_reason
+        from app.response_models.voice_command_response import StopReason, ToolCall, ValidationRequest
+        
+        response = VoiceCommandResponse(
+            commands=[],  # Empty for tool-based responses
+            request_information=RequestInformation(
                 voice_command=request.voice_command,
                 conversation_id=request.conversation_id
+            ),
+            stop_reason=StopReason(result.get("stop_reason", "complete")),
+            assistant_message=result.get("assistant_message"),
+            tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
+            validation_request=(
+                ValidationRequest(**result["validation_request"])
+                if result.get("validation_request") else None
             )
-            
-            # Build response based on stop_reason
-            from app.response_models.voice_command_response import StopReason, ToolCall, ValidationRequest
-            
-            response = VoiceCommandResponse(
-                commands=[],  # Empty for tool-based responses
-                request_information=RequestInformation(
-                    voice_command=request.voice_command,
-                    conversation_id=request.conversation_id
-                ),
-                stop_reason=StopReason(result.get("stop_reason", "complete")),
-                assistant_message=result.get("assistant_message"),
-                tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
-                validation_request=(
-                    ValidationRequest(**result["validation_request"])
-                    if result.get("validation_request") else None
-                )
-            )
-            
-            duration = time.time() - start_time
-            logger.info(f"✅ Tool-based command processed in {duration:.2f}s, stop_reason={response.stop_reason}")
-            return response
+        )
         
-        else:
-            # Legacy command inference
-            logger.info(f"🔄 Processing as legacy conversation")
-            node_context = {
-                "room": node_context_provider.node.room,
-                "node_id": node_context_provider.node.node_id,
-                "user": node_context_provider.node.user,
-                "voice_mode": node_context_provider.node.voice_mode
-            }
-            
-            result = await model_service.process_voice_command(
-                voice_command=request.voice_command,
-                conversation_id=request.conversation_id,
-                node_context=node_context
-            )
-            
-            # Convert model result to VoiceCommandResponse format
-            if result["s"]:  # Success
-                single_command = SingleCommandResponse(
-                    success=True,
-                    command_name=result["n"],
-                    parameters=result["p"],
-                    errors=None
-                )
-                stop_reason = StopReason.COMPLETE
-            else:  # Error
-                error_info = result.get("e", {})
-                single_command = SingleCommandResponse(
-                    success=False,
-                    command_name=result["n"],
-                    parameters=result["p"],
-                    errors=VoiceCommandError(
-                        type=error_info.get("type", "unknown_error"),
-                        message=error_info.get("message", "An unknown error occurred")
-                    )
-                )
-                stop_reason = StopReason.COMPLETE
-            
-            response = VoiceCommandResponse(
-                commands=[single_command],
-                request_information=RequestInformation(
-                    voice_command=request.voice_command,
-                    conversation_id=request.conversation_id
-                ),
-                stop_reason=stop_reason,
-                tool_calls=[],
-                validation_request=None,
-                assistant_message=None
-            )
-            
-            duration = time.time() - start_time
-            logger.info(f"✅ Legacy command processed in {duration:.2f}s using {model_service.model.name}")
-            return response
+        duration = time.time() - start_time
+        logger.info(f"✅ Tool-based command processed in {duration:.2f}s, stop_reason={response.stop_reason}")
+        return response
         
     except Exception as e:
         duration = time.time() - start_time

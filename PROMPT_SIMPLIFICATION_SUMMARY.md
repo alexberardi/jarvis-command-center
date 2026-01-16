@@ -70,10 +70,6 @@ The tool returns:
 }
 ```
 
-### 3. Added Legacy Flow Documentation
-
-Added a note to `parameter_extraction_service.py` clarifying it's part of the legacy flow, not the new tool-based architecture.
-
 ## Benefits
 
 ### ✅ Token Reduction
@@ -115,14 +111,7 @@ Output shows:
 
 ## Migration Notes
 
-### For New Tool-Based Flow (`JarvisToolModel`)
-✅ **Ready to use!** The simplified prompt is automatically used.
-
-### For Legacy Flow (`BaseModel`)
-⚠️ **No changes needed.** The legacy parameter extraction service still works (though it still references the old date mapping in its internal prompts for backward compatibility).
-
-### Client-Side Tool Descriptions
-Some client tools might still reference "DateContext" in their descriptions (stored in the database). These are fine to keep or can be gradually updated to say "use the `resolve_relative_date` tool" instead.
+✅ **Tool-based only.** The simplified prompt is automatically used. Legacy command/parameter inference has been removed.
 
 ## Example Conversation Flow
 
@@ -181,7 +170,6 @@ This change aligns with the overall tool-based architecture refactor:
 ## Files Modified
 
 - `/app/core/general_context.py` - Removed date mapping from prompt
-- `/app/core/parameter_extraction_service.py` - Added legacy flow note
 - `/examples/test_simplified_prompt.py` - Test demonstrating the changes
 - `/PROMPT_SIMPLIFICATION_SUMMARY.md` - This summary
 

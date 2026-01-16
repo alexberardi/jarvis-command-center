@@ -14,7 +14,7 @@ The Jarvis Command Center now supports a **tool-based conversation architecture*
 - **Approach**: Prompt-based tool calling with JSON parsing
 - **Model Requirements**: Any instruct model that can follow JSON format (Llama 3+, Mistral, etc.)
 - **LLM Proxy Changes**: Minimal/none required
-- **Backward Compatible**: Legacy system still works
+- **Runtime Path**: Tool-based flow only (legacy removed)
 - **Production Ready**: ✅
 
 ## How It Works (Simple)
