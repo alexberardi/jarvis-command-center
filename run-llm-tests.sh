@@ -6,18 +6,32 @@ echo ""
 echo "⚠️  WARNING: These tests make real API calls to your LLM!"
 echo "   - Tests will be slower (several seconds per test)"
 echo "   - Ensure your LLM proxy is running and accessible"
-echo "   - Set JARVIS_LLM_PROXY_API_URL environment variable"
+echo "   - Set JARVIS_LLM_PROXY_API_URL, LLM_APP_ID, and LLM_APP_KEY"
 echo ""
 
-# Check if LLM API URL is configured
+# Check if LLM proxy authentication is configured
+missing_vars=()
 if [ -z "$JARVIS_LLM_PROXY_API_URL" ]; then
-    echo "❌ JARVIS_LLM_PROXY_API_URL is not set!"
-    echo "   Please set this environment variable to your LLM proxy URL"
-    echo "   Example: export JARVIS_LLM_PROXY_API_URL=http://10.0.0.69:8000"
+    missing_vars+=("JARVIS_LLM_PROXY_API_URL")
+fi
+if [ -z "$LLM_APP_ID" ]; then
+    missing_vars+=("LLM_APP_ID")
+fi
+if [ -z "$LLM_APP_KEY" ]; then
+    missing_vars+=("LLM_APP_KEY")
+fi
+
+if [ ${#missing_vars[@]} -ne 0 ]; then
+    echo "❌ Missing required environment variables: ${missing_vars[*]}"
+    echo "   Please set these before running tests. Examples:"
+    echo "   export JARVIS_LLM_PROXY_API_URL=http://10.0.0.69:8000"
+    echo "   export LLM_APP_ID=<your-app-id>"
+    echo "   export LLM_APP_KEY=<your-app-key>"
     exit 1
 fi
 
 echo "✅ LLM API URL configured: $JARVIS_LLM_PROXY_API_URL"
+echo "✅ LLM app credentials configured"
 echo ""
 
 # Check if virtual environment exists

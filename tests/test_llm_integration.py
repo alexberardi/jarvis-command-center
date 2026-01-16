@@ -5,6 +5,12 @@ from app.main import app
 from app.request_models.voice_command_request import CommandDefinition, CommandParameter
 import time
 
+llm_proxy_configured = (
+    bool(os.getenv("JARVIS_LLM_PROXY_API_URL"))
+    and bool(os.getenv("LLM_APP_ID"))
+    and bool(os.getenv("LLM_APP_KEY"))
+)
+
 
 def extract_first_command(data):
     """Helper function to extract the first command from the new response format"""
@@ -108,8 +114,8 @@ class TestTranscriptionCleanup:
         time.sleep(0.5)  # Small delay between tests
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_transcription_cleanup_with_filler_words(self, client, sample_commands):
         """Test transcription cleanup with common filler words and transcription errors"""
@@ -174,8 +180,8 @@ class TestTranscriptionCleanup:
             print(f"   ✅ Under 5-second target")
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_transcription_cleanup_performance_comparison(self, client, sample_commands):
         """Compare performance with and without transcription cleanup"""
@@ -244,8 +250,8 @@ class TestTranscriptionCleanup:
         print(f"   ✅ Both scenarios meet 5-second target")
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_clean_already_clean_commands(self, client, sample_commands):
         """Test that already clean commands work well with cleanup enabled"""
@@ -393,8 +399,8 @@ class TestLLMIntegration:
         time.sleep(0.5)  # Small delay between tests
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_basic_light_commands(self, client, sample_commands):
         """Test basic light on/off commands"""
@@ -434,8 +440,8 @@ class TestLLMIntegration:
             assert first_command["parameters"]["room"] == case["room"]
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_temperature_commands(self, client, sample_commands):
         """Test temperature setting commands"""
@@ -483,8 +489,8 @@ class TestLLMIntegration:
                 print(f"   Error message: {errors.get('message', 'No message')}")
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_timer_commands(self, client, sample_commands):
         """Test timer setting commands"""
@@ -543,8 +549,8 @@ class TestLLMIntegration:
                     print(f"   Response data: {data}")
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_music_commands(self, client, sample_commands):
         """Test music control commands"""
@@ -594,8 +600,8 @@ class TestLLMIntegration:
                 print(f"   Error message: {errors.get('message', 'No message')}")
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_missing_room_context(self, client, sample_commands):
         """Test commands when room context is missing"""
@@ -622,8 +628,8 @@ class TestLLMIntegration:
                 assert "room" in errors["missing_parameters"]
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_ambiguous_commands(self, client, sample_commands):
         """Test ambiguous or unclear commands"""
@@ -659,8 +665,8 @@ class TestLLMIntegration:
                     assert "clarification_question" in errors
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_unrecognized_commands(self, client, sample_commands):
         """Test completely unrecognized commands"""
@@ -691,8 +697,8 @@ class TestLLMIntegration:
                 assert "clarification_question" in errors
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_natural_language_variations(self, client, sample_commands):
         """Test natural language variations"""
@@ -722,8 +728,8 @@ class TestLLMIntegration:
             assert first_command["parameters"]["room"] == "living room"
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_complex_scenarios(self, client, sample_commands):
         """Test complex multi-parameter scenarios"""
@@ -770,8 +776,8 @@ class TestLLMIntegration:
                 assert "clarification_question" in errors
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_multiple_commands(self, client, sample_commands):
         """Test multiple commands in one request"""
@@ -835,8 +841,8 @@ class TestLLMPerformance:
         app.dependency_overrides.clear()
     
     @pytest.mark.skipif(
-        not os.getenv("JARVIS_LLM_PROXY_API_URL"),
-        reason="LLM API URL not configured"
+        not llm_proxy_configured,
+        reason="LLM proxy not fully configured (url/app id/app key)"
     )
     def test_response_time(self, client_with_test_db):
         """Test that LLM responses are reasonably fast"""

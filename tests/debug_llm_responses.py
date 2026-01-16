@@ -440,8 +440,7 @@ async def test_llm_response_with_metrics(
             
             # Call LLM for cleanup
             llm_api_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
-            llm_api_version = os.getenv("JARVIS_LLM_PROXY_API_VERSION", "0")
-            cleanup_url = f"{llm_api_url}/api/v{llm_api_version}/chat"
+            cleanup_url = f"{llm_api_url.rstrip('/')}/v1/chat/completions"
             
             cleanup_response = await post(url=cleanup_url, json_data=cleanup_request)
             
@@ -499,8 +498,7 @@ async def test_llm_response_with_metrics(
     
     try:
         llm_api_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
-        llm_api_version = os.getenv("JARVIS_LLM_PROXY_API_VERSION", "0")
-        chat_url = f"{llm_api_url}/api/v{llm_api_version}/chat"
+        chat_url = f"{llm_api_url.rstrip('/')}/v1/chat/completions"
         
         # Make the API call
         llm_response = await post(url=chat_url, json_data=request_payload)

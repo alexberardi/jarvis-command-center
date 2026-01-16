@@ -20,11 +20,10 @@ class LLMManager:
     def __init__(self):
         self.llm_client = LLMProxyClient()
         self.llm_api_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
-        self.llm_api_version = os.getenv("JARVIS_LLM_PROXY_API_VERSION", "0")
     
     def get_chat_url(self) -> str:
         """Get the chat URL for parameter extraction."""
-        return f"{self.llm_api_url}/api/v{self.llm_api_version}/chat"
+        return f"{self.llm_api_url.rstrip('/')}/v1/chat/completions"
     
     async def transcription_cleanup(
         self, 
@@ -509,22 +508,26 @@ class LLMManager:
             True if cache is ready, False if timeout reached
         """
         logger.info(f"⏳ Waiting for cache to be ready for conversation {conversation_id[:8]}...")
-        
-        # Use the existing check_conversation_status method
-        is_ready = await self.check_conversation_status(conversation_id, "conversation")
-        
-        if is_ready:
-            # Also check that our local cache has the messages
-            local_messages = conversation_cache.get_messages(conversation_id)
-            if local_messages:
-                logger.info(f"✅ Cache is ready for conversation {conversation_id[:8]} (both proxy and local)")
+        retry_interval = 0.5
+        attempts = int(max_wait_time / retry_interval)
+
+        for attempt in range(attempts):
+            has_conversation = conversation_cache.has_conversation(conversation_id)
+            messages = conversation_cache.get_messages(conversation_id) if has_conversation else []
+
+            if has_conversation and messages:
+                logger.info(f"✅ Cache is ready for conversation {conversation_id[:8]} (local)")
                 return True
-            else:
-                logger.warning(f"⚠️ LLM proxy cache ready but local cache empty for {conversation_id[:8]}")
-                return False
-        else:
-            logger.warning(f"⏰ Cache not ready after waiting, proceeding anyway for conversation {conversation_id[:8]}")
-            return False
+
+            if attempt < attempts - 1:
+                logger.info(
+                    f"⏳ Cache not ready (attempt {attempt + 1}/{attempts}) for {conversation_id[:8]}, "
+                    f"waiting {retry_interval}s..."
+                )
+                await asyncio.sleep(retry_interval)
+
+        logger.warning(f"⏰ Cache not ready after {attempts} attempts for conversation {conversation_id[:8]}")
+        return False
 
     async def check_conversation_status(
         self, 
@@ -542,49 +545,17 @@ class LLMManager:
             True if cache is ready, False otherwise
         """
         
-        max_retries = 5
-        retry_interval = 0.5  # seconds
-        
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"🔄 Checking {inference_type} cache status (attempt {attempt + 1}/{max_retries}) for session {conversation_id[:8]}...")
-                
-                status_response = await self.llm_client.get_conversation_status(conversation_id)
-                
-                logger.info(f"🔍 {inference_type} cache status response: {status_response}")
-                
-                # Handle case where response is a list [response_data, status_code]
-                http_status_code = None
-                if isinstance(status_response, list) and len(status_response) == 2:
-                    response_data, http_status_code = status_response
-                    status_response = response_data
-                    logger.info(f"🔍 {inference_type} cache HTTP status: {http_status_code}")
-                
-                if not isinstance(status_response, dict):
-                    logger.warning(f"⚠️ {inference_type} cache status response is not a dict: {type(status_response)}")
-                    return False
-                
-                # Check both the response status and HTTP status code
-                response_status = status_response.get("status")
-                
-                if response_status == "completed" or http_status_code == 200:
-                    logger.info(f"✅ {inference_type} cache is ready! (status: {response_status}, HTTP: {http_status_code})")
-                    return True
-                elif response_status == "pending" or http_status_code == 202:
-                    if attempt < max_retries - 1:  # Don't sleep on the last attempt
-                        logger.info(f"⏳ {inference_type} cache still pending (status: {response_status}, HTTP: {http_status_code}), waiting {retry_interval}s...")
-                        await asyncio.sleep(retry_interval)
-                    else:
-                        logger.warning(f"⏰ {inference_type} cache still pending after {max_retries} attempts (status: {response_status}, HTTP: {http_status_code})")
-                else:
-                    logger.warning(f"⚠️ Unexpected {inference_type} cache status: {response_status} (HTTP: {http_status_code})")
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Error checking {inference_type} cache status: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_interval)
-        
-        logger.warning(f"⏰ {inference_type} cache not ready after {max_retries} attempts, proceeding anyway")
+        has_conversation = conversation_cache.has_conversation(conversation_id)
+        messages = conversation_cache.get_messages(conversation_id) if has_conversation else []
+
+        if has_conversation and messages:
+            logger.info(f"✅ {inference_type} cache is ready locally for session {conversation_id[:8]}")
+            return True
+
+        logger.warning(
+            f"⚠️ {inference_type} cache not ready locally for session {conversation_id[:8]} "
+            f"(has_conversation={has_conversation}, messages={len(messages) if messages else 0})"
+        )
         return False
     
     async def parallel_queries_with_cache(
@@ -608,17 +579,27 @@ class LLMManager:
             List of results from each query task
         """
         try:
+            import time
+            debug_start = time.time()
+            logger.info(f"🐛 DEBUG: parallel_queries_with_cache entered at {debug_start}")
+            
             # Retrieve the conversation cache
             base_messages = conversation_cache.get_messages(conversation_id)
             if not base_messages:
                 raise ValueError(f"No cached messages found for {conversation_id}")
             logger.info(f"✅ Using cached messages for parallel queries")
             
+            debug_after_cache = time.time()
+            logger.info(f"🐛 DEBUG: Retrieved cache at {debug_after_cache}, took {debug_after_cache - debug_start:.3f}s")
+            
             logger.info(f"🔄 Starting {len(query_tasks)} parallel queries for conversation {conversation_id}")
             
             # Create individual query functions
             async def execute_single_query(task: Dict[str, Any]) -> Dict[str, Any]:
                 try:
+                    query_start = time.time()
+                    logger.info(f"🐛 DEBUG: Starting single query at {query_start}")
+                    
                     # Create a copy of the base messages for this query
                     messages = base_messages.copy()
                     
@@ -634,6 +615,9 @@ class LLMManager:
                     
                     # Execute the LLM query with timeout
                     try:
+                        llm_start = time.time()
+                        logger.info(f"🐛 DEBUG: About to call LLM at {llm_start}")
+                        
                         response = await asyncio.wait_for(
                             self.llm_client.chat_completion(
                                 messages=messages,
@@ -641,6 +625,10 @@ class LLMManager:
                             ),
                             timeout=30.0  # 30 second timeout
                         )
+                        
+                        llm_end = time.time()
+                        logger.info(f"🐛 DEBUG: LLM call completed at {llm_end}, took {llm_end - llm_start:.3f}s")
+                        
                     except asyncio.TimeoutError:
                         raise ValueError("LLM query timed out after 30 seconds")
                     
@@ -657,6 +645,9 @@ class LLMManager:
                         else:
                             result = task["function_after"](content, result)
                     
+                    query_end = time.time()
+                    logger.info(f"🐛 DEBUG: Single query completed at {query_end}, total took {query_end - query_start:.3f}s")
+                    
                     return result
                     
                 except Exception as e:
@@ -667,10 +658,16 @@ class LLMManager:
                     return {"error": str(e) if str(e) else f"{type(e).__name__}: {e.args}", "content": None}
             
             # Execute all queries in parallel
+            debug_before_gather = time.time()
+            logger.info(f"🐛 DEBUG: About to call asyncio.gather at {debug_before_gather}")
+            
             results = await asyncio.gather(
                 *[execute_single_query(task) for task in query_tasks],
                 return_exceptions=True
             )
+            
+            debug_after_gather = time.time()
+            logger.info(f"🐛 DEBUG: asyncio.gather completed at {debug_after_gather}, took {debug_after_gather - debug_before_gather:.3f}s")
             
             # Add all successful results to the cache
             for i, result in enumerate(results):

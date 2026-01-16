@@ -101,9 +101,14 @@ def generate_date_context_object(timezone_str: str = None) -> dict:
         next_sunday = now + timedelta(days=7)
     else:  # Today is Monday-Friday
         # This weekend is the next Saturday and Sunday
+        # Calculate days until Saturday (5 = Saturday)
         days_until_saturday = (5 - now.weekday()) % 7
+        # If today is Friday (weekday 4), (5-4)%7 = 1, so Saturday is tomorrow - correct
+        # If today is Thursday (weekday 3), (5-3)%7 = 2, so Saturday is in 2 days - correct
+        # If today is Monday (weekday 0), (5-0)%7 = 5, so Saturday is in 5 days - correct
         this_saturday = now + timedelta(days=days_until_saturday)
         this_sunday = this_saturday + timedelta(days=1)
+        logger.debug(f"📅 Weekend calc: today={now.strftime('%A %Y-%m-%d')}, weekday={now.weekday()}, days_until_sat={days_until_saturday}, this_saturday={this_saturday.strftime('%Y-%m-%d')}, this_sunday={this_sunday.strftime('%Y-%m-%d')}")
         # Last weekend is the previous Saturday and Sunday
         days_since_saturday = now.weekday() + 2  # Monday=0, so Monday is 2 days after Saturday
         last_saturday = now - timedelta(days=days_since_saturday)
@@ -446,12 +451,12 @@ def get_general_context(timezone_str: str = None) -> str:
     else:
         timezone_display = date_context["timezone"]["current_timezone"]
     
-    # Build the formatted string with current date/time and comprehensive date context
+    # Build the formatted string with current date/time only
+    # Note: Relative date resolution is now handled by the resolve_relative_date tool
     general_context_str = (
         f"Current Date & Time: {current_date} at {current_time}\n"
         f"{timezone_display}\n"
-        f"Current date (ISO): {current_date_iso}\n\n"
-        f"RELATIVE TO ABSOLUTE DATE MAPPING:\n{_format_date_context_for_prompt(date_context)}"
+        f"Current date (ISO): {current_date_iso}"
     )
     
     return general_context_str
