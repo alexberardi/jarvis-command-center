@@ -1,0 +1,26 @@
+# RunPods Fine-tuning Requirements
+# Core ML libraries
+torch>=2.0.0
+transformers>=4.30.0
+datasets>=2.12.0
+accelerate>=0.20.0
+
+# Data processing
+numpy>=1.24.0
+pandas>=2.0.0
+jsonlines>=3.1.0
+
+# Training utilities
+tqdm>=4.65.0
+scikit-learn>=1.3.0
+
+# Advanced training features
+peft>=0.4.0
+bitsandbytes>=0.39.0
+scipy>=1.10.0
+
+# Monitoring and logging
+# wandb>=0.15.0  # Disabled to avoid login issues
+
+# System utilities
+psutil>=5.9.0

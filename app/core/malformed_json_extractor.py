@@ -8,7 +8,7 @@ import logging
 import os
 from typing import Optional, Dict, Any, Tuple
 from app.core.json_schema import create_fallback_prompt, get_json_format_examples
-from app.core.utils.rest_client import post, get
+from app.core.utils.rest_client import post, get, build_jarvis_app_headers
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +18,10 @@ class MalformedJsonExtractorService:
     def __init__(self):
         # Use JARVIS_LLM_PROXY_API_URL from environment, fallback to localhost
         self.api_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
-        llm_api_version = os.getenv("JARVIS_LLM_PROXY_API_VERSION", "0")
-        self.extract_endpoint = f"{self.api_url}/api/v{llm_api_version}/lightweight/chat"
+        self.extract_endpoint = f"{self.api_url.rstrip('/')}/v1/chat/completions"
         # Use lightweight model for JSON extraction, fallback to mistral-7b-q2
         self.lightweight_model = os.getenv("LIGHTWEIGHT_MODEL", "mistral-7b-q2")
+        self.auth_headers = build_jarvis_app_headers()
         
     async def extract_json_from_malformed_response(
         self, 
@@ -52,7 +52,7 @@ class MalformedJsonExtractorService:
             
             # Call the lightweight chat endpoint
             payload = {
-                "model": "jarvis-llm",
+                "model": "full",
                 "temperature": 0.1,
                 "messages": [
                     {
@@ -68,7 +68,7 @@ class MalformedJsonExtractorService:
             
             logger.info(f"Attempting JSON extraction with malformed JSON extractor")
             
-            response_data = await post(self.extract_endpoint, json_data=payload)
+            response_data = await post(self.extract_endpoint, json_data=payload, headers=self.auth_headers)
             
             # Extract content from response (handle both old and new formats)
             extracted_content = (
@@ -109,9 +109,8 @@ class MalformedJsonExtractorService:
     async def is_available(self) -> bool:
         """Check if the JSON extractor service is available"""
         try:
-            llm_api_version = os.getenv("JARVIS_LLM_PROXY_API_VERSION", "0")
-            # Health check is a GET request
-            await get(f"{self.api_url}/api/v{llm_api_version}/health", timeout=5)
+            # Health check is a GET request (no auth required)
+            await get(f"{self.api_url.rstrip('/')}/health", timeout=5)
             return True
         except Exception:
             return False 

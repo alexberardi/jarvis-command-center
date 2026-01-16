@@ -9,7 +9,7 @@ logger = logging.getLogger("uvicorn")
 ConversationMessage = Dict[str, str]
 
 class ConversationCache:
-    """Simple in-memory cache for conversation messages and available commands with TTL expiration."""
+    """Simple in-memory cache for conversation messages, tools, and available commands with TTL expiration."""
     
     def __init__(self, ttl_minutes: int = 10):
         self.cache: Dict[str, Dict] = {}
@@ -17,16 +17,17 @@ class ConversationCache:
         self.lock = Lock()
         logger.info(f"🔧 ConversationCache initialized with {ttl_minutes} minute TTL")
     
-    def set(self, conversation_id: str, messages: List[ConversationMessage], available_commands: List[Dict], timezone: str = None) -> None:
-        """Store messages and available commands for a conversation ID."""
+    def set(self, conversation_id: str, messages: List[ConversationMessage], available_commands: List[Dict], timezone: str = None, tools: List[Dict] = None) -> None:
+        """Store messages, available commands, and tools for a conversation ID."""
         with self.lock:
             self.cache[conversation_id] = {
                 'messages': messages,
                 'available_commands': available_commands,
+                'tools': tools or [],
                 'timezone': timezone,
                 'timestamp': time.time()
             }
-            logger.info(f"💾 Cached messages and available commands for conversation {conversation_id[:8]}...")
+            logger.info(f"💾 Cached messages, commands, and {len(tools or [])} tools for conversation {conversation_id[:8]}...")
     
     def get_messages(self, conversation_id: str) -> Optional[List[ConversationMessage]]:
         """Retrieve messages for a conversation ID if not expired."""
@@ -103,6 +104,63 @@ class ConversationCache:
             
             entry['messages'].append(message)
             logger.info(f"📝 Added message to conversation {conversation_id[:8]}... (total messages: {len(entry['messages'])})")
+    
+    def add_messages(self, conversation_id: str, messages: List[ConversationMessage]) -> None:
+        """Add multiple messages to the existing conversation."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                logger.warning(f"❌ Cannot add messages to non-existent conversation {conversation_id[:8]}...")
+                return
+            
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            
+            if age_seconds > self.ttl_seconds:
+                # Expired, remove it
+                del self.cache[conversation_id]
+                logger.warning(f"❌ Cannot add messages to expired conversation {conversation_id[:8]}...")
+                return
+            
+            entry['messages'].extend(messages)
+            logger.info(f"📝 Added {len(messages)} messages to conversation {conversation_id[:8]}... (total messages: {len(entry['messages'])})")
+    
+    def update_messages(self, conversation_id: str, messages: List[ConversationMessage]) -> None:
+        """Replace all messages in the conversation."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                logger.warning(f"❌ Cannot update messages for non-existent conversation {conversation_id[:8]}...")
+                return
+            
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            
+            if age_seconds > self.ttl_seconds:
+                # Expired, remove it
+                del self.cache[conversation_id]
+                logger.warning(f"❌ Cannot update messages for expired conversation {conversation_id[:8]}...")
+                return
+            
+            entry['messages'] = messages
+            logger.info(f"📝 Updated messages for conversation {conversation_id[:8]}... (total messages: {len(messages)})")
+    
+    def get_tools(self, conversation_id: str) -> Optional[List[Dict]]:
+        """Retrieve tools for a conversation ID if not expired."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                logger.debug(f"❌ No cached tools found for conversation {conversation_id[:8]}...")
+                return None
+            
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            
+            if age_seconds > self.ttl_seconds:
+                # Expired, remove it
+                del self.cache[conversation_id]
+                logger.info(f"⏰ Expired cache for conversation {conversation_id[:8]}... (age: {age_seconds:.1f}s)")
+                return None
+            
+            logger.info(f"📖 Retrieved cached tools for conversation {conversation_id[:8]}... (age: {age_seconds:.1f}s)")
+            return entry.get('tools', [])
     
     def remove(self, conversation_id: str) -> None:
         """Remove a specific conversation from the cache."""

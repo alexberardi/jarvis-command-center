@@ -7,6 +7,6 @@ from typing import List, Optional
 from .message import Message
 
 class ChatCompletionRequest(BaseModel):
-    model: Optional[str] = "jarvis-llm"
+    model: Optional[str] = "full"
     temperature: Optional[float] = 0.7
     messages: List[Message]

@@ -36,13 +36,28 @@ load_env_file()
 def check_llm_api_url():
     """Check if LLM API URL is configured"""
     api_url = os.getenv("JARVIS_LLM_PROXY_API_URL")
+    app_id = os.getenv("LLM_APP_ID")
+    app_key = os.getenv("LLM_APP_KEY")
+
+    missing = []
     if not api_url:
-        print("⚠️  JARVIS_LLM_PROXY_API_URL environment variable not set!")
-        print("   This is required for running tests, but not for listing them.")
-        print("   Example: export JARVIS_LLM_PROXY_API_URL=http://10.0.0.69:8000")
+        missing.append("JARVIS_LLM_PROXY_API_URL")
+    if not app_id:
+        missing.append("LLM_APP_ID")
+    if not app_key:
+        missing.append("LLM_APP_KEY")
+
+    if missing:
+        print(f"⚠️  Missing required environment variables: {', '.join(missing)}")
+        print("   These are required for running tests, but not for listing them.")
+        print("   Examples:")
+        print("     export JARVIS_LLM_PROXY_API_URL=http://10.0.0.69:8000")
+        print("     export LLM_APP_ID=<your-app-id>")
+        print("     export LLM_APP_KEY=<your-app-key>")
         return False
     
     print(f"✅ LLM API URL configured: {api_url}")
+    print(f"✅ LLM app headers configured: {app_id is not None and app_key is not None}")
     return True
 
 def get_real_llm_tests():

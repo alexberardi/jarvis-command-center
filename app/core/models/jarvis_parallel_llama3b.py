@@ -85,7 +85,7 @@ class JarvisParallelLlama3B(BaseModel):
             
             duration = time.time() - start_time
             logger.info(f"✅ JarvisParallelLlama3B warmup completed in {duration:.2f}s")
-            
+
         except Exception as e:
             logger.error(f"❌ JarvisParallelLlama3B warmup failed: {e}")
             raise
@@ -186,6 +186,10 @@ GENERIC RULES:
 6. Use null for missing optional parameters
 7. Do NOT extract date/time parameters (handled separately){examples_text}"""
                 
+                # Debug: Log the prompt length
+                logger.info(f"🐛 DEBUG: General prompt length: {len(general_prompt)} chars")
+                logger.info(f"🐛 DEBUG: Examples text length: {len(examples_text)} chars")
+                
                 query_tasks.append({
                     "prompt": general_prompt,
                     "function_after": lambda content, result: self._parse_parameter_response(content, result)
@@ -213,6 +217,10 @@ GENERIC RULES:
 
 The conversation context contains current date/time and absolute-to-relative mappings for your reference.{examples_text}"""
                 
+                # Debug: Log the prompt length
+                logger.info(f"🐛 DEBUG: Date prompt length: {len(date_prompt)} chars")
+                logger.info(f"🐛 DEBUG: Date examples text length: {len(examples_text)} chars")
+                
                 query_tasks.append({
                     "prompt": date_prompt,
                     "function_after": lambda content, result: self._parse_parameter_response(content, result)
@@ -222,9 +230,17 @@ The conversation context contains current date/time and absolute-to-relative map
             merged_parameters = {}
             if query_tasks:
                 logger.info(f"🔄 Starting {len(query_tasks)} parallel parameter extraction queries")
+                
+                # Debug: Log the exact time before calling parallel_queries_with_cache
+                debug_start = time.time()
+                logger.info(f"🐛 DEBUG: About to call parallel_queries_with_cache at {debug_start}")
+                
                 results = await self.llm_manager.parallel_queries_with_cache(
                     conversation_id, query_tasks
                 )
+                
+                debug_end = time.time()
+                logger.info(f"🐛 DEBUG: parallel_queries_with_cache completed at {debug_end}, took {debug_end - debug_start:.2f}s")
                 
                 # Merge all parameter results
                 for result in results:
@@ -242,7 +258,7 @@ The conversation context contains current date/time and absolute-to-relative map
             duration = time.time() - start_time
             logger.info(f"✅ JarvisParallelLlama3B parallel inference completed in {duration:.2f}s")
             logger.info(f"   Parallel result: {final_result}")
-            
+
             return final_result
 
         except Exception as e:
@@ -260,7 +276,6 @@ The conversation context contains current date/time and absolute-to-relative map
         if not command_def.get("examples"):
             return ""
         
-        import json
         examples_list = []
         
         for example in command_def["examples"]:

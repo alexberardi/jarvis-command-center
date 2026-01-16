@@ -1,5 +1,8 @@
 """
 Parameter extraction service for building context and extracting parameters from commands.
+
+NOTE: This is part of the LEGACY flow (BaseModel).
+The new tool-based architecture (JarvisToolModel) handles parameter extraction via tool calls.
 """
 
 import json

@@ -1,7 +1,24 @@
 import httpx
 import json
-from typing import Optional 
+import os
+from typing import Optional
 from app.core.interfaces.ijarvis_context_provider import ICommandInferenceSystemPromptProvider
+
+
+def build_jarvis_app_headers() -> dict:
+    """
+    Build Jarvis app-to-app authentication headers if environment variables are set.
+    """
+    app_id = os.getenv("LLM_APP_ID")
+    app_key = os.getenv("LLM_APP_KEY")
+
+    headers = {}
+    if app_id:
+        headers["X-Jarvis-App-Id"] = app_id
+    if app_key:
+        headers["X-Jarvis-App-Key"] = app_key
+
+    return headers
 
 async def post(
     url: str,
@@ -14,7 +31,7 @@ async def post(
     # Default headers
     default_headers = {
         "Content-Type": "application/json",
-        # "Host": "localhost"
+        **build_jarvis_app_headers(),
     }
 
     # Merge with user headers (user overrides take precedence)
@@ -39,6 +56,7 @@ async def get(
     # Default headers
     default_headers = {
         "Content-Type": "application/json",
+        **build_jarvis_app_headers(),
     }
 
     # Merge with user headers (user overrides take precedence)
