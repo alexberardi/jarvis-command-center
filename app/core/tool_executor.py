@@ -17,6 +17,38 @@ class ToolExecutor:
     
     def __init__(self):
         self.registry = tool_registry
+
+    def _compact_tool_result(self, tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(result, dict):
+            return result
+
+        if tool_name == "resolve_relative_date":
+            term = result.get("term")
+            if result.get("error"):
+                return {
+                    "term": term,
+                    "error": result.get("error"),
+                    "message": result.get("message", "Failed to resolve relative date")
+                }
+            if "utc_start_of_day" in result:
+                return {"term": term, "utc_start_of_day": result.get("utc_start_of_day")}
+            if "dates" in result and isinstance(result.get("dates"), list):
+                dates = [
+                    day.get("utc_start_of_day")
+                    for day in result.get("dates", [])
+                    if isinstance(day, dict) and day.get("utc_start_of_day")
+                ]
+                return {"term": term, "utc_start_of_day": dates}
+            if "datetime" in result:
+                return {"term": term, "datetime": result.get("datetime")}
+            if result.get("candidates"):
+                return {
+                    "term": term,
+                    "error": "unresolved_relative_date",
+                    "message": result.get("message", "Could not resolve term")
+                }
+
+        return result
     
     def execute_tool(self, tool_name: str, arguments: Dict[str, Any], conversation_id: Optional[str] = None) -> str:
         """
@@ -38,6 +70,9 @@ class ToolExecutor:
             result = self.registry.execute_tool(tool_name, conversation_id=conversation_id, **arguments)
         else:
             result = self.registry.execute_tool(tool_name, **arguments)
+
+        # Compact large server tool outputs before sending to the LLM
+        result = self._compact_tool_result(tool_name, result)
         
         # Check if this is a validation request
         if isinstance(result, dict) and result.get("_validation_request"):

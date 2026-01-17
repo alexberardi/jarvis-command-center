@@ -27,12 +27,13 @@ class RequestValidationTool(IServerTool):
     @property
     def description(self) -> str:
         return (
-            "CRITICAL: ONLY use this tool as a LAST RESORT when all other options have been exhausted. "
-            "DO NOT call this tool if you can extract parameters directly from the user's message, or if you can use "
-            "other tools (like get_command_examples) to clarify which command to use. "
-            "ONLY ask for validation if a required parameter is genuinely missing or ambiguous after checking examples. "
-            "Ask the user to clarify ambiguous or missing parameters (e.g., which room, device, or value)."
+            "Ask the user to clarify missing or ambiguous required parameters. "
+            "Use as a last resort only when you cannot extract required parameters from the command."
         )
+
+    @property
+    def included_system_prompt_text(self) -> str:
+        return ""
     
     @property
     def parameters(self) -> Dict[str, Any]:

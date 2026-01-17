@@ -25,9 +25,13 @@ class GetCommandExamplesTool(IServerTool):
     @property
     def description(self) -> str:
         return (
-            "Retrieve an extensive list of example voice commands for a command to confirm it is the correct choice."
-            "This tool is also useful to inform your decision on how parameters should be extracted."
+            "Use when unsure which tool to call, how to parse parameters, or to learn common ways of triggering a tool. "
+            "Provide multiple command candidates to compare."
         )
+
+    @property
+    def included_system_prompt_text(self) -> str:
+        return ""
     
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -113,6 +117,8 @@ class GetCommandExamplesTool(IServerTool):
             
             found_count += 1
             examples = matching_cmd.get("examples", [])
+            antipatterns = matching_cmd.get("antipatterns")
+            keywords = matching_cmd.get("keywords")
             
             # Convert examples to proper format
             example_list = []
@@ -127,7 +133,9 @@ class GetCommandExamplesTool(IServerTool):
             logger.info(f"      └─ Command '{cmd_name}': found {len(example_list)} example(s)")
             results.append({
                 "command_name": cmd_name,
-                "examples": example_list
+                "examples": example_list,
+                "antipatterns": antipatterns if isinstance(antipatterns, list) else [],
+                "keywords": keywords if isinstance(keywords, list) else []
             })
         
         logger.info(f"      └─ ✅ Returning examples: {found_count}/{len(command_names)} commands found, {examples_count} total examples")

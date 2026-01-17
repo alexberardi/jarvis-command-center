@@ -7,6 +7,7 @@ gradually replace the existing prompt provider architecture.
 
 import logging
 import json
+import os
 from typing import Dict, Any, List, Optional, Tuple
 
 from app.core.model_factory import ModelFactory
@@ -222,6 +223,38 @@ class ModelService:
         # Merge with client tools
         all_tools = server_tools + (client_tools or [])
         
+        def _get_tool_name(tool: Dict[str, Any]) -> Optional[str]:
+            if isinstance(tool.get("function"), dict):
+                return tool.get("function", {}).get("name")
+            return tool.get("name")
+        
+        available_command_names = {name for name in (_get_tool_name(t) for t in all_tools) if name}
+        if available_commands:
+            available_command_names.update(cmd.command_name for cmd in available_commands)
+        
+        def _filter_antipatterns(items: Optional[List[Dict[str, Any]]], source: str) -> List[Dict[str, Any]]:
+            if not items:
+                return []
+            filtered = []
+            dropped = 0
+            for ap in items:
+                if not isinstance(ap, dict):
+                    dropped += 1
+                    continue
+                cmd_name = ap.get("command_name")
+                desc = ap.get("description")
+                if cmd_name in available_command_names and isinstance(desc, str) and desc.strip():
+                    filtered.append({"command_name": cmd_name, "description": desc.strip()})
+                else:
+                    dropped += 1
+            logger.debug(
+                "🔎 Antipatterns filtered (%s): kept=%d dropped=%d",
+                source,
+                len(filtered),
+                dropped
+            )
+            return filtered
+        
         logger.info(f"🔧 Total tools: {len(all_tools)} ({len(server_tools)} server + {len(client_tools or [])} client)")
 
         # Extract examples from client_tools
@@ -239,6 +272,10 @@ class ModelService:
                     tool_name = tool.get("name")
                 
                 logger.debug(f"   Tool {i+1}: name={tool_name}, keys={list(tool.keys())}")
+
+                tool["antipatterns"] = _filter_antipatterns(tool.get("antipatterns"), f"client_tool:{tool_name or i}")
+                if tool.get("antipatterns"):
+                    logger.debug("✅ Antipatterns attached to client tool %s: %d", tool_name, len(tool["antipatterns"]))
                 
                 if tool_name:
                     # Check if this tool has an "examples" array at the top level
@@ -249,7 +286,10 @@ class ModelService:
                         if tool_name not in command_examples_map:
                             command_examples_map[tool_name] = {
                                 "command_name": tool_name,
-                                "examples": []
+                                "examples": [],
+                                "keywords": tool.get("keywords"),
+                                "antipatterns": tool.get("antipatterns"),
+                                "allow_direct_answer": tool.get("allow_direct_answer")
                             }
                         
                         # Add all examples from the array
@@ -267,7 +307,7 @@ class ModelService:
                                     })
                                     logger.debug(f"   └─ ✅ Added example for {tool_name}: '{voice_command[:50]}...'")
                                 else:
-                                    logger.debug(f"   └─ ⚠️  Example missing voice_command")
+                                    logger.debug("   └─ ⚠️  Example missing voice_command")
                         
                         logger.debug(f"   └─ Processed {len(examples_array)} example(s) for {tool_name}")
                     else:
@@ -290,6 +330,11 @@ class ModelService:
             logger.info(f"📚 Also received {len(available_commands)} available commands")
             for cmd in available_commands:
                 cmd_dict = cmd.model_dump()
+                cmd_dict["antipatterns"] = _filter_antipatterns(cmd_dict.get("antipatterns"), f"available_command:{cmd_dict.get('command_name')}")
+                if cmd_dict.get("antipatterns"):
+                    logger.debug("✅ Antipatterns attached to command %s: %d", cmd_dict.get("command_name"), len(cmd_dict["antipatterns"]))
+                if cmd_dict.get("keywords"):
+                    logger.debug("🔑 Keywords attached to command %s: %s", cmd_dict.get("command_name"), cmd_dict.get("keywords"))
                 cmd_name = cmd_dict.get("command_name")
                 if cmd_name in command_examples_map:
                     # Merge examples
@@ -298,20 +343,32 @@ class ModelService:
                     available_commands_to_cache.append(cmd_dict)
         
         # Build system message using the model's prompt builder when available
-        # Pass empty list for available_commands_dicts since we're using client_tools examples now
+        available_commands_dicts = []
+        if available_commands:
+            available_commands_dicts.extend([cmd.model_dump() for cmd in available_commands])
+        if client_tools:
+            for tool in client_tools:
+                tool_name = tool.get("function", {}).get("name") if isinstance(tool.get("function"), dict) else tool.get("name")
+                if tool_name:
+                    tool_flags = {
+                        "command_name": tool_name,
+                        "allow_direct_answer": tool.get("allow_direct_answer")
+                    }
+                    available_commands_dicts.append(tool_flags)
+
         if hasattr(self.model, "_build_system_prompt"):
-            system_message = self.model._build_system_prompt(node_context, timezone, all_tools, [])  # type: ignore[attr-defined]
+            system_message = self.model._build_system_prompt(
+                node_context,
+                timezone,
+                all_tools,
+                available_commands_dicts
+            )  # type: ignore[attr-defined]
         else:
             # Fallback to default builder
-            system_message = self._build_tool_system_message(node_context, timezone, all_tools, [])
-
-        # Format tools without examples (examples available via get_command_examples tool)
-        tools_text = tool_call_parser.format_tools_for_prompt(all_tools)
-        tools_message = f"Available tools (use only what you need):\n{tools_text}"
+            system_message = self._build_tool_system_message(node_context, timezone, all_tools, available_commands_dicts)
 
         messages = [
-            {"role": "system", "content": system_message},
-            {"role": "system", "content": tools_message}
+            {"role": "system", "content": system_message}
         ]
         
         # Store in cache (including command examples extracted from client_tools)
@@ -320,7 +377,8 @@ class ModelService:
             messages=messages,
             available_commands=available_commands_to_cache,
             timezone=timezone,
-            tools=all_tools
+            tools=all_tools,
+            node_context=node_context
         )
         if available_commands_to_cache:
             total_examples = sum(len(cmd.get("examples", [])) for cmd in available_commands_to_cache)
@@ -329,6 +387,16 @@ class ModelService:
             logger.warning(f"⚠️  Cached empty available_commands list - get_command_examples tool will return no_commands_available")
         
         # Warm up LLM proxy (tools are in system message, not passed separately)
+        try:
+            from pathlib import Path
+            repo_root = Path(__file__).resolve().parents[2]
+            prompt_path = repo_root / "temp" / "warmup_prompt.txt"
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            prompt_path.write_text(system_message, encoding="utf-8")
+            logger.info("📝 Wrote warmup prompt to %s", prompt_path)
+        except Exception as e:
+            logger.warning("⚠️ Failed to write warmup prompt to file: %s", e)
+
         try:
             logger.info(f"🔥 Calling LLM proxy warmup_conversation for {conversation_id[:8]}")
             result = await self.llm_client.warmup_conversation(
@@ -353,6 +421,15 @@ class ModelService:
             import traceback
             logger.error(f"   Traceback: {traceback.format_exc()}")
             raise
+
+    def _filter_tools_for_utterance(
+        self,
+        voice_command: str,
+        tools: List[Dict[str, Any]],
+        available_commands: Optional[List[Dict[str, Any]]]
+    ) -> List[Dict[str, Any]]:
+        # Keyword-based filtering disabled: always keep the full tool list.
+        return tools
     
     async def process_voice_command_with_tools(
         self,
@@ -380,23 +457,90 @@ class ModelService:
         # Get conversation state
         messages = conversation_cache.get_messages(conversation_id)
         tools = conversation_cache.get_tools(conversation_id)
+        available_commands = conversation_cache.get_available_commands(conversation_id) or []
+        node_context = conversation_cache.get_node_context(conversation_id) or {}
+        timezone = conversation_cache.get_timezone(conversation_id)
         
         if not messages:
             raise ValueError(f"Conversation {conversation_id} not found or expired")
+        if tools:
+            filtered_tools = self._filter_tools_for_utterance(voice_command, tools, available_commands)
+            if filtered_tools is not tools:
+                tools = filtered_tools
+                if node_context:
+                    def _tool_name(tool: Dict[str, Any]) -> Optional[str]:
+                        if isinstance(tool.get("function"), dict):
+                            return tool.get("function", {}).get("name")
+                        return tool.get("name")
+
+                    filtered_command_names = {
+                        _tool_name(tool) for tool in tools
+                        if _tool_name(tool) and not tool_registry.has_tool(_tool_name(tool))
+                    }
+                    filtered_available = [
+                        cmd for cmd in available_commands
+                        if cmd.get("command_name") in filtered_command_names
+                    ]
+                    available_command_flags = [
+                        {
+                            "command_name": cmd.get("command_name"),
+                            "allow_direct_answer": cmd.get("allow_direct_answer")
+                        }
+                        for cmd in filtered_available
+                    ]
+                    if hasattr(self.model, "_build_system_prompt") and messages and messages[0].get("role") == "system":
+                        messages[0] = {
+                            "role": "system",
+                            "content": self.model._build_system_prompt(node_context, timezone, tools, available_command_flags)  # type: ignore[attr-defined]
+                        }
+                        logger.info("🧹 Rebuilt system prompt with filtered tools")
         
-        # Detect and resolve relative dates in the utterance
-        timezone = conversation_cache.get_timezone(conversation_id)
-        from app.core.date_detector import detect_and_resolve_relative_dates
-        
-        date_resolution = detect_and_resolve_relative_dates(voice_command, timezone)
-        
-        # If relative dates were detected and resolved, add them as a system message
-        if date_resolution["summary"]:
-            messages.append({
-                "role": "system",
-                "content": date_resolution["summary"]
-            })
-            logger.info(f"📅 Added resolved dates to prompt: {len(date_resolution['resolved_dates'])} date(s)")
+        # Detect and resolve relative dates in the utterance (server-side prepass)
+        from app.core.date_detector import detect_relative_dates
+        from app.core.tool_executor import tool_executor
+        import json
+
+        relative_terms = detect_relative_dates(voice_command)
+        if relative_terms:
+            logger.info(f"📅 Detected relative date phrases: {relative_terms}")
+            for term in relative_terms:
+                tool_call_id = f"server_resolve_{term}"
+                result_raw = tool_executor.execute_tool(
+                    "resolve_relative_date",
+                    {"relative_term": term, "timezone": timezone},
+                    conversation_id=conversation_id
+                )
+
+                result_obj = None
+                if isinstance(result_raw, str):
+                    try:
+                        result_obj = json.loads(result_raw)
+                    except json.JSONDecodeError:
+                        result_obj = None
+                elif isinstance(result_raw, dict):
+                    result_obj = result_raw
+
+                if isinstance(result_obj, dict) and "error" in result_obj:
+                    logger.warning(f"⚠️ resolve_relative_date failed for '{term}': {result_obj.get('message')}")
+                    continue
+
+                if isinstance(result_raw, str):
+                    result_content = result_raw
+                else:
+                    try:
+                        result_content = json.dumps(result_raw)
+                    except Exception:
+                        result_content = str(result_raw)
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": "resolve_relative_date",
+                    "content": result_content
+                })
+                logger.info(f"📅 Injected resolve_relative_date result for '{term}'")
+        else:
+            logger.info("📅 No relative date phrases detected")
         
         # Add user message
         messages.append({"role": "user", "content": voice_command})
@@ -410,7 +554,8 @@ class ModelService:
         
         # Update cache with final messages
         conversation_cache.update_messages(conversation_id, messages)
-        
+        if result.get("stop_reason") == "error":
+            logger.error("❌ Tool loop returned stop_reason=error: %s", result)
         return result
     
     async def continue_conversation_with_tool_results(
@@ -482,14 +627,76 @@ class ModelService:
         Returns:
             Response dict with stop_reason and relevant data
         """
+        def _get_must_call_tools() -> List[str]:
+            must_call = set()
+            available_commands = conversation_cache.get_available_commands(conversation_id) or []
+            for cmd in available_commands:
+                cmd_name = cmd.get("command_name")
+                if cmd_name and cmd.get("allow_direct_answer") is False:
+                    must_call.add(cmd_name)
+            for tool in tools or []:
+                tool_name = tool.get("function", {}).get("name") if isinstance(tool.get("function"), dict) else tool.get("name")
+                if tool_name and tool.get("allow_direct_answer") is False:
+                    must_call.add(tool_name)
+            return sorted(must_call)
+
+        def _must_call_retry_already_added() -> bool:
+            retry_tag = "[MUST_CALL_RETRY]"
+            return any(
+                msg.get("role") == "system" and retry_tag in msg.get("content", "")
+                for msg in messages
+            )
+
+        def _tools_with_resolved_datetimes() -> set:
+            names = set()
+            for tool in tools or []:
+                func = tool.get("function", {}) if isinstance(tool.get("function"), dict) else {}
+                tool_name = func.get("name") or tool.get("name")
+                props = (func.get("parameters") or {}).get("properties") or {}
+                if tool_name and "resolved_datetimes" in props:
+                    names.add(tool_name)
+            return names
+
+        def _extract_resolved_datetimes() -> Dict[str, List[str]]:
+            resolved = {}
+            for msg in reversed(messages or []):
+                if msg.get("role") != "tool" or msg.get("name") != "resolve_relative_date":
+                    continue
+                try:
+                    content = msg.get("content", "")
+                    data = json.loads(content) if isinstance(content, str) else content
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                term = data.get("term")
+                if not term or term in resolved:
+                    continue
+                if isinstance(data.get("utc_start_of_day"), list):
+                    resolved[term] = [d for d in data["utc_start_of_day"] if isinstance(d, str)]
+                elif isinstance(data.get("utc_start_of_day"), str):
+                    resolved[term] = [data["utc_start_of_day"]]
+                elif isinstance(data.get("dates"), list):
+                    dates = []
+                    for day in data["dates"]:
+                        if isinstance(day, dict) and isinstance(day.get("utc_start_of_day"), str):
+                            dates.append(day["utc_start_of_day"])
+                    if dates:
+                        resolved[term] = dates
+                elif isinstance(data.get("datetime"), str):
+                    resolved[term] = [data["datetime"]]
+            return resolved
+
         for iteration in range(max_iterations):
             logger.info(f"🔁 Tool loop iteration {iteration + 1}/{max_iterations}")
             
             # Call LLM (tools are in system message, not passed separately)
             try:
+                response_format = self._get_response_format()
                 response = await self.llm_client.chat_completion(
                     messages=messages,
-                    conversation_id=conversation_id
+                    conversation_id=conversation_id,
+                    response_format=response_format
                 )
             except Exception as e:
                 logger.error(f"❌ LLM call failed: {e}")
@@ -525,6 +732,16 @@ class ModelService:
             
             # Handle different finish reasons
             if finish_reason == "stop":
+                must_call_tools = _get_must_call_tools()
+                if must_call_tools and not _must_call_retry_already_added():
+                    retry_message = (
+                        "[MUST_CALL_RETRY] Direct answers are not allowed for this request. "
+                        "You must call exactly one tool next. "
+                        f"Tools that require a call: {', '.join(must_call_tools)}."
+                    )
+                    messages.append({"role": "system", "content": retry_message})
+                    logger.info("🔁 Must-call guard triggered; retrying tool selection")
+                    continue
                 # Conversation complete
                 return {
                     "stop_reason": "complete",
@@ -552,7 +769,7 @@ class ModelService:
                 if server_results:
                     messages.extend(server_results)
                     logger.info(f"✅ Executed {len(server_results)} server tools, added results to conversation")
-                
+
                 # If get_command_examples was called, we MUST continue the loop so the LLM can see the examples
                 # before making any decisions (including validation requests)
                 if get_examples_called:
@@ -594,6 +811,35 @@ class ModelService:
                 
                 # If there are client tool calls and NO server tools, return them immediately
                 if client_calls:
+                    try:
+                        from app.core.date_detector import detect_relative_dates
+                        resolved_terms = _extract_resolved_datetimes()
+                        if resolved_terms:
+                            last_user_msg = next(
+                                (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
+                                ""
+                            )
+                            detected_terms = detect_relative_dates(last_user_msg)
+                            if detected_terms:
+                                tools_with_resolved = _tools_with_resolved_datetimes()
+                                resolved_dates = []
+                                for term in detected_terms:
+                                    resolved_dates.extend(resolved_terms.get(term, []))
+                                if resolved_dates:
+                                    for call in client_calls:
+                                        tool_name = call.get("function", {}).get("name")
+                                        if tool_name not in tools_with_resolved:
+                                            continue
+                                        args_raw = call.get("function", {}).get("arguments", "{}")
+                                        try:
+                                            args_obj = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+                                        except Exception:
+                                            args_obj = {}
+                                        args_obj["resolved_datetimes"] = resolved_dates
+                                        call.setdefault("function", {})["arguments"] = json.dumps(args_obj)
+                                    logger.info("📅 Overrode resolved_datetimes using server date resolution")
+                    except Exception as e:
+                        logger.warning("⚠️ Failed to override resolved_datetimes: %s", e)
                     logger.info(f"📤 Returning {len(client_calls)} client tool calls (no server tools to wait for)")
                     return {
                         "stop_reason": "tool_calls",
@@ -619,6 +865,38 @@ class ModelService:
             "stop_reason": "complete",
             "assistant_message": "Maximum tool execution iterations reached.",
             "error": "max_iterations_exceeded"
+        }
+
+    def _get_response_format(self) -> Dict[str, Any]:
+        return {
+            "type": "json_object",
+            "json_schema": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"},
+                    "tool_calls": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "arguments": {"type": "object"},
+                            },
+                            "required": ["name", "arguments"],
+                        },
+                    },
+                    "error": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "type": {"type": "string"},
+                            "message": {"type": "string"},
+                        },
+                        "required": ["type", "message"],
+                    },
+                },
+                "required": ["message", "tool_calls"],
+                "additionalProperties": True,
+            },
         }
     
     def _build_tool_system_message(

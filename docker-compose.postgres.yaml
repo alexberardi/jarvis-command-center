@@ -25,6 +25,7 @@ services:
     volumes:
       - ./app:/app/app
       - ./data:/app/data
+      - ./temp:/app/temp
       - ./.env:/app/.env
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
