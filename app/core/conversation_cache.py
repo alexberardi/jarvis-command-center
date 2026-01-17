@@ -34,6 +34,7 @@ class ConversationCache:
                 'tools': tools or [],
                 'timezone': timezone,
                 'node_context': node_context,
+                'router_decision': None,
                 'timestamp': time.time()
             }
             logger.info(f"💾 Cached messages, commands, and {len(tools or [])} tools for conversation {conversation_id[:8]}...")
@@ -112,6 +113,35 @@ class ConversationCache:
 
             logger.info(f"📖 Retrieved cached node_context for conversation {conversation_id[:8]}... (age: {age_seconds:.1f}s)")
             return entry.get('node_context')
+
+    def set_router_decision(self, conversation_id: str, decision: Optional[Dict]) -> None:
+        """Store the latest router decision for a conversation."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                logger.warning(f"❌ Cannot set router decision for non-existent conversation {conversation_id[:8]}...")
+                return
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                logger.warning(f"❌ Cannot set router decision for expired conversation {conversation_id[:8]}...")
+                return
+            entry['router_decision'] = decision
+            logger.info(f"🧭 Stored router decision for conversation {conversation_id[:8]}...")
+
+    def get_router_decision(self, conversation_id: str) -> Optional[Dict]:
+        """Retrieve router decision for a conversation ID if not expired."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                logger.debug(f"❌ No cached router decision found for conversation {conversation_id[:8]}...")
+                return None
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                logger.info(f"⏰ Expired cache for conversation {conversation_id[:8]}... (age: {age_seconds:.1f}s)")
+                return None
+            return entry.get('router_decision')
 
     
     def add_message(self, conversation_id: str, message: ConversationMessage) -> None:

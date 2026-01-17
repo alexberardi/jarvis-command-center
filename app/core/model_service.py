@@ -41,7 +41,41 @@ class ModelService:
         """
         self.model: IModelInterface = ModelFactory.create_model(model_name)
         self.llm_client = LLMProxyClient()
+        self._tool_classifier = None
         logger.info(f"🤖 ModelService initialized with {self.model.name}")
+
+    def _get_tool_classifier(self):
+        if self._tool_classifier is not None:
+            return self._tool_classifier
+        if os.getenv("JARVIS_TOOL_CLASSIFIER_ENABLED", "false").lower() not in {"1", "true", "yes"}:
+            return None
+        try:
+            from app.core.tool_router.classifier import FastTextToolClassifier
+        except Exception as exc:
+            logger.warning("⚠️ Tool classifier unavailable: %s", exc)
+            return None
+        classifier = FastTextToolClassifier.from_env()
+        if classifier is None:
+            return None
+        self._tool_classifier = classifier
+        return self._tool_classifier
+
+    def _route_tool(self, utterance: str, tools: List[Dict[str, Any]]) -> Optional[Tuple[str, float]]:
+        classifier = self._get_tool_classifier()
+        if classifier is None or not utterance:
+            return None
+        tool_names = set()
+        for tool in tools or []:
+            if isinstance(tool.get("function"), dict):
+                name = tool.get("function", {}).get("name")
+            else:
+                name = tool.get("name")
+            if name:
+                tool_names.add(name)
+        prediction = classifier.predict(utterance)
+        if not prediction.tool_name or prediction.tool_name not in tool_names:
+            return None
+        return prediction.tool_name, prediction.score
     
     async def warmup_conversation(
         self,
@@ -494,6 +528,22 @@ class ModelService:
                             "content": self.model._build_system_prompt(node_context, timezone, tools, available_command_flags)  # type: ignore[attr-defined]
                         }
                         logger.info("🧹 Rebuilt system prompt with filtered tools")
+
+        # Optional tool routing classifier (phase 1)
+        router_decision = None
+        routed = self._route_tool(voice_command, tools or [])
+        if routed:
+            tool_name, score = routed
+            try:
+                min_conf = float(os.getenv("JARVIS_TOOL_CLASSIFIER_MIN_CONFIDENCE", "0.6"))
+            except ValueError:
+                min_conf = 0.6
+            use_hint = score >= min_conf
+            router_decision = {"tool_name": tool_name, "score": score, "used": use_hint}
+            conversation_cache.set_router_decision(conversation_id, router_decision)
+            logger.info("🧭 Router predicted tool=%s score=%.3f use_hint=%s", tool_name, score, use_hint)
+        else:
+            conversation_cache.set_router_decision(conversation_id, None)
         
         # Detect and resolve relative dates in the utterance (server-side prepass)
         from app.core.date_detector import detect_relative_dates
@@ -541,6 +591,13 @@ class ModelService:
                 logger.info(f"📅 Injected resolve_relative_date result for '{term}'")
         else:
             logger.info("📅 No relative date phrases detected")
+
+        if router_decision and router_decision.get("used"):
+            hint_tool = router_decision.get("tool_name")
+            messages.append({
+                "role": "system",
+                "content": f"Router hint: likely tool is '{hint_tool}'. Use it if it matches intent; otherwise choose the best tool."
+            })
         
         # Add user message
         messages.append({"role": "user", "content": voice_command})
