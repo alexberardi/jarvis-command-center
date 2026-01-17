@@ -82,6 +82,9 @@ services.json
 temp_*.py
 *.tmp
 *.bak
+temp/tool_classifier.bin
+temp/tool_router_extra_training.jsonl
+temp/tool_router_training.jsonl
 
 # Logs
 logs/

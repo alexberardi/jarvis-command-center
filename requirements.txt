@@ -11,3 +11,5 @@ debugpy
 rapidfuzz
 psycopg2-binary
 pytz
+fasttext
+numpy<2

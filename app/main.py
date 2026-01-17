@@ -7,6 +7,7 @@ from app.context_providers.node_context_provider import NodeContextProvider
 from app.request_models.voice_command_request import VoiceCommandRequest
 from app.request_models.conversation_start_request import ConversationStartRequest
 from app.request_models.tool_result_request import ToolResultRequest
+from app.request_models.tool_router_training_request import ToolRouterTrainingRequest
 from app.response_models.voice_command_response import VoiceCommandResponse, VoiceCommandError, SingleCommandResponse, RequestInformation
 from app.debug_setup import setup_debugger
 from app.core.malformed_json_extractor import MalformedJsonExtractorService
@@ -214,6 +215,56 @@ async def handle_voice(
             validation_request=None,
             assistant_message=None
         )
+
+
+@v0_router.post("/tool-router/train")
+async def train_tool_router(
+    request: ToolRouterTrainingRequest,
+    node_context_provider: NodeContextProvider = Depends(verify_api_key)
+):
+    """Train the tool router classifier using provided commands/examples."""
+    from pathlib import Path
+    from app.core.tool_router import training
+
+    repo_root = Path(__file__).resolve().parents[1]
+    output_path = Path(request.output_model_path) if request.output_model_path else repo_root / "temp" / "tool_classifier.bin"
+    training_jsonl_path = repo_root / "temp" / "tool_router_training.jsonl"
+
+    command_payloads = [cmd.model_dump() for cmd in request.available_commands]
+    extra_examples = []
+    if request.extra_training:
+        extra_examples = [
+            training.TrainingExample(utterance=ex.utterance, tool_name=ex.tool_name)
+            for ex in request.extra_training
+        ]
+
+    examples = training.build_training_examples(
+        repo_root=repo_root,
+        extra_examples=extra_examples,
+        extra_jsonl=request.extra_training_jsonl,
+        command_payloads=command_payloads
+    )
+    if request.save_training_jsonl:
+        training.write_training_jsonl(examples, training_jsonl_path)
+
+    epoch = request.epoch if request.epoch is not None else 25
+    lr = request.lr if request.lr is not None else 0.5
+    word_ngrams = request.word_ngrams if request.word_ngrams is not None else 2
+
+    training.train_fasttext_classifier(
+        examples=examples,
+        output_path=output_path,
+        epoch=epoch,
+        lr=lr,
+        word_ngrams=word_ngrams
+    )
+
+    return {
+        "status": "success",
+        "examples": len(examples),
+        "model_path": str(output_path),
+        "training_jsonl_path": str(training_jsonl_path) if request.save_training_jsonl else None
+    }
 
 
 @v0_router.post("/voice/command/continue", response_model=VoiceCommandResponse)

@@ -101,6 +101,31 @@ Optional debugger port override:
 export DEBUG_PORT=5680
 ```
 
+## Tool Router Classifier (Optional)
+You can optionally train and load a tiny local tool router classifier.
+
+### Customize Training
+Provide extra training examples as JSONL (one per line):
+```json
+{"utterance": "Who won the Super Bowl this year?", "tool_name": "search_web"}
+```
+Save it locally (e.g. `temp/tool_router_extra_training.jsonl`) and set:
+```bash
+export JARVIS_TOOL_CLASSIFIER_EXTRA_TRAINING_PATH=/app/temp/tool_router_extra_training.jsonl
+```
+This file is gitignored so each user can maintain their own custom training data.
+
+### Train
+```bash
+python -m app.core.tool_router.training
+```
+
+### Enable
+```bash
+export JARVIS_TOOL_CLASSIFIER_ENABLED=true
+export JARVIS_TOOL_CLASSIFIER_MODEL_PATH=/app/temp/tool_classifier.bin
+```
+
 ## Docker Dev Run with Hot Reload
 ```bash
 docker compose -f docker-compose.dev.yaml up --build
