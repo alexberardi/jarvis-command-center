@@ -33,7 +33,7 @@ async def generate_date_context(
             timezone = getattr(node_context_provider.node, 'timezone', None)
         
         date_context = generate_date_context_object(timezone)
-        logger.info(f"Generated date context for timezone {timezone}: {date_context}")
+        logger.debug(f"Generated date context for timezone {timezone}: {date_context}")
         return JSONResponse(status_code=200, content=date_context)
     except Exception as e:
         logger.error(f"Error generating date context: {e}")

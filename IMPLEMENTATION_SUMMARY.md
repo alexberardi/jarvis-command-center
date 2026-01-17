@@ -81,7 +81,7 @@ Successfully implemented a complete tool-based conversation architecture for Jar
 - Tool-based flow only
 - Returns response format with `stop_reason`
 - Includes `tool_calls` for client execution
-- Handles validation requests
+  - Handles validation requests
 
 #### New `/api/v0/voice/command/continue` ✅
 - Accepts tool execution results

@@ -23,10 +23,14 @@ class ResolveRelativeDateTool(IServerTool):
     @property
     def description(self) -> str:
         return (
-            "Converts relative date phrases (e.g., 'today', 'tomorrow', 'next week', 'last weekend') into actual dates in the user's timezone. "
-            "Use this tool when a user mentions a relative date that needs to be converted to a specific date before calling another tool. "
-            "Do not guess relative dates for parameter extraction, always use this tool to resolve the date."
+            "Resolve relative date/time phrases to concrete dates in the user's timezone. "
+            "Call before any other tool when relative time is mentioned; do not guess. "
+            "Only output resolved_datetimes if you called this tool."
         )
+
+    @property
+    def included_system_prompt_text(self) -> str:
+        return ""
     
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -153,6 +157,20 @@ class ResolveRelativeDateTool(IServerTool):
                         for day in week_data
                     ]
                 }
+
+            # Check years section
+            elif normalized_term in ["this_year", "next_year", "last_year"]:
+                year_data = date_context["years"].get(normalized_term, [])
+                result = {
+                    "term": normalized_term,
+                    "dates": [
+                        {
+                            "date": day["date"],
+                            "utc_start_of_day": day["utc_start_of_day"]
+                        }
+                        for day in year_data
+                    ]
+                }
             
             if result:
                 # Log concise version of result
@@ -166,9 +184,9 @@ class ResolveRelativeDateTool(IServerTool):
                 # Log full result before returning
                 import json
                 result_json = json.dumps(result, indent=2)
-                logger.info(f"      📤 Returning to LLM (first 1000 chars):\n{result_json[:1000]}")
+                logger.debug(f"      📤 Returning to LLM (first 1000 chars):\n{result_json[:1000]}")
                 if len(result_json) > 1000:
-                    logger.info(f"      ... (truncated, total length: {len(result_json)} chars)")
+                    logger.debug(f"      ... (truncated, total length: {len(result_json)} chars)")
                 
                 return result
             else:
@@ -189,9 +207,9 @@ class ResolveRelativeDateTool(IServerTool):
                 # Log full result before returning
                 import json
                 result_json = json.dumps(result, indent=2)
-                logger.info(f"      📤 Returning to LLM (first 1000 chars):\n{result_json[:1000]}")
+                logger.debug(f"      📤 Returning to LLM (first 1000 chars):\n{result_json[:1000]}")
                 if len(result_json) > 1000:
-                    logger.info(f"      ... (truncated, total length: {len(result_json)} chars)")
+                    logger.debug(f"      ... (truncated, total length: {len(result_json)} chars)")
                 
                 return result
                 

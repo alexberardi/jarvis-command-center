@@ -6,7 +6,7 @@ Tools are automatically discovered and registered by scanning the tools director
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 
 class IServerTool(ABC):
@@ -63,6 +63,14 @@ class IServerTool(ABC):
         """
         ...
     
+    @property
+    def included_system_prompt_text(self) -> Optional[str]:
+        """
+        Optional extra guidance to include in the main system prompt.
+        Use this for global instructions that shouldn't live in the tool description.
+        """
+        return None
+
     @abstractmethod
     def execute(self, **kwargs) -> Dict[str, Any]:
         """
@@ -95,7 +103,7 @@ class IServerTool(ABC):
         Returns:
             Tool definition in OpenAI format
         """
-        return {
+        tool_def = {
             "type": "function",
             "function": {
                 "name": self.name,
@@ -103,4 +111,7 @@ class IServerTool(ABC):
                 "parameters": self.parameters
             }
         }
+        if self.included_system_prompt_text:
+            tool_def["included_system_prompt_text"] = self.included_system_prompt_text
+        return tool_def
 

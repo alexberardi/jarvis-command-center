@@ -14,6 +14,8 @@ Key Features:
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from app.core.interfaces.imodel_interface import IModelInterface
@@ -22,7 +24,6 @@ from app.core.tool_call_parser import tool_call_parser
 from app.core.tool_registry import tool_registry
 from app.core.tool_executor import tool_executor
 from app.core.conversation_cache import conversation_cache
-from app.core.general_context import get_general_context
 from app.request_models.voice_command_request import CommandDefinition
 
 logger = logging.getLogger("uvicorn")
@@ -76,17 +77,11 @@ class JarvisToolModel(IModelInterface):
         # Get available_commands for examples
         available_commands_dicts = [cmd.model_dump() for cmd in (available_commands or [])]
         
-        # Build system message (without tools)
+        # Build system message (includes tools + examples)
         system_message = self._build_system_prompt(node_context, timezone, all_tools, available_commands_dicts)
-        
-        # Format tools without examples (examples available via get_command_examples tool)
-        from app.core.tool_call_parser import tool_call_parser
-        tools_text = tool_call_parser.format_tools_for_prompt(all_tools)
-        tools_message = f"Available tools (use only what you need):\n{tools_text}"
-        
+
         messages = [
-            {"role": "system", "content": system_message},
-            {"role": "system", "content": tools_message}
+            {"role": "system", "content": system_message}
         ]
         
         # Store in cache
@@ -95,7 +90,8 @@ class JarvisToolModel(IModelInterface):
             messages=messages,
             available_commands=available_commands or [],
             timezone=timezone,
-            tools=all_tools
+            tools=all_tools,
+            node_context=node_context
         )
         
         # Warm up LLM proxy
@@ -215,9 +211,11 @@ class JarvisToolModel(IModelInterface):
             
             # Call LLM
             try:
+                response_format = self._get_response_format()
                 response = await self.llm_client.chat_completion(
                     messages=messages,
-                    conversation_id=conversation_id
+                    conversation_id=conversation_id,
+                    response_format=response_format
                 )
             except Exception as e:
                 logger.error(f"❌ LLM call failed: {e}")
@@ -319,42 +317,87 @@ class JarvisToolModel(IModelInterface):
         """
         from app.core.tool_call_parser import tool_call_parser
         
-        date_context = get_general_context(timezone)
         room = node_context.get("room", "unknown")
         user = node_context.get("user", "default")
         voice_mode = node_context.get("voice_mode", "brief")
-        
-        system_prompt = f"""You are Jarvis, a voice assistant that works by calling tools.
-Context: room={room}, user={user}, style={voice_mode}
-Date context:
-{date_context}
+        available_commands = available_commands or []
 
-CRITICAL - Tool Execution Order:
-- Call tools ONE AT A TIME in the order they need to be executed.
-- Do NOT select the final command/tool until all parameters have been resolved.
-- If parameters need resolution (dates, examples, etc.), resolve them FIRST before calling the final tool.
-- Read tool descriptions to understand their purpose and when to use them.
+        must_call_tools = []
+        direct_answer_allowed = []
+        for cmd in available_commands:
+            cmd_name = cmd.get("command_name")
+            if not cmd_name:
+                continue
+            allow_direct = cmd.get("allow_direct_answer")
+            if allow_direct is False:
+                must_call_tools.append(cmd_name)
+            elif allow_direct is True:
+                direct_answer_allowed.append(cmd_name)
+
+        direct_answer_section = ""
+        if must_call_tools or direct_answer_allowed:
+            direct_answer_section = "\nDirect Answer Policy:\n"
+            if must_call_tools:
+                direct_answer_section += f"- MUST call tools for: {', '.join(sorted(set(must_call_tools)))}\n"
+            if direct_answer_allowed:
+                direct_answer_section += f"- Direct answers allowed for: {', '.join(sorted(set(direct_answer_allowed)))}\n"
+
+        tools_section = tool_call_parser.format_tools_for_prompt(tools, available_commands)
+
+        system_prompt = f"""You are Jarvis, a voice assistant that uses tools.
+Context: room={room}, user={user}, style={voice_mode}
 
 Rules:
-- Use the available tools you are given (server + client). Tool definitions describe their purpose.
-- Extract parameters directly from the user's utterance when they are clearly stated. If the user says "Seattle", extract "Seattle" as the city parameter - do not ask for validation when the information is already provided.
-- Only ask for validation if a required parameter is truly missing or genuinely ambiguous after trying all other options.
-- Only answer directly when trivially obvious (e.g., who you are, simple math).
+- Use tools to fulfill requests. Call ONE tool at a time.
+- Pick the tool that best matches intent/keywords/examples; otherwise use get_command_utterance_examples.
+- Extract parameters from the user's words; request validation only if required params are missing/ambiguous.
+{direct_answer_section}
 
-CRITICAL - Response Format (VALID JSON ONLY):
-You MUST respond with valid JSON only. No comments, no explanations, no markdown, no code blocks.
-- Comments (like # ...) are NOT allowed in JSON
-- Only valid JSON syntax is accepted
-- To call a tool (ONE at a time):
-  {{"message": "brief ack", "tool_call": {{"name": "<tool>", "arguments": {{...}}}}}}
-- Final answer:
-  {{"message": "<concise spoken reply>", "tool_call": null}}
+Response format: JSON ONLY (no extra text).
+- Tool call: {{"message":"brief ack","tool_calls":[{{"name":"<tool>","arguments":{{...}}}}],"error":null}}
+- Final: {{"message":"<concise spoken reply>","tool_calls":[],"error":null}}
+
+Tools:
+{tools_section}
 """
 
         logger.info(f"📝 Built system prompt: {len(system_prompt)} characters, {len(tools)} tools available")
-        logger.debug(f"System prompt preview: {system_prompt[:400]}...")
+        if os.getenv("LOG_FULL_SYSTEM_PROMPT", "false").lower() in {"1", "true", "yes"}:
+            logger.info("📝 System prompt (full):\n%s", system_prompt)
 
         return system_prompt
+
+    def _get_response_format(self) -> Dict[str, Any]:
+        return {
+            "type": "json_object",
+            "json_schema": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"},
+                    "tool_calls": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "arguments": {"type": "object"},
+                            },
+                            "required": ["name", "arguments"],
+                        },
+                    },
+                    "error": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "type": {"type": "string"},
+                            "message": {"type": "string"},
+                        },
+                        "required": ["type", "message"],
+                    },
+                },
+                "required": ["message", "tool_calls"],
+                "additionalProperties": True,
+            },
+        }
 
 
     def _check_for_validation(self, tool_results: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -412,8 +455,12 @@ You MUST respond with valid JSON only. No comments, no explanations, no markdown
                         "properties": properties,
                         "required": required
                     }
-                }
+                },
+                "allow_direct_answer": cmd.allow_direct_answer,
+                "keywords": cmd.keywords
             }
+            if cmd.antipatterns:
+                tool["antipatterns"] = [ap.model_dump() for ap in cmd.antipatterns]
             
             tools.append(tool)
         

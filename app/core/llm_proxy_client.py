@@ -39,7 +39,8 @@ class LLMProxyClient:
         model: str = "full", 
         temperature: float = 0, 
         conversation_id: Optional[str] = None,
-        tools: Optional[list] = None
+        tools: Optional[list] = None,
+        response_format: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Make a chat completion request."""
         import time
@@ -51,6 +52,13 @@ class LLMProxyClient:
             "temperature": temperature,
             "messages": messages
         }
+
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        if tools is not None:
+            payload["tools"] = tools
+        if response_format is not None:
+            payload["response_format"] = response_format
         
         logger.debug(f"Making chat completion request to {url}")
         logger.info(f"🐛 DEBUG: LLM proxy client starting request at {start_time}")

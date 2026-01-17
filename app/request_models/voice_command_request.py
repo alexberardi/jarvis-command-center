@@ -13,6 +13,10 @@ class CommandExample(BaseModel):
     expected_parameters: Dict[str, Any]
     is_primary: bool = False
 
+class CommandAntipattern(BaseModel):
+    command_name: str
+    description: str
+
 class CommandDefinition(BaseModel):
     command_name: str
     description: str
@@ -22,6 +26,8 @@ class CommandDefinition(BaseModel):
     examples: Optional[List[CommandExample]] = None  # Structured examples format
     rules: Optional[List[str]] = None  # General rules for this command
     critical_rules: Optional[List[str]] = None  # Critical rules that must be followed
+    allow_direct_answer: Optional[bool] = None  # If False, must call tool for this command
+    antipatterns: Optional[List[CommandAntipattern]] = None  # Anti-patterns for tool selection
 
 class VoiceCommandRequest(BaseModel):
     voice_command: str

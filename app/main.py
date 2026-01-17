@@ -159,7 +159,7 @@ async def handle_voice(
         tools = conversation_cache.get_tools(request.conversation_id)
         if tools is None:
             raise HTTPException(status_code=400, detail="Conversation not initialized for tool-based flow")
-
+        
         logger.info(f"🔧 Processing as tool-based conversation")
         result = await model_service.process_voice_command_with_tools(
             voice_command=request.voice_command,

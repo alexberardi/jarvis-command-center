@@ -17,7 +17,15 @@ class ConversationCache:
         self.lock = Lock()
         logger.info(f"🔧 ConversationCache initialized with {ttl_minutes} minute TTL")
     
-    def set(self, conversation_id: str, messages: List[ConversationMessage], available_commands: List[Dict], timezone: str = None, tools: List[Dict] = None) -> None:
+    def set(
+        self,
+        conversation_id: str,
+        messages: List[ConversationMessage],
+        available_commands: List[Dict],
+        timezone: str = None,
+        tools: List[Dict] = None,
+        node_context: Dict = None
+    ) -> None:
         """Store messages, available commands, and tools for a conversation ID."""
         with self.lock:
             self.cache[conversation_id] = {
@@ -25,6 +33,7 @@ class ConversationCache:
                 'available_commands': available_commands,
                 'tools': tools or [],
                 'timezone': timezone,
+                'node_context': node_context,
                 'timestamp': time.time()
             }
             logger.info(f"💾 Cached messages, commands, and {len(tools or [])} tools for conversation {conversation_id[:8]}...")
@@ -85,6 +94,25 @@ class ConversationCache:
             
             logger.info(f"📖 Retrieved cached timezone for conversation {conversation_id[:8]}... (age: {age_seconds:.1f}s)")
             return entry.get('timezone')
+
+    def get_node_context(self, conversation_id: str) -> Optional[Dict]:
+        """Retrieve node_context for a conversation ID if not expired."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                logger.debug(f"❌ No cached node_context found for conversation {conversation_id[:8]}...")
+                return None
+
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                logger.info(f"⏰ Expired cache for conversation {conversation_id[:8]}... (age: {age_seconds:.1f}s)")
+                return None
+
+            logger.info(f"📖 Retrieved cached node_context for conversation {conversation_id[:8]}... (age: {age_seconds:.1f}s)")
+            return entry.get('node_context')
+
     
     def add_message(self, conversation_id: str, message: ConversationMessage) -> None:
         """Add a message to the existing conversation."""
