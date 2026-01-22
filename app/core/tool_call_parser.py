@@ -109,6 +109,14 @@ class ToolCallParser:
             return "stop", [], llm_output
 
     @staticmethod
+    def _normalize_date_key(raw: str) -> str:
+        """Normalize date keys by converting spaces to underscores."""
+        text = raw.strip().lower()
+        text = re.sub(r"\s+", "_", text)
+        text = text.replace(":", "_")
+        return text
+
+    @staticmethod
     def _format_tool_call(tool_call_raw: Any) -> Optional[Dict[str, Any]]:
         if not isinstance(tool_call_raw, dict):
             return None
@@ -135,6 +143,13 @@ class ToolCallParser:
 
         if not isinstance(arguments, dict):
             return None
+
+        # Normalize resolved_datetimes keys (spaces -> underscores)
+        if "resolved_datetimes" in arguments and isinstance(arguments["resolved_datetimes"], list):
+            arguments["resolved_datetimes"] = [
+                ToolCallParser._normalize_date_key(dt) if isinstance(dt, str) else dt
+                for dt in arguments["resolved_datetimes"]
+            ]
 
         tool_call_id = f"call_{uuid.uuid4().hex[:12]}"
         return {
@@ -287,17 +302,19 @@ class ToolCallParser:
             return "No tools available."
         
         # Determine how many examples to include per command
+        small_mode = os.getenv("JARVIS_SMALL_MODEL_MODE", "").strip().lower() in {"1", "true", "yes"}
         max_examples_env = os.getenv("JARVIS_EXAMPLES_PER_COMMAND", "").strip().lower()
         if not max_examples_env:
-            max_examples = 3
+            max_examples = 0 if small_mode else 1
         elif max_examples_env in {"all", "0", "-1"}:
             max_examples = None
         else:
             try:
                 max_examples = max(1, int(max_examples_env))
             except ValueError:
-                logger.warning("⚠️ Invalid JARVIS_EXAMPLES_PER_COMMAND=%r; defaulting to 3", max_examples_env)
-                max_examples = 3
+                fallback = 0 if small_mode else 1
+                logger.warning("⚠️ Invalid JARVIS_EXAMPLES_PER_COMMAND=%r; defaulting to %d", max_examples_env, fallback)
+                max_examples = fallback
 
         # Build a map of command_name -> ordered example list
         command_examples = {}
@@ -421,17 +438,19 @@ Parameters:
             return "No tools available."
         
         # Determine how many examples to include per command
+        small_mode = os.getenv("JARVIS_SMALL_MODEL_MODE", "").strip().lower() in {"1", "true", "yes"}
         max_examples_env = os.getenv("JARVIS_EXAMPLES_PER_COMMAND", "").strip().lower()
         if not max_examples_env:
-            max_examples = 3
+            max_examples = 0 if small_mode else 1
         elif max_examples_env in {"all", "0", "-1"}:
             max_examples = None
         else:
             try:
                 max_examples = max(1, int(max_examples_env))
             except ValueError:
-                logger.warning("⚠️ Invalid JARVIS_EXAMPLES_PER_COMMAND=%r; defaulting to 3", max_examples_env)
-                max_examples = 3
+                fallback = 0 if small_mode else 1
+                logger.warning("⚠️ Invalid JARVIS_EXAMPLES_PER_COMMAND=%r; defaulting to %d", max_examples_env, fallback)
+                max_examples = fallback
 
         # Build a map of command_name -> ordered example list
         command_examples = {}
