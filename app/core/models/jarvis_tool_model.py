@@ -206,16 +206,25 @@ class JarvisToolModel(IModelInterface):
         - Validation required
         - Max iterations reached
         """
+        # Build adapter_settings from node's adapter_hash if present
+        node_context = conversation_cache.get_node_context(conversation_id) or {}
+        adapter_settings = None
+        adapter_hash = node_context.get("adapter_hash")
+        if adapter_hash:
+            adapter_settings = {"hash": adapter_hash, "enabled": True}
+            logger.info(f"🔌 Using adapter {adapter_hash[:8]}... for tool loop")
+
         for iteration in range(max_iterations):
             logger.info(f"🔁 Tool loop iteration {iteration + 1}/{max_iterations}")
-            
+
             # Call LLM
             try:
                 response_format = self._get_response_format()
                 response = await self.llm_client.chat_completion(
                     messages=messages,
                     conversation_id=conversation_id,
-                    response_format=response_format
+                    response_format=response_format,
+                    adapter_settings=adapter_settings
                 )
             except Exception as e:
                 logger.error(f"❌ LLM call failed: {e}")
@@ -425,7 +434,35 @@ Tools:
         
         This allows backward compatibility with existing command definitions.
         """
+        def _normalize_param_type(param_type: Optional[str]) -> Dict[str, Any]:
+            if not param_type:
+                return {"type": "string"}
+            raw = param_type.strip().lower()
+            if raw.startswith("array<") and raw.endswith(">"):
+                inner = raw[len("array<"):-1].strip()
+                return {"type": "array", "items": _normalize_param_type(inner)}
+            if raw.startswith("array[") and raw.endswith("]"):
+                inner = raw[len("array["):-1].strip()
+                return {"type": "array", "items": _normalize_param_type(inner)}
+            if raw.endswith("[]"):
+                inner = raw[:-2].strip()
+                return {"type": "array", "items": _normalize_param_type(inner)}
+            if raw in {"int", "integer"}:
+                return {"type": "integer"}
+            if raw in {"float", "number", "double"}:
+                return {"type": "number"}
+            if raw in {"bool", "boolean"}:
+                return {"type": "boolean"}
+            if raw == "datetime":
+                return {"type": "string", "format": "date-time"}
+            if raw == "date":
+                return {"type": "string", "format": "date"}
+            return {"type": "string"}
+
         tools = []
+        
+        force_required_commands = {"get_calendar_events", "get_sports_scores"}
+        force_required_params = {"resolved_datetimes"}
         
         for cmd in commands:
             # Build parameters schema
@@ -433,15 +470,23 @@ Tools:
             required = []
             
             for param in cmd.parameters:
+                schema = _normalize_param_type(param.type)
                 properties[param.name] = {
-                    "type": param.type,
+                    **schema,
                     "description": param.description or f"Parameter {param.name}"
                 }
                 
                 if param.enum_values:
-                    properties[param.name]["enum"] = param.enum_values
+                    if properties[param.name].get("type") == "array":
+                        properties[param.name].setdefault("items", {})["enum"] = param.enum_values
+                    else:
+                        properties[param.name]["enum"] = param.enum_values
                 
-                if param.required:
+                is_forced_required = (
+                    cmd.command_name in force_required_commands
+                    and param.name in force_required_params
+                )
+                if param.required or is_forced_required:
                     required.append(param.name)
             
             # Create tool definition

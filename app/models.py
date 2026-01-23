@@ -12,3 +12,5 @@ class Node(Base):
     user = Column(String, default="default")
     voice_mode = Column(String, default="brief")
     last_seen = Column(DateTime, default=datetime.utcnow)
+    # Per-node LoRA adapter hash (set after training completes)
+    adapter_hash = Column(String, nullable=True)
