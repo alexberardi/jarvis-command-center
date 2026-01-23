@@ -91,3 +91,5 @@ logs/
 *.log
 
 .continue/
+.venv/
+temp/adapter_training_*.jsonl

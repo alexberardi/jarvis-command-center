@@ -34,18 +34,25 @@ class LLMProxyClient:
         return {**self.app_headers, **(extra_headers or {})}
     
     async def chat_completion(
-        self, 
-        messages: list, 
-        model: str = "full", 
-        temperature: float = 0, 
+        self,
+        messages: list,
+        model: str = "full",
+        temperature: float = 0,
         conversation_id: Optional[str] = None,
         tools: Optional[list] = None,
-        response_format: Optional[Dict[str, Any]] = None
+        response_format: Optional[Dict[str, Any]] = None,
+        include_date_context: bool = True,
+        adapter_settings: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Make a chat completion request."""
+        """Make a chat completion request.
+
+        Args:
+            adapter_settings: Optional dict with adapter configuration.
+                Expected keys: hash (str), scale (float, default 1.0), enabled (bool, default True)
+        """
         import time
         start_time = time.time()
-        
+
         url = self._build_url("/v1/chat/completions")
         payload = {
             "model": model,
@@ -59,6 +66,9 @@ class LLMProxyClient:
             payload["tools"] = tools
         if response_format is not None:
             payload["response_format"] = response_format
+        payload["include_date_context"] = include_date_context
+        if adapter_settings is not None:
+            payload["adapter_settings"] = adapter_settings
         
         logger.debug(f"Making chat completion request to {url}")
         logger.info(f"🐛 DEBUG: LLM proxy client starting request at {start_time}")
@@ -90,17 +100,18 @@ class LLMProxyClient:
         return await post(url=url, json_data=payload)
     
     async def warmup_conversation(
-        self, 
-        conversation_id: str, 
-        messages: list, 
-        model: str = "full", 
+        self,
+        conversation_id: str,
+        messages: list,
+        model: str = "full",
         temperature: float = 0,
-        tools: Optional[list] = None
+        tools: Optional[list] = None,
+        adapter_settings: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Warm up a conversation with the LLM."""
         import time
         start_time = time.time()
-        
+
         url = self._build_url("/v1/chat/completions")
         payload = {
             "model": model,
@@ -108,6 +119,8 @@ class LLMProxyClient:
             "messages": messages,
             "stream": False,
         }
+        if adapter_settings is not None:
+            payload["adapter_settings"] = adapter_settings
         logger.info(f"🔥 POSTing warmup to {url} for conversation {conversation_id[:8]}")
         logger.debug(f"   Payload keys: {list(payload.keys())}, messages count: {len(messages)}")
         

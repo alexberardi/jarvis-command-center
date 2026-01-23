@@ -17,6 +17,7 @@ class NodeResponse(BaseModel):
     room: str
     user: str
     voice_mode: str
+    adapter_hash: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -27,11 +28,14 @@ class NodeCreate(BaseModel):
     room: str
     user: str = "default"
     voice_mode: str = "brief"
+    adapter_hash: Optional[str] = None
+
 
 class NodeUpdate(BaseModel):
     room: Optional[str] = None
     user: Optional[str] = None
     voice_mode: Optional[str] = None
+    adapter_hash: Optional[str] = None
 
 
 

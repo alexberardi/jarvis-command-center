@@ -1,5 +1,12 @@
 import time
 import logging
+import os
+import json
+from pathlib import Path
+import hashlib
+from uuid import uuid4
+from datetime import datetime
+from typing import Optional
 from fastapi import FastAPI, HTTPException, Depends, Request, APIRouter, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -8,6 +15,7 @@ from app.request_models.voice_command_request import VoiceCommandRequest
 from app.request_models.conversation_start_request import ConversationStartRequest
 from app.request_models.tool_result_request import ToolResultRequest
 from app.request_models.tool_router_training_request import ToolRouterTrainingRequest
+from app.request_models.adapter_training_request import AdapterTrainingRequest
 from app.response_models.voice_command_response import VoiceCommandResponse, VoiceCommandError, SingleCommandResponse, RequestInformation
 from app.debug_setup import setup_debugger
 from app.core.malformed_json_extractor import MalformedJsonExtractorService
@@ -116,7 +124,8 @@ async def start_conversation(
             "room": node_context_provider.node.room,
             "node_id": node_context_provider.node.node_id,
             "user": node_context_provider.node.user,
-            "voice_mode": node_context_provider.node.voice_mode
+            "voice_mode": node_context_provider.node.voice_mode,
+            "adapter_hash": node_context_provider.node.adapter_hash
         }
         
         # Extract timezone from client context for date calculations
@@ -126,13 +135,14 @@ async def start_conversation(
             client_timezone = None
         
         client_tools = request.client_tools or []
-        logger.info(f"🔧 Starting tool-based conversation with {len(client_tools)} client tools")
+        logger.info(f"🔧 Starting tool-based conversation with {len(client_tools)} client tools (skip_warmup={request.skip_warmup_inference})")
         await model_service.warmup_conversation_with_tools(
             node_context=node_context,
             conversation_id=request.conversation_id,
             timezone=client_timezone,
             client_tools=client_tools,
-            available_commands=request.available_commands
+            available_commands=request.available_commands,
+            skip_warmup_inference=request.skip_warmup_inference
         )
         
         # Return success immediately - LLM warm-up and cache population will happen in background
@@ -170,13 +180,21 @@ async def handle_voice(
         # Build response based on stop_reason
         from app.response_models.voice_command_response import StopReason, ToolCall, ValidationRequest
         
+        stop_reason_raw = result.get("stop_reason", "complete")
+        stop_reason = StopReason.COMPLETE
+        if isinstance(stop_reason_raw, str):
+            try:
+                stop_reason = StopReason(stop_reason_raw)
+            except ValueError:
+                logger.warning("⚠️ Unknown stop_reason=%r; defaulting to 'complete'", stop_reason_raw)
+
         response = VoiceCommandResponse(
             commands=[],  # Empty for tool-based responses
             request_information=RequestInformation(
                 voice_command=request.voice_command,
                 conversation_id=request.conversation_id
             ),
-            stop_reason=StopReason(result.get("stop_reason", "complete")),
+            stop_reason=stop_reason,
             assistant_message=result.get("assistant_message"),
             tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
             validation_request=(
@@ -265,6 +283,185 @@ async def train_tool_router(
         "model_path": str(output_path),
         "training_jsonl_path": str(training_jsonl_path) if request.save_training_jsonl else None
     }
+
+
+@v0_router.post("/adapters/train")
+async def train_adapter(
+    request: AdapterTrainingRequest,
+    request_context: Request,
+    node_context_provider: NodeContextProvider = Depends(verify_api_key)
+):
+    """Queue an adapter training job on llm-proxy for this node."""
+    def _write_training_jsonl(dataset: dict, job_id: str) -> Optional[Path]:
+        try:
+            temp_dir = Path("/app/temp")
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            output_path = temp_dir / f"adapter_training_{job_id}.jsonl"
+
+            commands = dataset.get("commands", [])
+            with output_path.open("w", encoding="utf-8") as handle:
+                for cmd in commands:
+                    cmd_name = cmd.get("command_name")
+                    for ex in cmd.get("examples", []) or []:
+                        record = {
+                            "command_name": cmd_name,
+                            "voice_command": ex.get("voice_command"),
+                            "expected_tool_call": ex.get("expected_tool_call"),
+                        }
+                        handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+            logger.info("📝 Wrote adapter training JSONL: %s", output_path)
+            return output_path
+        except Exception as exc:
+            logger.warning("⚠️ Failed to write adapter training JSONL: %s", exc)
+            return None
+
+    def _build_dataset(commands):
+        dataset_commands = []
+        for cmd in commands:
+            examples = cmd.examples or []
+            if not examples:
+                continue
+            formatted_examples = []
+            for ex in examples:
+                formatted_examples.append(
+                    {
+                        "voice_command": ex.voice_command,
+                        "expected_tool_call": {
+                            "name": cmd.command_name,
+                            "arguments": ex.expected_parameters,
+                        },
+                    }
+                )
+            dataset_commands.append(
+                {
+                    "command_name": cmd.command_name,
+                    "examples": formatted_examples,
+                }
+            )
+        return {"commands": dataset_commands}
+
+    dataset_payload = _build_dataset(request.available_commands)
+    dataset_ref = {"format": "inline-json", "data": dataset_payload}
+    if request.dataset_hash:
+        dataset_hash = request.dataset_hash
+    else:
+        payload_bytes = json.dumps(dataset_ref, sort_keys=True).encode("utf-8")
+        dataset_hash = hashlib.sha256(payload_bytes).hexdigest()
+
+    job_id = str(uuid4())
+    training_jsonl_path = _write_training_jsonl(dataset_payload, job_id)
+    callback_url = str(request_context.url_for("adapter_training_callback"))
+
+    callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
+    callback = {"url": callback_url}
+    if callback_token:
+        callback["auth_type"] = "bearer"
+        callback["token"] = callback_token
+
+    queue_payload = {
+        "job_id": job_id,
+        "job_type": "adapter_train",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "priority": request.priority or "normal",
+        "trace_id": job_id,
+        "idempotency_key": dataset_hash,
+        "job_type_version": "v1",
+        "ttl_seconds": 86400,
+        "metadata": {
+            "node_id": node_context_provider.node.node_id,
+        },
+        "request": {
+            "node_id": node_context_provider.node.node_id,
+            "base_model_id": request.base_model_id,
+            "dataset_ref": dataset_ref,
+            "dataset_hash": dataset_hash,
+            "params": request.params.model_dump(exclude_none=True) if request.params else None,
+        },
+        "callback": callback,
+    }
+
+    llm_proxy_base_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
+    queue_url = f"{llm_proxy_base_url.rstrip('/')}/internal/queue/enqueue"
+    headers = {}
+    internal_token = os.getenv("LLM_PROXY_INTERNAL_TOKEN")
+    if internal_token:
+        headers["X-Internal-Token"] = internal_token
+
+    try:
+        result = await post(url=queue_url, json_data=queue_payload, headers=headers)
+    except Exception as e:
+        logger.error("❌ Failed to enqueue adapter training job: %s", e)
+        raise HTTPException(status_code=502, detail="Failed to enqueue adapter training job")
+
+    return {
+        "status": "queued",
+        "job_id": job_id,
+        "dataset_hash": dataset_hash,
+        "training_jsonl_path": str(training_jsonl_path) if training_jsonl_path else None,
+        "llm_proxy_response": result,
+    }
+
+
+@v0_router.post("/adapters/jobs/callback", name="adapter_training_callback")
+async def adapter_training_callback(request: Request):
+    """Receive llm-proxy training job callbacks and update node adapter_hash on success."""
+    from app.deps import get_db
+    from app.models import Node
+
+    callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
+    if callback_token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header != f"Bearer {callback_token}":
+            raise HTTPException(status_code=401, detail="Unauthorized callback")
+
+    payload = await request.json()
+    job_id = payload.get("job_id")
+    status = payload.get("status")
+    logger.info("📬 Adapter training callback received: job_id=%s status=%s", job_id, status)
+
+    # On success, update the node's adapter_hash
+    if status == "succeeded":
+        result = payload.get("result", {})
+        artifact_metadata = result.get("artifact_metadata", {})
+        node_id = artifact_metadata.get("node_id")
+        adapter_hash = artifact_metadata.get("dataset_hash")
+
+        if node_id and adapter_hash:
+            # Get a database session and update the node
+            from app.db import get_session_local
+            SessionLocal = get_session_local()
+            db = SessionLocal()
+            try:
+                node = db.query(Node).filter(Node.node_id == node_id).first()
+                if node:
+                    old_hash = node.adapter_hash
+                    node.adapter_hash = adapter_hash
+                    db.commit()
+                    logger.info(
+                        "✅ Updated node %s adapter_hash: %s -> %s",
+                        node_id,
+                        old_hash[:8] if old_hash else "None",
+                        adapter_hash[:8]
+                    )
+                else:
+                    logger.warning("⚠️ Node %s not found for adapter_hash update", node_id)
+            except Exception as e:
+                logger.error("❌ Failed to update node adapter_hash: %s", e)
+                db.rollback()
+            finally:
+                db.close()
+        else:
+            logger.warning(
+                "⚠️ Missing node_id or adapter_hash in callback: node_id=%s adapter_hash=%s",
+                node_id,
+                adapter_hash[:8] if adapter_hash else None
+            )
+    elif status == "failed":
+        error = payload.get("error", {})
+        logger.error("❌ Adapter training failed for job %s: %s", job_id, error.get("message"))
+
+    return {"status": "ok"}
 
 
 @v0_router.post("/voice/command/continue", response_model=VoiceCommandResponse)

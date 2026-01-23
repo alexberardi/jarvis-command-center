@@ -449,10 +449,18 @@ class ModelService:
             logger.info(f"⏭️  Skipping LLM warmup inference for {conversation_id[:8]} (skip_warmup_inference=True)")
         else:
             try:
+                # Build adapter_settings from node's adapter_hash if present
+                adapter_settings = None
+                adapter_hash = node_context.get("adapter_hash")
+                if adapter_hash:
+                    adapter_settings = {"hash": adapter_hash, "enabled": True}
+                    logger.info(f"🔌 Using adapter {adapter_hash[:8]}... for warmup")
+
                 logger.info(f"🔥 Calling LLM proxy warmup_conversation for {conversation_id[:8]}")
                 result = await self.llm_client.warmup_conversation(
                     conversation_id=conversation_id,
-                    messages=messages
+                    messages=messages,
+                    adapter_settings=adapter_settings
                 )
                 logger.info(f"✅ Tool-based warmup completed for {conversation_id[:8]}")
                 logger.info(f"   Warmup result type: {type(result)}")
@@ -730,6 +738,14 @@ class ModelService:
             )
 
         usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        # Build adapter_settings from node's adapter_hash if present
+        node_context = conversation_cache.get_node_context(conversation_id) or {}
+        adapter_settings = None
+        adapter_hash = node_context.get("adapter_hash")
+        if adapter_hash:
+            adapter_settings = {"hash": adapter_hash, "enabled": True}
+            logger.info(f"🔌 Using adapter {adapter_hash[:8]}... for tool loop")
 
         def _write_usage_log(turns_used: int, status: str) -> None:
             log_path = os.getenv(
@@ -1140,7 +1156,8 @@ class ModelService:
                     messages=messages,
                     conversation_id=conversation_id,
                     response_format=response_format,
-                    include_date_context=True
+                    include_date_context=True,
+                    adapter_settings=adapter_settings
                 )
                 logger.debug(f"⏱️  LLM call took {(_time.time()-_llm_start)*1000:.0f}ms")
             except Exception as e:

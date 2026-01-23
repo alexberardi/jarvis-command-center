@@ -53,6 +53,7 @@ def get_model_service() -> ModelService:
     
     Available models:
     - JarvisToolModel: Tool-based model using JSON tool calls
+    - JarvisAdapterModel: Slim prompt model for adapter-tuned usage
     - Custom models can be added to app/core/models/custom/
     """
     return ModelService()
