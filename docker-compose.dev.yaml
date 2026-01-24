@@ -13,10 +13,15 @@ services:
       - ./.env:/app/.env
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
+      - ../jarvis-log-client:/app/jarvis-log-client
+    env_file:
+      - .env
     environment:
       - PYTHONUNBUFFERED=1
       - DEBUG=true
       - DEBUG_PORT=${DEBUG_PORT:-5678}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: ["python", "-Xfrozen_modules=off", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002", "--reload"]
+    command: >
+      sh -c "pip install -q -e /app/jarvis-log-client &&
+             python -Xfrozen_modules=off -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload"
