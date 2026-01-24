@@ -1,7 +1,10 @@
 import os
 import sys
 import logging
+import time
+from dataclasses import dataclass
 
+import httpx
 from fastapi import Header, HTTPException, Depends
 from sqlalchemy.orm import Session
 
@@ -20,6 +23,14 @@ load_dotenv()
 logger = logging.getLogger("uvicorn")
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
+JARVIS_AUTH_BASE_URL = os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
+JARVIS_AUTH_APP_ID = os.getenv("JARVIS_APP_ID", "command-center")
+JARVIS_AUTH_APP_KEY = os.getenv("JARVIS_APP_KEY")
+
+# Cache for node validation results
+_node_validation_cache: dict[str, tuple[dict, float]] = {}
+NODE_AUTH_CACHE_TTL = int(os.getenv("NODE_AUTH_CACHE_TTL", "60"))
+
 
 def get_db():
     """Get database session with dynamic configuration"""
@@ -31,10 +42,94 @@ def get_db():
         db.close()
 
 
+def _get_cached_validation(api_key: str) -> dict | None:
+    """Get cached validation result if not expired."""
+    if api_key in _node_validation_cache:
+        result, timestamp = _node_validation_cache[api_key]
+        if time.time() - timestamp < NODE_AUTH_CACHE_TTL:
+            return result
+        del _node_validation_cache[api_key]
+    return None
+
+
+def _cache_validation(api_key: str, result: dict) -> None:
+    """Cache a validation result."""
+    _node_validation_cache[api_key] = (result, time.time())
+
+
+def _validate_node_with_auth_service(node_id: str, node_key: str) -> dict:
+    """Validate node credentials with jarvis-auth service (synchronous)."""
+    if not JARVIS_AUTH_APP_KEY:
+        logger.error("JARVIS_APP_KEY not configured for node validation")
+        return {"valid": False, "reason": "Auth not configured"}
+
+    validate_url = JARVIS_AUTH_BASE_URL.rstrip("/") + "/internal/validate-node"
+
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(
+                validate_url,
+                headers={
+                    "X-Jarvis-App-Id": JARVIS_AUTH_APP_ID,
+                    "X-Jarvis-App-Key": JARVIS_AUTH_APP_KEY,
+                },
+                json={
+                    "node_id": node_id,
+                    "node_key": node_key,
+                    "service_id": "command-center",
+                },
+            )
+    except httpx.RequestError as exc:
+        logger.error("Failed to reach jarvis-auth: %s", exc)
+        return {"valid": False, "reason": f"Auth service unavailable: {exc}"}
+
+    if resp.status_code != 200:
+        logger.error("jarvis-auth returned %d", resp.status_code)
+        return {"valid": False, "reason": f"Auth service error: {resp.status_code}"}
+
+    return resp.json()
+
+
 def verify_api_key(x_api_key: str = Header(...), db: Session = Depends(get_db)):
+    """
+    Verify node API key against jarvis-auth service.
+
+    The x_api_key header should be in format "node_id:node_key" for centralized auth,
+    or just the legacy api_key for backwards compatibility with local nodes table.
+    """
+    # Check cache first
+    cached = _get_cached_validation(x_api_key)
+    if cached is not None:
+        if not cached.get("valid"):
+            raise HTTPException(status_code=401, detail=cached.get("reason", "Invalid API Key"))
+        # Get node from local DB for additional context
+        node = db.query(Node).filter(Node.node_id == cached.get("node_id")).first()
+        if node:
+            return NodeContextProvider(node)
+
+    # Try centralized auth first (format: "node_id:node_key")
+    if ":" in x_api_key:
+        node_id, node_key = x_api_key.split(":", 1)
+        result = _validate_node_with_auth_service(node_id, node_key)
+        _cache_validation(x_api_key, result)
+
+        if result.get("valid"):
+            # Get node from local DB for additional context (room, voice_mode, etc.)
+            node = db.query(Node).filter(Node.node_id == node_id).first()
+            if node:
+                return NodeContextProvider(node)
+            else:
+                # Node validated by jarvis-auth but not in local DB - create minimal context
+                logger.warning("Node %s validated but not in local DB", node_id)
+                raise HTTPException(status_code=401, detail="Node not configured locally")
+        else:
+            logger.warning("Node auth failed for %s: %s", node_id, result.get("reason"))
+            raise HTTPException(status_code=401, detail=result.get("reason", "Invalid API Key"))
+
+    # Fallback to legacy local DB lookup (backwards compatibility)
     node = db.query(Node).filter(Node.api_key == x_api_key).first()
     if not node:
-        logger.warning("Unauthorized attempt with API key: %s", x_api_key)
+        logger.warning("Unauthorized attempt with API key: %s", x_api_key[:8] + "...")
         raise HTTPException(status_code=401, detail="Invalid API Key")
     return NodeContextProvider(node)
 
