@@ -13,3 +13,4 @@ psycopg2-binary
 pytz
 fasttext
 numpy<2
+# jarvis-log-client installed from local mount at runtime

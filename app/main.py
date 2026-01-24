@@ -25,9 +25,45 @@ from app.deps import verify_api_key, get_model_service
 from app.core.model_service import ModelService
 from app.core.utils.rest_client import post  # For test mocking compatibility
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Set up logging - console at WARNING level for quieter output
+console_level = os.getenv("JARVIS_LOG_CONSOLE_LEVEL", "WARNING")
+logging.basicConfig(
+    level=getattr(logging, console_level.upper(), logging.WARNING),
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger("uvicorn")
+
+# Remote logging handler (initialized in startup event)
+_jarvis_handler = None
+
+
+def _setup_remote_logging() -> None:
+    """Set up remote logging to jarvis-logs server. Called after uvicorn initializes."""
+    global _jarvis_handler
+    try:
+        from jarvis_log_client import init as init_log_client, JarvisLogHandler
+
+        app_id = os.getenv("JARVIS_APP_ID", "command-center")
+        app_key = os.getenv("JARVIS_APP_KEY")
+        if not app_key:
+            return
+
+        init_log_client(app_id=app_id, app_key=app_key)
+
+        remote_level = os.getenv("JARVIS_LOG_REMOTE_LEVEL", "DEBUG")
+        _jarvis_handler = JarvisLogHandler(
+            service="command-center",
+            level=getattr(logging, remote_level.upper(), logging.DEBUG),
+        )
+
+        # Add to uvicorn loggers (they propagate, but adding directly is more reliable)
+        for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access"]:
+            lg = logging.getLogger(logger_name)
+            lg.addHandler(_jarvis_handler)
+
+        logging.getLogger("uvicorn").info("📡 Remote logging enabled to jarvis-logs")
+    except ImportError:
+        pass  # jarvis-log-client not installed
 
 # Set up debugger if DEBUG environment variable is set
 setup_debugger()
@@ -58,11 +94,22 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         },
     )
 
+# Add startup event to initialize remote logging after uvicorn is ready
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on app startup."""
+    _setup_remote_logging()
+
+
 # Add shutdown event for cleanup
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources on app shutdown."""
     logger.info("🛑 Shutting down Jarvis Command Center...")
+    # Flush and close remote log handler
+    for handler in logger.handlers:
+        if hasattr(handler, 'close'):
+            handler.close()
     logger.info("✅ Shutdown complete")
 
 # Create versioned routers
