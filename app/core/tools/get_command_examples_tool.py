@@ -24,10 +24,7 @@ class GetCommandExamplesTool(IServerTool):
     
     @property
     def description(self) -> str:
-        return (
-            "Use when unsure which tool to call, how to parse parameters, or to learn common ways of triggering a tool. "
-            "Provide multiple command candidates to compare."
-        )
+        return "Use when uncertain which tool to call, how to parse parameters, or to learn common utterance patterns that trigger a specific tool."
 
     @property
     def included_system_prompt_text(self) -> str:
