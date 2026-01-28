@@ -66,7 +66,12 @@ class ToolRegistry:
                             # Instantiate the tool
                             tool_instance = cls()
                             tool_name = tool_instance.name
-                            
+
+                            # Skip disabled tools
+                            if not tool_instance.enabled:
+                                logger.info(f"⏭️  Skipping disabled tool: {tool_name} (from {cls.__name__})")
+                                continue
+
                             # Register it
                             self._tools[tool_name] = tool_instance
                             logger.info(f"🔧 Registered tool: {tool_name} (from {cls.__name__})")

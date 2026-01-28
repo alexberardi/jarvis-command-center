@@ -26,10 +26,7 @@ class RequestValidationTool(IServerTool):
     
     @property
     def description(self) -> str:
-        return (
-            "Ask the user to clarify missing or ambiguous required parameters. "
-            "Use as a last resort only when you cannot extract required parameters from the command."
-        )
+        return "Ask the user to clarify missing or ambiguous required parameters."
 
     @property
     def included_system_prompt_text(self) -> str:

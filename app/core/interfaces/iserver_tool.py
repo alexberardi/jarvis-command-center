@@ -64,6 +64,11 @@ class IServerTool(ABC):
         ...
     
     @property
+    def enabled(self) -> bool:
+        """Whether this tool is active. Disabled tools are not registered."""
+        return True
+
+    @property
     def included_system_prompt_text(self) -> Optional[str]:
         """
         Optional extra guidance to include in the main system prompt.

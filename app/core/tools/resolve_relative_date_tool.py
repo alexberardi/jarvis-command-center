@@ -17,16 +17,17 @@ class ResolveRelativeDateTool(IServerTool):
     """Tool for resolving relative date terms to actual dates."""
     
     @property
+    def enabled(self) -> bool:
+        """Disabled: date resolution is now handled automatically by _inject_date_keys()."""
+        return False
+
+    @property
     def name(self) -> str:
         return "resolve_relative_date"
-    
+
     @property
     def description(self) -> str:
-        return (
-            "Resolve ambiguous or non-absolute date/time phrases to absolute dates in the user's timezone. "
-            "Call before any other tool when relative time is mentioned; do not guess. "
-            "Only output resolved_datetimes if you called this tool."
-        )
+        return "Resolve ambiguous or non-absolute date/time phrases to absolute dates in the user's timezone."
 
     @property
     def included_system_prompt_text(self) -> str:

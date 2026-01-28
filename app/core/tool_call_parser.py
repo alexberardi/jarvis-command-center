@@ -145,11 +145,24 @@ class ToolCallParser:
             return None
 
         # Normalize resolved_datetimes keys (spaces -> underscores)
+        # Also unwrap nested objects like [{"resolved_datetimes": ["tomorrow"]}] -> ["tomorrow"]
         if "resolved_datetimes" in arguments and isinstance(arguments["resolved_datetimes"], list):
-            arguments["resolved_datetimes"] = [
-                ToolCallParser._normalize_date_key(dt) if isinstance(dt, str) else dt
-                for dt in arguments["resolved_datetimes"]
-            ]
+            unwrapped = []
+            for dt in arguments["resolved_datetimes"]:
+                if isinstance(dt, str):
+                    unwrapped.append(ToolCallParser._normalize_date_key(dt))
+                elif isinstance(dt, dict) and "resolved_datetimes" in dt:
+                    # Unwrap nested resolved_datetimes object
+                    nested = dt["resolved_datetimes"]
+                    if isinstance(nested, list):
+                        for nested_dt in nested:
+                            if isinstance(nested_dt, str):
+                                unwrapped.append(ToolCallParser._normalize_date_key(nested_dt))
+                    elif isinstance(nested, str):
+                        unwrapped.append(ToolCallParser._normalize_date_key(nested))
+                else:
+                    unwrapped.append(dt)
+            arguments["resolved_datetimes"] = unwrapped
 
         tool_call_id = f"call_{uuid.uuid4().hex[:12]}"
         return {
@@ -287,14 +300,17 @@ class ToolCallParser:
     @staticmethod
     def format_tools_for_prompt(
         tools: List[Dict[str, Any]],
-        available_commands: Optional[List[Dict[str, Any]]] = None
+        available_commands: Optional[List[Dict[str, Any]]] = None,
+        primary_examples_only: bool = False
     ) -> str:
         """
         Format tools as text for inclusion in system prompt.
-        
+
         Args:
             tools: List of tool definitions in OpenAI format
-            
+            available_commands: Optional list of CommandDefinition dicts to get examples from
+            primary_examples_only: If True, include only is_primary examples (for adapter models)
+
         Returns:
             Formatted string describing tools
         """
@@ -316,17 +332,24 @@ class ToolCallParser:
                 logger.warning("⚠️ Invalid JARVIS_EXAMPLES_PER_COMMAND=%r; defaulting to %d", max_examples_env, fallback)
                 max_examples = fallback
 
-        # Build a map of command_name -> ordered example list
+        # Build maps of command_name -> ordered example list and critical rules
         command_examples = {}
+        command_critical_rules: Dict[str, List[str]] = {}
         if available_commands:
             for cmd_dict in available_commands:
                 cmd_name = cmd_dict.get("command_name")
                 examples = cmd_dict.get("examples", [])
+                critical_rules = cmd_dict.get("critical_rules", [])
+                if cmd_name and critical_rules:
+                    command_critical_rules[cmd_name] = critical_rules
                 if not cmd_name or not examples:
                     continue
                 primary = [ex for ex in examples if ex.get("is_primary", False)]
-                secondary = [ex for ex in examples if not ex.get("is_primary", False)]
-                command_examples[cmd_name] = primary + secondary
+                if primary_examples_only:
+                    command_examples[cmd_name] = primary
+                else:
+                    secondary = [ex for ex in examples if not ex.get("is_primary", False)]
+                    command_examples[cmd_name] = primary + secondary
 
         tool_descriptions = []
         available_names = {tool.get("function", {}).get("name") for tool in tools if isinstance(tool.get("function"), dict)}
@@ -377,19 +400,25 @@ class ToolCallParser:
 
             antipattern_block = ""
             if include_antipatterns:
-                antipattern_lines = []
+                # Group anti-patterns by their redirect command
+                grouped: Dict[str, List[str]] = {}
                 for ap in antipatterns:
                     if not isinstance(ap, dict):
                         continue
-                    ap_cmd = ap.get("command_name")
-                    ap_desc = ap.get("description")
+                    ap_cmd: str = ap.get("command_name", "")
+                    ap_desc: str = ap.get("description", "")
                     if ap_cmd and ap_cmd not in available_names:
                         continue
-                    if isinstance(ap_desc, str) and ap_desc.strip():
-                        antipattern_lines.append(f"  - {ap_desc.strip()}")
+                    if not (isinstance(ap_desc, str) and ap_desc.strip()):
+                        continue
+                    grouped.setdefault(ap_cmd, []).append(f"  - {ap_desc.strip()}")
 
-                if antipattern_lines:
-                    antipattern_block = f"\nAnti-patterns:\n{chr(10).join(antipattern_lines)}"
+                if grouped:
+                    parts: List[str] = []
+                    for cmd_name, lines in grouped.items():
+                        label = f"Anti-patterns (use {cmd_name} instead):" if cmd_name else "Anti-patterns:"
+                        parts.append(f"\n{label}\n{chr(10).join(lines)}")
+                    antipattern_block = "".join(parts)
 
             keywords_block = ""
             if isinstance(keywords, list):
@@ -410,27 +439,45 @@ class ToolCallParser:
                 if example_lines:
                     example_str = "\nExamples:\n" + "\n".join(example_lines)
 
-            tool_str = f"""
-Tool: {name}
-Description: {description}
-{antipattern_block}
-{keywords_block}
-Parameters:
-{chr(10).join(param_list) if param_list else "  None"}{example_str}
-"""
+            # Build critical rules block
+            critical_rules_block = ""
+            if name in command_critical_rules:
+                rules = command_critical_rules[name]
+                if rules:
+                    rule_lines = [f"  - {rule}" for rule in rules if isinstance(rule, str) and rule.strip()]
+                    if rule_lines:
+                        critical_rules_block = f"\nRules:\n{chr(10).join(rule_lines)}"
+
+            # Build tool string, only including sections that have content
+            sections = [f"\nTool: {name}", f"Description: {description}"]
+            if antipattern_block:
+                sections.append(antipattern_block.lstrip("\n"))
+            if critical_rules_block:
+                sections.append(critical_rules_block.lstrip("\n"))
+            if keywords_block:
+                sections.append(keywords_block.lstrip("\n"))
+            sections.append(f"Parameters:\n{chr(10).join(param_list) if param_list else '  None'}")
+            if example_str:
+                sections.append(example_str.lstrip("\n"))
+            tool_str = "\n".join(sections) + "\n"
             tool_descriptions.append(tool_str)
-        
+
         return "\n".join(tool_descriptions)
     
     @staticmethod
-    def format_tools_with_examples(tools: List[Dict[str, Any]], available_commands: Optional[List[Dict[str, Any]]] = None) -> str:
+    def format_tools_with_examples(
+        tools: List[Dict[str, Any]],
+        available_commands: Optional[List[Dict[str, Any]]] = None,
+        primary_examples_only: bool = False
+    ) -> str:
         """
         Format tools as text with primary examples included.
-        
+
         Args:
             tools: List of tool definitions in OpenAI format
             available_commands: Optional list of CommandDefinition dicts (from cache) to get examples from
-            
+            primary_examples_only: If True, include only is_primary examples (for adapter models)
+
         Returns:
             Formatted string describing tools with primary examples
         """
@@ -461,9 +508,11 @@ Parameters:
                 if not cmd_name or not examples:
                     continue
                 primary = [ex for ex in examples if ex.get("is_primary", False)]
-                secondary = [ex for ex in examples if not ex.get("is_primary", False)]
-                ordered = primary + secondary
-                command_examples[cmd_name] = ordered
+                if primary_examples_only:
+                    command_examples[cmd_name] = primary
+                else:
+                    secondary = [ex for ex in examples if not ex.get("is_primary", False)]
+                    command_examples[cmd_name] = primary + secondary
         
         tool_descriptions = []
         for tool in tools:

@@ -10,6 +10,7 @@ from app.core.utils.rest_client import post, get, build_jarvis_app_headers
 
 logger = logging.getLogger("uvicorn")
 
+
 class LLMProxyClient:
     """Client for interacting with the LLM proxy API."""
     
@@ -193,3 +194,36 @@ class LLMProxyClient:
                 logger.info(f"[passthrough {endpoint}] upstream status={resp.status_code}")
 
             return {"status_code": resp.status_code, "content": content}
+
+    async def get_engine_info(self) -> Dict[str, Any]:
+        """
+        Get information about the LLM inference engine.
+
+        Returns engine type and capabilities like prefix caching support.
+        Fetches fresh from the LLM proxy on every call.
+
+        Returns:
+            Dict with keys: inference_engine, backend_type, allows_caching, description
+        """
+        url = self._build_url("/v1/engine")
+        try:
+            result = await get(url=url, headers=self._build_headers())
+            logger.info(f"🔧 LLM engine info: {result.get('inference_engine')} (allows_caching={result.get('allows_caching')})")
+            return result
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to fetch engine info: {e}")
+            return {
+                "inference_engine": "unknown",
+                "backend_type": "unknown",
+                "allows_caching": True,
+                "description": "Failed to fetch engine info, assuming caching is available"
+            }
+
+    async def allows_warmup_caching(self) -> bool:
+        """
+        Check if the LLM engine benefits from warmup messages (prefix caching).
+
+        Returns True if warmup provides caching benefit, False if warmup can be skipped.
+        """
+        engine_info = await self.get_engine_info()
+        return engine_info.get("allows_caching", True)

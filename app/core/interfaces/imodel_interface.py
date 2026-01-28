@@ -136,7 +136,7 @@ class IModelInterface(ABC):
     def get_capabilities(self) -> Dict[str, Any]:
         """
         Return information about this model's capabilities.
-        
+
         Returns:
             Capability information:
             {
@@ -154,6 +154,16 @@ class IModelInterface(ABC):
             "supported_languages": ["en"],
             "custom_features": {}
         }
+
+    @property
+    def use_tool_classifier(self) -> bool:
+        """
+        Whether to use the fastText tool classifier for routing hints.
+
+        Override to return False for models that should rely purely on
+        LLM reasoning (e.g., adapter-tuned models).
+        """
+        return True
     
     # Shared utility methods for all model implementations
     

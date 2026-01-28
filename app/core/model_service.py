@@ -19,7 +19,9 @@ from app.core.tool_registry import tool_registry
 from app.core.tool_executor import tool_executor
 from app.core.tool_call_parser import tool_call_parser
 from app.core.conversation_cache import conversation_cache
+from app.core.utils.latency_logger import latency_logger
 from app.request_models.voice_command_request import CommandDefinition
+from contextlib import nullcontext
 
 logger = logging.getLogger("uvicorn")
 
@@ -256,17 +258,19 @@ class ModelService:
     ) -> None:
         """
         Warm up a conversation with tool support.
-        
+
         Args:
             node_context: Node information (room, user, device, etc.)
             conversation_id: Unique conversation identifier
             timezone: User's timezone for date calculations
             client_tools: Client-provided tool definitions
         """
+        timing = latency_logger.get_request(conversation_id)
         logger.info(f"🚀 Warming up tool-based conversation {conversation_id[:8]}")
-        
+
         # Get server tools
-        server_tools = tool_registry.get_tool_definitions()
+        with timing.measure("get_server_tools") if timing else nullcontext():
+            server_tools = tool_registry.get_tool_definitions()
         
         # Merge with client tools
         all_tools = server_tools + (client_tools or [])
@@ -404,30 +408,32 @@ class ModelService:
                     }
                     available_commands_dicts.append(tool_flags)
 
-        if hasattr(self.model, "_build_system_prompt"):
-            system_message = self.model._build_system_prompt(
-                node_context,
-                timezone,
-                all_tools,
-                available_commands_dicts
-            )  # type: ignore[attr-defined]
-        else:
-            # Fallback to default builder
-            system_message = self._build_tool_system_message(node_context, timezone, all_tools, available_commands_dicts)
+        with timing.measure("build_system_prompt") if timing else nullcontext():
+            if hasattr(self.model, "_build_system_prompt"):
+                system_message = self.model._build_system_prompt(
+                    node_context,
+                    timezone,
+                    all_tools,
+                    available_commands_dicts
+                )  # type: ignore[attr-defined]
+            else:
+                # Fallback to default builder
+                system_message = self._build_tool_system_message(node_context, timezone, all_tools, available_commands_dicts)
 
         messages = [
             {"role": "system", "content": system_message}
         ]
-        
+
         # Store in cache (including command examples extracted from client_tools)
-        conversation_cache.set(
-            conversation_id=conversation_id,
-            messages=messages,
-            available_commands=available_commands_to_cache,
-            timezone=timezone,
-            tools=all_tools,
-            node_context=node_context
-        )
+        with timing.measure("cache_set") if timing else nullcontext():
+            conversation_cache.set(
+                conversation_id=conversation_id,
+                messages=messages,
+                available_commands=available_commands_to_cache,
+                timezone=timezone,
+                tools=all_tools,
+                node_context=node_context
+            )
         if available_commands_to_cache:
             total_examples = sum(len(cmd.get("examples", [])) for cmd in available_commands_to_cache)
             logger.info(f"📚 Cached {len(available_commands_to_cache)} command(s) with {total_examples} total examples for get_command_examples tool")
@@ -445,8 +451,19 @@ class ModelService:
         except Exception as e:
             logger.warning("⚠️ Failed to write warmup prompt to file: %s", e)
 
-        if skip_warmup_inference:
-            logger.info(f"⏭️  Skipping LLM warmup inference for {conversation_id[:8]} (skip_warmup_inference=True)")
+        # Check if we should skip warmup inference
+        # Skip if: explicitly requested OR engine doesn't benefit from prefix caching
+        should_skip_warmup = skip_warmup_inference
+        if not should_skip_warmup:
+            # Check if engine benefits from warmup caching
+            if not await self.llm_client.allows_warmup_caching():
+                should_skip_warmup = True
+                logger.info(f"⚡ Auto-skipping LLM warmup for {conversation_id[:8]} (engine has no prefix caching benefit)")
+
+        if should_skip_warmup:
+            logger.info(f"⏭️  Skipping LLM warmup inference for {conversation_id[:8]}")
+            if timing:
+                timing.checkpoint("warmup_skipped")
         else:
             try:
                 # Build adapter_settings from node's adapter_hash if present
@@ -457,11 +474,12 @@ class ModelService:
                     logger.info(f"🔌 Using adapter {adapter_hash[:8]}... for warmup")
 
                 logger.info(f"🔥 Calling LLM proxy warmup_conversation for {conversation_id[:8]}")
-                result = await self.llm_client.warmup_conversation(
-                    conversation_id=conversation_id,
-                    messages=messages,
-                    adapter_settings=adapter_settings
-                )
+                with timing.measure("llm_warmup_call") if timing else nullcontext():
+                    result = await self.llm_client.warmup_conversation(
+                        conversation_id=conversation_id,
+                        messages=messages,
+                        adapter_settings=adapter_settings
+                    )
                 logger.info(f"✅ Tool-based warmup completed for {conversation_id[:8]}")
                 logger.info(f"   Warmup result type: {type(result)}")
                 if isinstance(result, dict):
@@ -513,15 +531,17 @@ class ModelService:
         """
         import time
         _t0 = time.time()
+        timing = latency_logger.get_request(conversation_id)
         logger.info(f"🎯 Processing tool-based command: '{voice_command}'")
 
         # Get conversation state
-        messages = conversation_cache.get_messages(conversation_id)
-        tools = conversation_cache.get_tools(conversation_id)
-        available_commands = conversation_cache.get_available_commands(conversation_id) or []
-        node_context = conversation_cache.get_node_context(conversation_id) or {}
-        timezone = conversation_cache.get_timezone(conversation_id)
-        
+        with timing.measure("cache_lookups") if timing else nullcontext():
+            messages = conversation_cache.get_messages(conversation_id)
+            tools = conversation_cache.get_tools(conversation_id)
+            available_commands = conversation_cache.get_available_commands(conversation_id) or []
+            node_context = conversation_cache.get_node_context(conversation_id) or {}
+            timezone = conversation_cache.get_timezone(conversation_id)
+
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Cache lookups done")
 
         if not messages:
@@ -563,18 +583,22 @@ class ModelService:
         # Optional tool routing classifier (phase 1)
         router_decision = None
         _router_t0 = time.time()
-        routed = self._route_tool(voice_command, tools or [])
-        if routed:
-            tool_name, score = routed
-            try:
-                min_conf = float(os.getenv("JARVIS_TOOL_CLASSIFIER_MIN_CONFIDENCE", "0.6"))
-            except ValueError:
-                min_conf = 0.6
-            use_hint = score >= min_conf
-            router_decision = {"tool_name": tool_name, "score": score, "used": use_hint}
-            conversation_cache.set_router_decision(conversation_id, router_decision)
-            logger.info("🧭 Router predicted tool=%s score=%.3f use_hint=%s", tool_name, score, use_hint)
+        if self.model.use_tool_classifier:
+            routed = self._route_tool(voice_command, tools or [])
+            if routed:
+                tool_name, score = routed
+                try:
+                    min_conf = float(os.getenv("JARVIS_TOOL_CLASSIFIER_MIN_CONFIDENCE", "0.6"))
+                except ValueError:
+                    min_conf = 0.6
+                use_hint = score >= min_conf
+                router_decision = {"tool_name": tool_name, "score": score, "used": use_hint}
+                conversation_cache.set_router_decision(conversation_id, router_decision)
+                logger.info("🧭 Router predicted tool=%s score=%.3f use_hint=%s", tool_name, score, use_hint)
+            else:
+                conversation_cache.set_router_decision(conversation_id, None)
         else:
+            logger.info("🔇 Tool classifier disabled for %s", self.model.name)
             conversation_cache.set_router_decision(conversation_id, None)
 
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool routing done (router took {(time.time()-_router_t0)*1000:.0f}ms)")
@@ -634,11 +658,12 @@ class ModelService:
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Starting tool execution loop")
 
         # Process with tool execution loop
-        result = await self._tool_execution_loop(
-            conversation_id=conversation_id,
-            messages=messages,
-            tools=tools
-        )
+        with timing.measure("tool_execution_loop") if timing else nullcontext():
+            result = await self._tool_execution_loop(
+                conversation_id=conversation_id,
+                messages=messages,
+                tools=tools
+            )
 
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool execution loop completed")
 
@@ -1143,6 +1168,7 @@ class ModelService:
             return invalid
 
         import time as _time
+        timing = latency_logger.get_request(conversation_id)
 
         for iteration in range(max_iterations):
             logger.info(f"🔁 Tool loop iteration {iteration + 1}/{max_iterations}")
@@ -1152,13 +1178,14 @@ class ModelService:
             try:
                 response_format = self._get_response_format()
                 _llm_start = _time.time()
-                response = await self.llm_client.chat_completion(
-                    messages=messages,
-                    conversation_id=conversation_id,
-                    response_format=response_format,
-                    include_date_context=True,
-                    adapter_settings=adapter_settings
-                )
+                with timing.measure(f"llm_call_iter_{iteration+1}") if timing else nullcontext():
+                    response = await self.llm_client.chat_completion(
+                        messages=messages,
+                        conversation_id=conversation_id,
+                        response_format=response_format,
+                        include_date_context=True,
+                        adapter_settings=adapter_settings
+                    )
                 logger.debug(f"⏱️  LLM call took {(_time.time()-_llm_start)*1000:.0f}ms")
             except Exception as e:
                 logger.error(f"❌ LLM call failed: {e}")
@@ -1235,7 +1262,8 @@ class ModelService:
                     logger.info("📅 Injected date keys into tool calls: %s", date_keys)
 
                 # Execute tools
-                server_results, client_calls = tool_executor.execute_tool_calls(tool_calls, conversation_id=conversation_id)
+                with timing.measure(f"tool_exec_iter_{iteration+1}") if timing else nullcontext():
+                    server_results, client_calls = tool_executor.execute_tool_calls(tool_calls, conversation_id=conversation_id)
                 
                 # Check if request_validation was called
                 validation_called = any(
@@ -1465,8 +1493,7 @@ Context: room={node_context.get('room', 'unknown')}, user={node_context.get('use
 
 Rules:
 - Call ONE tool at a time.
-- Resolve relative dates before final tool call (use resolve_relative_date results).
-- Use absolute ISO-8601 datetimes when required.
+- Relative dates are resolved automatically; use natural terms like 'tomorrow' or 'next_week' in date parameters.
 - Ask for validation only if required params are missing/ambiguous.
 {"- You may include an optional 'reason' field explaining tool/parameter choices." if include_reason else ""}
 
