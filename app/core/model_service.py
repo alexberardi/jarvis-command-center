@@ -662,7 +662,8 @@ class ModelService:
             result = await self._tool_execution_loop(
                 conversation_id=conversation_id,
                 messages=messages,
-                tools=tools
+                tools=tools,
+                user_utterance=voice_command
             )
 
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool execution loop completed")
@@ -711,13 +712,21 @@ class ModelService:
                 "content": output
             })
         
+        # Extract last user utterance from messages for potential LLM fallback
+        last_user_utterance = None
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                last_user_utterance = msg.get("content")
+                break
+
         # Continue with tool execution loop
         result = await self._tool_execution_loop(
             conversation_id=conversation_id,
             messages=messages,
-            tools=tools
+            tools=tools,
+            user_utterance=last_user_utterance
         )
-        
+
         # Update cache
         conversation_cache.update_messages(conversation_id, messages)
         
@@ -728,17 +737,19 @@ class ModelService:
         conversation_id: str,
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
-        max_iterations: int = 10
+        max_iterations: int = 10,
+        user_utterance: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute the tool loop: call LLM, execute server tools, repeat until done.
-        
+
         Args:
             conversation_id: Conversation ID
             messages: Current message history (will be modified in place)
             tools: Available tools
             max_iterations: Maximum tool execution iterations
-            
+            user_utterance: Original user voice command (for LLM fallback in date resolution)
+
         Returns:
             Response dict with stop_reason and relevant data
         """
@@ -971,19 +982,35 @@ class ModelService:
 
             return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-        def _resolve_date_keys(date_keys: List[str], date_context: Dict[str, Any]) -> List[str]:
+        def _resolve_date_keys(
+            date_keys: List[str],
+            date_context: Dict[str, Any]
+        ) -> Tuple[List[str], List[str]]:
+            """
+            Resolve date keys to datetime strings.
+
+            Returns:
+                Tuple of (resolved_dates, unresolved_keys)
+            """
             if not date_keys:
-                return []
+                return [], []
             normalized_keys = [_normalize_date_key(key) for key in date_keys if isinstance(key, str)]
             flat_context = _flatten_date_context(date_context)
 
             resolved: List[str] = []
+            unresolved: List[str] = []
+
             for key in normalized_keys:
                 value = flat_context.get(key)
                 if isinstance(value, list):
                     resolved.extend([v for v in value if isinstance(v, str)])
                 elif isinstance(value, str):
                     resolved.append(value)
+                else:
+                    # Key not found in flat_context - track for potential LLM fallback
+                    # But skip time modifiers (they combine with date keys)
+                    if key not in {"morning", "afternoon", "evening", "night", "noon", "midnight"} and not key.startswith("at_"):
+                        unresolved.append(key)
 
             date_key = None
             for key in normalized_keys:
@@ -1019,21 +1046,81 @@ class ModelService:
                     continue
                 seen.add(entry)
                 unique.append(entry)
-            return unique
+            return unique, unresolved
 
-        def _inject_date_keys(
+        async def _inject_date_keys(
             tool_calls: List[Dict[str, Any]],
             date_keys: List[str],
             tools_list: List[Dict[str, Any]]
         ) -> List[Dict[str, Any]]:
-            if not tool_calls or not date_keys:
+            if not tool_calls:
                 return tool_calls
             from app.core.general_context import generate_date_context_object
+            from app.core.tools.resolve_relative_date_tool import ResolveRelativeDateTool
 
             date_context = generate_date_context_object(timezone_str)
-            resolved_dates = _resolve_date_keys(date_keys, date_context)
-            if not resolved_dates:
-                return tool_calls
+            flat_context = _flatten_date_context(date_context)
+            available_keys = ResolveRelativeDateTool.get_available_keys(date_context)
+
+            # Resolve date_keys from LLM response
+            resolved_dates: List[str] = []
+            if date_keys:
+                resolved_dates, unresolved_keys = _resolve_date_keys(date_keys, date_context)
+
+                # LLM fallback for unresolved keys (one attempt per key)
+                if unresolved_keys and user_utterance:
+                    for unresolved_key in unresolved_keys:
+                        logger.info(f"📅 Unresolved date key '{unresolved_key}', attempting LLM fallback")
+                        fallback_key = await ResolveRelativeDateTool.resolve_with_llm_fallback(
+                            unrecognized_key=unresolved_key,
+                            available_keys=available_keys,
+                            user_utterance=user_utterance,
+                            llm_client=self.llm_client,
+                            timezone=timezone_str
+                        )
+                        if fallback_key:
+                            value = flat_context.get(fallback_key)
+                            if isinstance(value, list):
+                                resolved_dates.extend([v for v in value if isinstance(v, str)])
+                            elif isinstance(value, str):
+                                resolved_dates.append(value)
+                            logger.info(f"📅 LLM fallback resolved '{unresolved_key}' → '{fallback_key}'")
+
+            async def _resolve_relative_datetime(relative_value: str) -> Optional[str]:
+                """Attempt to resolve a relative datetime string (e.g., 'tomorrow') to an ISO datetime."""
+                # First try direct lookup in flat context
+                normalized = _normalize_date_key(relative_value)
+                value = flat_context.get(normalized)
+                if isinstance(value, str):
+                    logger.info(f"📅 Resolved relative datetime '{relative_value}' → '{value}'")
+                    return value
+                if isinstance(value, list) and value:
+                    resolved = value[0] if isinstance(value[0], str) else None
+                    logger.info(f"📅 Resolved relative datetime '{relative_value}' → '{resolved}' (first of list)")
+                    return resolved
+
+                # LLM fallback
+                if user_utterance:
+                    logger.info(f"📅 Relative datetime '{relative_value}' not in context, attempting LLM fallback")
+                    fallback_key = await ResolveRelativeDateTool.resolve_with_llm_fallback(
+                        unrecognized_key=relative_value,
+                        available_keys=available_keys,
+                        user_utterance=user_utterance,
+                        llm_client=self.llm_client,
+                        timezone=timezone_str
+                    )
+                    if fallback_key:
+                        fb_value = flat_context.get(fallback_key)
+                        if isinstance(fb_value, str):
+                            logger.info(f"📅 LLM fallback resolved '{relative_value}' → '{fb_value}'")
+                            return fb_value
+                        if isinstance(fb_value, list) and fb_value:
+                            resolved = fb_value[0] if isinstance(fb_value[0], str) else None
+                            logger.info(f"📅 LLM fallback resolved '{relative_value}' → '{resolved}' (first of list)")
+                            return resolved
+
+                logger.warning(f"📅 Could not resolve relative datetime '{relative_value}'")
+                return None
 
             tool_map: Dict[str, Dict[str, Any]] = {}
             for tool in tools_list or []:
@@ -1065,14 +1152,45 @@ class ModelService:
                 for param_name, param_schema in param_schemas.items():
                     if not _is_datetime_param(param_schema):
                         continue
+
                     existing = args_obj.get(param_name)
-                    if existing not in (None, [], ""):
+                    is_array = _is_datetime_array(param_schema)
+
+                    # Case 1: Empty - inject resolved_dates
+                    if existing in (None, [], ""):
+                        if resolved_dates:
+                            if is_array:
+                                args_obj[param_name] = resolved_dates
+                            else:
+                                args_obj[param_name] = resolved_dates[0]
+                            mutated = True
                         continue
-                    if _is_datetime_array(param_schema):
-                        args_obj[param_name] = resolved_dates
-                    else:
-                        args_obj[param_name] = resolved_dates[0]
-                    mutated = True
+
+                    # Case 2: Has value - validate and fix if needed
+                    if is_array and isinstance(existing, list):
+                        # Validate each item in the array
+                        cleaned: List[str] = []
+                        for item in existing:
+                            if isinstance(item, str) and _is_iso_datetime(item):
+                                cleaned.append(item)
+                            elif isinstance(item, str):
+                                # Invalid datetime string - try to resolve it
+                                resolved = await _resolve_relative_datetime(item)
+                                if resolved:
+                                    cleaned.append(resolved)
+                        if cleaned != existing:
+                            args_obj[param_name] = cleaned if cleaned else resolved_dates
+                            mutated = True
+                    elif not is_array and isinstance(existing, str):
+                        if not _is_iso_datetime(existing):
+                            # Invalid datetime string - try to resolve it
+                            resolved = await _resolve_relative_datetime(existing)
+                            if resolved:
+                                args_obj[param_name] = resolved
+                                mutated = True
+                            elif resolved_dates:
+                                args_obj[param_name] = resolved_dates[0]
+                                mutated = True
 
                 if mutated:
                     call["function"]["arguments"] = json.dumps(args_obj)
@@ -1257,13 +1375,16 @@ class ModelService:
                 }
             
             elif finish_reason == "tool_calls":
+                # Always validate/inject datetime params (fixes invalid values even without date_keys)
+                tool_calls = await _inject_date_keys(tool_calls, date_keys, tools)
                 if date_keys:
-                    tool_calls = _inject_date_keys(tool_calls, date_keys, tools)
-                    logger.info("📅 Injected date keys into tool calls: %s", date_keys)
+                    logger.info("📅 Processed date keys: %s", date_keys)
 
                 # Execute tools
                 with timing.measure(f"tool_exec_iter_{iteration+1}") if timing else nullcontext():
-                    server_results, client_calls = tool_executor.execute_tool_calls(tool_calls, conversation_id=conversation_id)
+                    server_results, client_calls = tool_executor.execute_tool_calls(
+                        tool_calls, conversation_id=conversation_id, user_utterance=user_utterance
+                    )
                 
                 # Check if request_validation was called
                 validation_called = any(
