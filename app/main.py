@@ -113,6 +113,19 @@ async def shutdown_event():
             handler.close()
     logger.info("✅ Shutdown complete")
 
+
+# Root-level health endpoint (standardized across all services)
+@app.get("/health")
+def root_health_check():
+    """Health check endpoint at root level for service discovery."""
+    from datetime import datetime
+    return {
+        "status": "healthy",
+        "service": "jarvis-command-center",
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
 # Create versioned routers
 v0_router = APIRouter()
 
