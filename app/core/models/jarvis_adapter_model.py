@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.models.jarvis_tool_model import JarvisToolModel
 from app.core.tool_call_parser import tool_call_parser
+from app.core.general_context import get_general_context
 
 logger = logging.getLogger("uvicorn")
 
@@ -56,6 +57,9 @@ class JarvisAdapterModel(JarvisToolModel):
         user = node_context.get("user", "default")
         voice_mode = node_context.get("voice_mode", "brief")
 
+        # Get current date context for date-aware parameter extraction
+        date_context_str = get_general_context(timezone)
+
         # Build direct answer policy section
         must_call_tools = []
         direct_answer_allowed = []
@@ -86,6 +90,7 @@ class JarvisAdapterModel(JarvisToolModel):
 
         system_prompt = f"""You are Jarvis, a voice assistant that uses tools.
 Context: room={room}, user={user}, style={voice_mode}
+{date_context_str}
 
 Rules:
 - Use tools to fulfill requests. Call ONE tool at a time.
