@@ -50,26 +50,37 @@ class ToolExecutor:
 
         return result
     
-    def execute_tool(self, tool_name: str, arguments: Dict[str, Any], conversation_id: Optional[str] = None) -> str:
+    def execute_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        conversation_id: Optional[str] = None,
+        user_utterance: Optional[str] = None
+    ) -> str:
         """
         Execute a single tool and return the result as a JSON string.
-        
+
         Args:
             tool_name: Name of the tool to execute
             arguments: Tool arguments
             conversation_id: Optional conversation ID to pass to tool
-            
+            user_utterance: Optional user's spoken message for context
+
         Returns:
             JSON string with tool execution result
         """
         logger.info(f"⚙️ Executing tool: {tool_name}")
         logger.debug(f"Tool arguments: {arguments}")
-        
-        # Execute via registry (pass conversation_id if provided)
+
+        # Build kwargs to pass to tool
+        kwargs = {**arguments}
         if conversation_id:
-            result = self.registry.execute_tool(tool_name, conversation_id=conversation_id, **arguments)
-        else:
-            result = self.registry.execute_tool(tool_name, **arguments)
+            kwargs["conversation_id"] = conversation_id
+        if user_utterance:
+            kwargs["user_utterance"] = user_utterance
+
+        # Execute via registry
+        result = self.registry.execute_tool(tool_name, **kwargs)
 
         # Compact large server tool outputs before sending to the LLM
         result = self._compact_tool_result(tool_name, result)
@@ -85,14 +96,17 @@ class ToolExecutor:
     def execute_tool_calls(
         self,
         tool_calls: List[Dict[str, Any]],
-        conversation_id: Optional[str] = None
+        conversation_id: Optional[str] = None,
+        user_utterance: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Execute multiple tool calls and separate server vs client tools.
-        
+
         Args:
             tool_calls: List of tool calls from LLM response
-            
+            conversation_id: Optional conversation ID to pass to tools
+            user_utterance: Optional user's spoken message for context
+
         Returns:
             Tuple of (server_tool_results, client_tool_calls)
             - server_tool_results: List of executed server tool results (tool message format)
@@ -117,7 +131,9 @@ class ToolExecutor:
                     arguments = {}
                 
                 logger.debug(f"   └─ Arguments: {arguments}")
-                result = self.execute_tool(tool_name, arguments, conversation_id=conversation_id)
+                result = self.execute_tool(
+                    tool_name, arguments, conversation_id=conversation_id, user_utterance=user_utterance
+                )
                 
                 # Check if result contains validation request
                 try:

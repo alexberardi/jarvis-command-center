@@ -2,13 +2,18 @@
 Resolve Relative Date Tool.
 
 Converts relative date/time expressions (like "tomorrow", "next week") to actual dates.
+Includes LLM fallback for unrecognized date expressions.
 """
 
+import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
 
 from app.core.interfaces.iserver_tool import IServerTool
 from app.core.general_context import generate_date_context_object
+
+if TYPE_CHECKING:
+    from app.core.llm_proxy_client import LLMProxyClient
 
 logger = logging.getLogger("uvicorn")
 
@@ -220,4 +225,129 @@ class ResolveRelativeDateTool(IServerTool):
                 "error": str(e),
                 "message": "Failed to resolve relative date"
             }
+
+    @staticmethod
+    async def resolve_with_llm_fallback(
+        unrecognized_key: str,
+        available_keys: List[str],
+        user_utterance: str,
+        llm_client: "LLMProxyClient",
+        timezone: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Use LLM to resolve an unrecognized date key by picking the best match.
+
+        This is a last-resort fallback when the date key from the primary model
+        doesn't match any known keys in the date context.
+
+        Args:
+            unrecognized_key: The date key that wasn't found (e.g., "day_after_tomorrow")
+            available_keys: List of valid date keys (e.g., ["today", "tomorrow", "next_week"])
+            user_utterance: The user's original spoken message for context
+            llm_client: LLM proxy client for making the isolated call
+            timezone: Optional timezone string
+
+        Returns:
+            The best matching key from available_keys, or None if unable to resolve
+        """
+        if not available_keys:
+            logger.warning("📅 LLM fallback called with empty available_keys")
+            return None
+
+        # Build a focused prompt for key selection
+        prompt = f"""You are a date key matcher. Given a user's spoken message and an unrecognized date expression, pick the BEST matching key from the available options.
+
+User said: "{user_utterance}"
+Unrecognized date expression: "{unrecognized_key}"
+
+Available date keys (pick ONE):
+{json.dumps(available_keys, indent=2)}
+
+Rules:
+- Return ONLY the exact key string from the list, nothing else
+- Pick the closest semantic match
+- If no good match exists, return "today" as the default
+
+Your answer (just the key):"""
+
+        messages = [{"role": "user", "content": prompt}]
+
+        try:
+            logger.info(f"📅 LLM fallback: resolving '{unrecognized_key}' from user: '{user_utterance[:50]}...'")
+
+            response = await llm_client.chat_completion(
+                messages=messages,
+                model="full",
+                temperature=0,
+                include_date_context=False  # Don't need date context for this simple task
+            )
+
+            # Extract the response content
+            raw_content = response.get("message", "")
+            if not raw_content:
+                # Try OpenAI format
+                choices = response.get("choices", [])
+                if choices:
+                    raw_content = choices[0].get("message", {}).get("content", "")
+
+            if not raw_content:
+                logger.warning("📅 LLM fallback returned empty response")
+                return None
+
+            # Clean and validate the response
+            selected_key = raw_content.strip().lower().replace(" ", "_")
+
+            # Validate it's in our available keys
+            if selected_key in available_keys:
+                logger.info(f"📅 LLM fallback resolved '{unrecognized_key}' → '{selected_key}'")
+                return selected_key
+            else:
+                # Try fuzzy match - maybe LLM added/removed underscores
+                for key in available_keys:
+                    if key.replace("_", "") == selected_key.replace("_", ""):
+                        logger.info(f"📅 LLM fallback fuzzy matched '{unrecognized_key}' → '{key}'")
+                        return key
+
+                logger.warning(f"📅 LLM fallback returned invalid key '{selected_key}' (not in available_keys)")
+                return None
+
+        except Exception as e:
+            logger.error(f"📅 LLM fallback error: {e}")
+            return None
+
+    @staticmethod
+    def get_available_keys(date_context: Dict[str, Any]) -> List[str]:
+        """
+        Extract all available date keys from a date context object.
+
+        Args:
+            date_context: The date context from generate_date_context_object()
+
+        Returns:
+            Flat list of all valid date keys
+        """
+        keys: List[str] = []
+
+        # Current
+        keys.extend(["today", "now"])
+
+        # Relative dates
+        keys.extend(date_context.get("relative_dates", {}).keys())
+
+        # Weekdays
+        keys.extend(date_context.get("weekdays", {}).keys())
+
+        # Weekend
+        keys.extend(["this_weekend", "next_weekend", "last_weekend"])
+
+        # Weeks
+        keys.extend(["this_week", "next_week", "last_week"])
+
+        # Years
+        keys.extend(["this_year", "next_year", "last_year"])
+
+        # Time expressions
+        keys.extend(date_context.get("time_expressions", {}).keys())
+
+        return keys
 

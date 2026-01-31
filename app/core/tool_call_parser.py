@@ -316,56 +316,11 @@ class ToolCallParser:
         """
         if not tools:
             return "No tools available."
-        
-        # Determine how many examples to include per command
-        small_mode = os.getenv("JARVIS_SMALL_MODEL_MODE", "").strip().lower() in {"1", "true", "yes"}
-        max_examples_env = os.getenv("JARVIS_EXAMPLES_PER_COMMAND", "").strip().lower()
-        if not max_examples_env:
-            max_examples = 0 if small_mode else 1
-        elif max_examples_env in {"all", "0", "-1"}:
-            max_examples = None
-        else:
-            try:
-                max_examples = max(1, int(max_examples_env))
-            except ValueError:
-                fallback = 0 if small_mode else 1
-                logger.warning("⚠️ Invalid JARVIS_EXAMPLES_PER_COMMAND=%r; defaulting to %d", max_examples_env, fallback)
-                max_examples = fallback
 
-        # Build maps of command_name -> ordered example list and critical rules
-        command_examples = {}
-        command_critical_rules: Dict[str, List[str]] = {}
-        if available_commands:
-            for cmd_dict in available_commands:
-                cmd_name = cmd_dict.get("command_name")
-                examples = cmd_dict.get("examples", [])
-                critical_rules = cmd_dict.get("critical_rules", [])
-                if cmd_name and critical_rules:
-                    command_critical_rules[cmd_name] = critical_rules
-                if not cmd_name or not examples:
-                    continue
-                primary = [ex for ex in examples if ex.get("is_primary", False)]
-                if primary_examples_only:
-                    command_examples[cmd_name] = primary
-                else:
-                    secondary = [ex for ex in examples if not ex.get("is_primary", False)]
-                    command_examples[cmd_name] = primary + secondary
-
-        tool_descriptions = []
-        available_names = {tool.get("function", {}).get("name") for tool in tools if isinstance(tool.get("function"), dict)}
-        available_names.update({tool.get("name") for tool in tools if isinstance(tool.get("name"), str)})
-        compact_prompt = os.getenv("JARVIS_PROMPT_COMPACT", "true").lower() in {"1", "true", "yes"}
-        include_antipatterns = os.getenv("JARVIS_PROMPT_INCLUDE_ANTIPATTERNS", "true").lower() in {"1", "true", "yes"}
-        if compact_prompt:
-            max_keywords = int(os.getenv("JARVIS_PROMPT_MAX_KEYWORDS", "8"))
-            include_param_descriptions = os.getenv("JARVIS_PROMPT_INCLUDE_PARAM_DESCRIPTIONS", "false").lower() in {"1", "true", "yes"}
-            trim_descriptions = os.getenv("JARVIS_PROMPT_TRIM_TOOL_DESCRIPTIONS", "true").lower() in {"1", "true", "yes"}
-            max_desc_chars = int(os.getenv("JARVIS_PROMPT_MAX_TOOL_DESC_CHARS", "180"))
-        else:
-            max_keywords = 999
-            include_param_descriptions = True
-            trim_descriptions = False
-            max_desc_chars = 10_000
+        tool_descriptions: List[str] = []
+        include_param_descriptions = os.getenv("JARVIS_PROMPT_INCLUDE_PARAM_DESCRIPTIONS", "true").lower() in {"1", "true", "yes"}
+        trim_descriptions = os.getenv("JARVIS_PROMPT_TRIM_TOOL_DESCRIPTIONS", "true").lower() in {"1", "true", "yes"}
+        max_desc_chars = int(os.getenv("JARVIS_PROMPT_MAX_TOOL_DESC_CHARS", "180"))
         for tool in tools:
             func = tool.get("function", {})
             name = func.get("name", "unknown")
@@ -377,9 +332,7 @@ class ToolCallParser:
                 if len(description) > max_desc_chars:
                     description = description[: max_desc_chars - 3].rstrip() + "..."
             parameters = func.get("parameters", {})
-            antipatterns = tool.get("antipatterns", []) or []
-            keywords = tool.get("keywords") or []
-            
+
             # Format parameters
             props = parameters.get("properties", {})
             required = parameters.get("required", [])
@@ -398,67 +351,9 @@ class ToolCallParser:
                 
                 param_list.append(param_str)
 
-            antipattern_block = ""
-            if include_antipatterns:
-                # Group anti-patterns by their redirect command
-                grouped: Dict[str, List[str]] = {}
-                for ap in antipatterns:
-                    if not isinstance(ap, dict):
-                        continue
-                    ap_cmd: str = ap.get("command_name", "")
-                    ap_desc: str = ap.get("description", "")
-                    if ap_cmd and ap_cmd not in available_names:
-                        continue
-                    if not (isinstance(ap_desc, str) and ap_desc.strip()):
-                        continue
-                    grouped.setdefault(ap_cmd, []).append(f"  - {ap_desc.strip()}")
-
-                if grouped:
-                    parts: List[str] = []
-                    for cmd_name, lines in grouped.items():
-                        label = f"Anti-patterns (use {cmd_name} instead):" if cmd_name else "Anti-patterns:"
-                        parts.append(f"\n{label}\n{chr(10).join(lines)}")
-                    antipattern_block = "".join(parts)
-
-            keywords_block = ""
-            if isinstance(keywords, list):
-                keyword_list = [kw for kw in keywords if isinstance(kw, str) and kw.strip()]
-                if keyword_list:
-                    keywords_block = f"\nKeywords: {', '.join(keyword_list[:max_keywords])}"
-
-            example_str = ""
-            if name in command_examples:
-                examples = command_examples[name]
-                if max_examples is not None:
-                    examples = examples[:max_examples]
-                example_lines = []
-                for example in examples:
-                    voice_cmd = example.get("voice_command", "")
-                    if voice_cmd:
-                        example_lines.append(f"  - \"{voice_cmd}\"")
-                if example_lines:
-                    example_str = "\nExamples:\n" + "\n".join(example_lines)
-
-            # Build critical rules block
-            critical_rules_block = ""
-            if name in command_critical_rules:
-                rules = command_critical_rules[name]
-                if rules:
-                    rule_lines = [f"  - {rule}" for rule in rules if isinstance(rule, str) and rule.strip()]
-                    if rule_lines:
-                        critical_rules_block = f"\nRules:\n{chr(10).join(rule_lines)}"
-
-            # Build tool string, only including sections that have content
+            # Build tool string: description + parameters only
             sections = [f"\nTool: {name}", f"Description: {description}"]
-            if antipattern_block:
-                sections.append(antipattern_block.lstrip("\n"))
-            if critical_rules_block:
-                sections.append(critical_rules_block.lstrip("\n"))
-            if keywords_block:
-                sections.append(keywords_block.lstrip("\n"))
             sections.append(f"Parameters:\n{chr(10).join(param_list) if param_list else '  None'}")
-            if example_str:
-                sections.append(example_str.lstrip("\n"))
             tool_str = "\n".join(sections) + "\n"
             tool_descriptions.append(tool_str)
 
