@@ -22,10 +22,19 @@ else
     # Kill any existing process on the port
     PORT=${PORT:-8002}
     echo "Killing any existing process on port $PORT..."
-    lsof -ti:$PORT | xargs kill -9 2>/dev/null || echo "No process found on port $PORT"
+    lsof -ti:$PORT | xargs kill -9 2>/dev/null || echo "No local process found on port $PORT"
+
+    # Also stop any Docker containers using this port
+    DOCKER_CONTAINER=$(docker ps --filter "publish=$PORT" --format "{{.Names}}" 2>/dev/null | head -1)
+    if [ -n "$DOCKER_CONTAINER" ]; then
+        echo "Stopping Docker container: $DOCKER_CONTAINER"
+        docker stop "$DOCKER_CONTAINER" >/dev/null 2>&1 || true
+    fi
 
     # Activate venv
-    if [ -d "venv" ]; then
+    if [ -d ".venv" ]; then
+        source .venv/bin/activate
+    elif [ -d "venv" ]; then
         source venv/bin/activate
     fi
 
