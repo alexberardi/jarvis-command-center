@@ -5,15 +5,14 @@ Central voice command API. Routes voice from Pi Zero nodes through speech-to-tex
 ## Quick Reference
 
 ```bash
-# Run (Docker recommended)
+# Run (Docker recommended - includes PostgreSQL)
 bash run-docker-dev.sh
 
 # Health check
 curl http://localhost:8002/api/v0/health
 
-# Test
-python run_database_tests.py --type sqlite
-poetry run pytest
+# Test (requires PostgreSQL via Docker)
+python run_database_tests.py --type docker
 ```
 
 ## Architecture
@@ -34,13 +33,12 @@ app/
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DB_TYPE` | sqlite | sqlite or postgres |
-| `DB_URL` | - | Database connection string |
-| `ADMIN_API_KEY` | - | Admin endpoint protection |
-| `JARVIS_LLM_PROXY_API_URL` | - | LLM proxy service URL |
-| `JARVIS_LOG_CONSOLE_LEVEL` | INFO | Logging level |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `ADMIN_API_KEY` | Yes | Admin endpoint protection |
+| `JARVIS_LLM_PROXY_API_URL` | Yes | LLM proxy service URL |
+| `JARVIS_LOG_CONSOLE_LEVEL` | No | Logging level (default: INFO) |
 
 ## API Endpoints
 
@@ -67,19 +65,23 @@ Nodes authenticate via `X-API-Key` header. Keys are stored in the nodes table.
 
 ## Database
 
-```bash
-# Setup
-python setup_database.py
-alembic upgrade head
+PostgreSQL is required. The docker-compose.dev.yaml includes a PostgreSQL container.
 
-# Run tests
-python run_database_tests.py --type sqlite
-python run_database_tests.py --type postgres
+```bash
+# Run with Docker (recommended)
+bash run-docker-dev.sh
+
+# Or run migrations manually
+DATABASE_URL=postgresql://user:pass@localhost:5432/db alembic upgrade head
+
+# Run tests with Docker PostgreSQL
+python run_database_tests.py --type docker
 ```
 
 ## Dependencies
 
 - FastAPI, SQLAlchemy, Alembic
+- psycopg2 (PostgreSQL driver)
 - httpx (service calls)
 - fasttext (tool routing)
 - jarvis-log-client
