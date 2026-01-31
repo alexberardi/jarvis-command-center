@@ -295,7 +295,8 @@ Your answer (just the key):"""
                 return None
 
             # Clean and validate the response
-            selected_key = raw_content.strip().lower().replace(" ", "_")
+            # Strip quotes that LLM may include (e.g., "today" -> today)
+            selected_key = raw_content.strip().strip('"\'').lower().replace(" ", "_")
 
             # Validate it's in our available keys
             if selected_key in available_keys:
