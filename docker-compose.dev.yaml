@@ -1,6 +1,22 @@
 version: '3.9'
 
 services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: jarvis_command_center
+      POSTGRES_USER: jarvis_user
+      POSTGRES_PASSWORD: jarvis_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jarvis_user -d jarvis_command_center"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   jarvis-voice-api:
     build: .
     ports:
@@ -20,8 +36,16 @@ services:
       - PYTHONUNBUFFERED=1
       - DEBUG=true
       - DEBUG_PORT=${DEBUG_PORT:-5678}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://jarvis_user:jarvis_password@postgres:5432/jarvis_command_center}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
     command: >
       sh -c "pip install -q -e /app/jarvis-log-client &&
+             alembic upgrade head &&
              python -Xfrozen_modules=off -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload"
+
+volumes:
+  postgres_data:
