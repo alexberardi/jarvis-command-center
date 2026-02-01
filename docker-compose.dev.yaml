@@ -30,6 +30,7 @@ services:
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
       - ../jarvis-log-client:/app/jarvis-log-client
+      - ../jarvis-config-client:/app/jarvis-config-client
     env_file:
       - .env
     environment:
@@ -37,13 +38,14 @@ services:
       - DEBUG=true
       - DEBUG_PORT=${DEBUG_PORT:-5678}
       - DATABASE_URL=${DATABASE_URL:-postgresql://jarvis_user:jarvis_password@postgres:5432/jarvis_command_center}
+      - JARVIS_CONFIG_URL_STYLE=dockerized
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
     command: >
-      sh -c "pip install -q -e /app/jarvis-log-client &&
+      sh -c "pip install -q -e /app/jarvis-log-client -e /app/jarvis-config-client &&
              alembic upgrade head &&
              python -Xfrozen_modules=off -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload"
 

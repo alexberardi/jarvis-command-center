@@ -23,9 +23,20 @@ load_dotenv()
 logger = logging.getLogger("uvicorn")
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
-JARVIS_AUTH_BASE_URL = os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
 JARVIS_AUTH_APP_ID = os.getenv("JARVIS_APP_ID", "command-center")
 JARVIS_AUTH_APP_KEY = os.getenv("JARVIS_APP_KEY")
+
+
+def _get_auth_base_url() -> str:
+    """Get auth service URL from service discovery or fallback to env var."""
+    try:
+        from app.core import service_config
+        if service_config.is_initialized():
+            return service_config.get_auth_url()
+    except Exception:
+        pass
+    # Fallback to env var
+    return os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
 
 # Cache for node validation results
 _node_validation_cache: dict[str, tuple[dict, float]] = {}
@@ -63,7 +74,7 @@ def _validate_node_with_auth_service(node_id: str, node_key: str) -> dict:
         logger.error("JARVIS_APP_KEY not configured for node validation")
         return {"valid": False, "reason": "Auth not configured"}
 
-    validate_url = JARVIS_AUTH_BASE_URL.rstrip("/") + "/internal/validate-node"
+    validate_url = _get_auth_base_url().rstrip("/") + "/internal/validate-node"
 
     try:
         with httpx.Client(timeout=5.0) as client:
