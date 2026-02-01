@@ -14,14 +14,24 @@ logger = logging.getLogger(__name__)
 
 class MalformedJsonExtractorService:
     """Service for using a lightweight LLM to extract valid JSON from malformed responses"""
-    
+
     def __init__(self):
-        # Use JARVIS_LLM_PROXY_API_URL from environment, fallback to localhost
-        self.api_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
+        self.api_url = self._get_llm_proxy_url()
         self.extract_endpoint = f"{self.api_url.rstrip('/')}/v1/chat/completions"
         # Use lightweight model for JSON extraction, fallback to mistral-7b-q2
         self.lightweight_model = os.getenv("LIGHTWEIGHT_MODEL", "mistral-7b-q2")
         self.auth_headers = build_jarvis_app_headers()
+
+    def _get_llm_proxy_url(self) -> str:
+        """Get LLM proxy URL from service discovery or fallback to env var."""
+        try:
+            from app.core import service_config
+            if service_config.is_initialized():
+                return service_config.get_llm_proxy_url()
+        except Exception:
+            pass
+        # Fallback to env var
+        return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
         
     async def extract_json_from_malformed_response(
         self, 
