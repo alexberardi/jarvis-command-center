@@ -38,6 +38,30 @@ logger = logging.getLogger("uvicorn")
 _jarvis_handler = None
 
 
+def _setup_service_config() -> None:
+    """Set up service discovery via jarvis-config-service."""
+    from app.core import service_config
+
+    config_url = os.getenv("JARVIS_CONFIG_URL")
+    if not config_url:
+        logger.warning(
+            "⚠️  JARVIS_CONFIG_URL not set - using legacy env vars for service URLs"
+        )
+        return
+
+    try:
+        # Initialize with database engine for persistent caching
+        from app.db import default_engine
+        success = service_config.init(db_engine=default_engine)
+        if success:
+            logger.info("✅ Service discovery initialized from jarvis-config-service")
+        else:
+            logger.warning("⚠️  Service discovery using cached/fallback data")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize service discovery: {e}")
+        logger.warning("⚠️  Falling back to legacy env vars for service URLs")
+
+
 def _setup_remote_logging() -> None:
     """Set up remote logging to jarvis-logs server. Called after uvicorn initializes."""
     global _jarvis_handler
@@ -95,10 +119,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         },
     )
 
-# Add startup event to initialize remote logging after uvicorn is ready
+# Add startup event to initialize services after uvicorn is ready
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on app startup."""
+    # Initialize service discovery first
+    _setup_service_config()
+    # Then set up remote logging
     _setup_remote_logging()
 
 
@@ -107,6 +134,12 @@ async def startup_event():
 async def shutdown_event():
     """Clean up resources on app shutdown."""
     logger.info("🛑 Shutting down Jarvis Command Center...")
+    # Shutdown service discovery
+    try:
+        from app.core import service_config
+        service_config.shutdown()
+    except Exception:
+        pass
     # Flush and close remote log handler
     for handler in logger.handlers:
         if hasattr(handler, 'close'):
@@ -456,7 +489,12 @@ async def train_adapter(
         "callback": callback,
     }
 
-    llm_proxy_base_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
+    # Get LLM proxy URL from service discovery or fallback to env var
+    from app.core import service_config
+    if service_config.is_initialized():
+        llm_proxy_base_url = service_config.get_llm_proxy_url()
+    else:
+        llm_proxy_base_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
     queue_url = f"{llm_proxy_base_url.rstrip('/')}/internal/queue/enqueue"
     headers = {}
     internal_token = os.getenv("LLM_PROXY_INTERNAL_TOKEN")

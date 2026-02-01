@@ -13,16 +13,30 @@ logger = logging.getLogger("uvicorn")
 
 class LLMProxyClient:
     """Client for interacting with the LLM proxy API."""
-    
+
     def __init__(self, base_url: Optional[str] = None):
         """
         Initialize the LLM proxy client.
-        
+
         Args:
-            base_url: Base URL for the LLM proxy. If None, uses environment variable.
+            base_url: Base URL for the LLM proxy. If None, uses service discovery.
         """
-        self.base_url = base_url or os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
+        if base_url:
+            self.base_url = base_url
+        else:
+            self.base_url = self._get_base_url()
         self.app_headers = build_jarvis_app_headers()
+
+    def _get_base_url(self) -> str:
+        """Get base URL from service discovery or fallback to env var."""
+        try:
+            from app.core import service_config
+            if service_config.is_initialized():
+                return service_config.get_llm_proxy_url()
+        except Exception:
+            pass
+        # Fallback to env var
+        return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
     
     def _build_url(self, endpoint: str) -> str:
         """Build full URL from endpoint."""
