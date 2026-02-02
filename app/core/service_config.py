@@ -25,6 +25,7 @@ _DEFAULTS = {
     "jarvis-logs": "http://localhost:8006",
     "jarvis-whisper": "http://localhost:8012",
     "jarvis-tts": "http://localhost:8009",
+    "jarvis-mqtt-broker": "mqtt://localhost:1883",
 }
 
 # Mapping of service names to legacy env var names
@@ -34,6 +35,7 @@ _ENV_VAR_FALLBACKS = {
     "jarvis-logs": "JARVIS_LOGS_URL",
     "jarvis-whisper": "JARVIS_WHISPER_URL",
     "jarvis-tts": "JARVIS_TTS_URL",
+    "jarvis-mqtt-broker": "JARVIS_MQTT_BROKER_URL",
 }
 
 _initialized = False
@@ -159,3 +161,8 @@ def get_whisper_url() -> str:
 def get_tts_url() -> str:
     """Get TTS service URL."""
     return _get_url("jarvis-tts")
+
+
+def get_mqtt_broker_url() -> str:
+    """Get MQTT broker URL."""
+    return _get_url("jarvis-mqtt-broker")

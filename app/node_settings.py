@@ -1,0 +1,346 @@
+"""
+Node settings management API.
+
+Implements the settings request/snapshot flow for encrypted node settings
+as specified in jarvis-node-settings.md.
+
+Flow:
+1. Mobile creates request -> CC stores request, publishes MQTT signal
+2. Node confirms request -> CC returns request details
+3. Node uploads snapshot -> CC stores encrypted snapshot, marks request fulfilled
+4. Mobile polls result -> CC returns snapshot with AAD for decryption
+"""
+import json
+import logging
+import uuid
+from datetime import datetime
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy.orm import Session
+
+from .deps import get_db, verify_admin_key, verify_api_key
+from .models import Node, SettingsRequest, SettingsSnapshot
+from .context_providers.node_context_provider import NodeContextProvider
+
+router = APIRouter()
+logger = logging.getLogger("uvicorn")
+
+# MQTT client - initialized lazily
+mqtt_client: Optional["MQTTClient"] = None
+
+
+def get_mqtt_client() -> Optional["MQTTClient"]:
+    """Get or create MQTT client."""
+    global mqtt_client
+    if mqtt_client is None:
+        try:
+            from .core.mqtt_client import MQTTClient, get_mqtt_broker_url
+            broker_url = get_mqtt_broker_url()
+            if broker_url:
+                mqtt_client = MQTTClient(broker_url)
+                mqtt_client.connect()
+                logger.info(f"✅ MQTT client connected to {broker_url}")
+        except Exception as e:
+            logger.warning(f"⚠️  MQTT client not available: {e}")
+    return mqtt_client
+
+
+# =============================================================================
+# Pydantic Models
+# =============================================================================
+
+class SettingsRequestResponse(BaseModel):
+    """Response model for settings request."""
+    request_id: str
+    node_id: str
+    status: str
+    created_at: datetime
+    expires_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SnapshotUpload(BaseModel):
+    """Request body for uploading encrypted snapshot."""
+    ciphertext: str  # base64url encoded
+    nonce: str       # base64url encoded
+    tag: str         # base64url encoded
+    aad_schema_version: int
+    aad_commands_schema_version: int
+    aad_revision: int
+
+
+class SnapshotResponse(BaseModel):
+    """Response model for snapshot."""
+    snapshot_id: str
+    node_id: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AADResponse(BaseModel):
+    """AAD fields for client-side decryption."""
+    node_id: str
+    schema_version: int
+    commands_schema_version: int
+    revision: int
+    request_id: str
+
+
+class SnapshotDetailResponse(BaseModel):
+    """Full snapshot with AAD for mobile decryption."""
+    snapshot_id: str
+    ciphertext: str
+    nonce: str
+    tag: str
+    aad: AADResponse
+    created_at: datetime
+
+
+class ResultResponse(BaseModel):
+    """Response for polling result endpoint."""
+    status: str
+    request_id: str
+    snapshot: Optional[SnapshotDetailResponse] = None
+
+
+class PendingResponse(BaseModel):
+    """Response when request is still pending."""
+    status: str
+    request_id: str
+    message: str
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def _check_request_expired(request: SettingsRequest) -> bool:
+    """Check if a request has expired."""
+    return request.expires_at < datetime.utcnow()
+
+
+def _publish_settings_request_mqtt(node_id: str, request_id: str) -> None:
+    """Publish MQTT message to signal node about settings request."""
+    client = get_mqtt_client()
+    if client is None:
+        logger.warning(f"⚠️  MQTT not available, node {node_id} must poll for requests")
+        return
+
+    topic = f"jarvis/nodes/{node_id}/settings/request"
+    payload = json.dumps({
+        "request_id": request_id,
+        "node_id": node_id,
+    })
+
+    try:
+        client.publish(topic, payload)
+        logger.info(f"📤 Published settings request to {topic}")
+    except Exception as e:
+        logger.error(f"❌ Failed to publish MQTT message: {e}")
+        # Don't fail the request - node can poll
+
+
+# =============================================================================
+# API Endpoints
+# =============================================================================
+
+@router.post(
+    "/nodes/{node_id}/settings/requests",
+    response_model=SettingsRequestResponse,
+    status_code=201,
+    dependencies=[Depends(verify_admin_key)],
+)
+def create_settings_request(node_id: str, db: Session = Depends(get_db)):
+    """
+    Create a new settings request for a node.
+
+    This is called by the mobile app when it wants to retrieve node settings.
+    CC will publish an MQTT message to signal the node.
+    """
+    # Verify node exists
+    node = db.query(Node).filter(Node.node_id == node_id).first()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    # Create request with UUIDv4 (unguessable)
+    request = SettingsRequest(
+        request_id=str(uuid.uuid4()),
+        node_id=node_id,
+        status="pending",
+    )
+    db.add(request)
+    db.commit()
+    db.refresh(request)
+
+    logger.info(f"📝 Settings request created: {request.request_id[:8]}... for node {node_id}")
+
+    # Publish MQTT signal (non-blocking, best effort)
+    _publish_settings_request_mqtt(node_id, request.request_id)
+
+    return request
+
+
+@router.get(
+    "/nodes/{node_id}/settings/requests/{request_id}",
+    response_model=SettingsRequestResponse,
+)
+def get_settings_request(
+    node_id: str,
+    request_id: str,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+    db: Session = Depends(get_db),
+):
+    """
+    Get details of a settings request.
+
+    This is called by the node to confirm a request exists before responding.
+    Node must authenticate with its API key.
+    """
+    # Verify node is accessing its own request
+    if node_context.node.node_id != node_id:
+        raise HTTPException(status_code=403, detail="Cannot access other node's requests")
+
+    request = db.query(SettingsRequest).filter(
+        SettingsRequest.request_id == request_id,
+        SettingsRequest.node_id == node_id,
+    ).first()
+
+    if not request:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    # Check expiration
+    if _check_request_expired(request):
+        raise HTTPException(status_code=410, detail="Request expired")
+
+    return request
+
+
+@router.put(
+    "/nodes/{node_id}/settings/requests/{request_id}/snapshot",
+    response_model=SnapshotResponse,
+    status_code=201,
+)
+def upload_settings_snapshot(
+    node_id: str,
+    request_id: str,
+    payload: SnapshotUpload,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+    db: Session = Depends(get_db),
+):
+    """
+    Upload encrypted settings snapshot for a request.
+
+    This is called by the node after confirming the request.
+    The snapshot is encrypted with K2 using AES-256-GCM.
+    """
+    # Verify node is uploading to its own request
+    if node_context.node.node_id != node_id:
+        raise HTTPException(status_code=403, detail="Cannot upload to other node's requests")
+
+    request = db.query(SettingsRequest).filter(
+        SettingsRequest.request_id == request_id,
+        SettingsRequest.node_id == node_id,
+    ).first()
+
+    if not request:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    # Check expiration
+    if _check_request_expired(request):
+        raise HTTPException(status_code=410, detail="Request expired")
+
+    # Check status
+    if request.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Request already {request.status}")
+
+    # Create snapshot with AAD fields for client-side verification
+    snapshot = SettingsSnapshot(
+        snapshot_id=str(uuid.uuid4()),
+        node_id=node_id,
+        request_id=request_id,
+        ciphertext=payload.ciphertext,
+        nonce=payload.nonce,
+        tag=payload.tag,
+        aad_node_id=node_id,
+        aad_schema_version=payload.aad_schema_version,
+        aad_commands_schema_version=payload.aad_commands_schema_version,
+        aad_revision=payload.aad_revision,
+        aad_request_id=request_id,
+    )
+    db.add(snapshot)
+
+    # Mark request as fulfilled
+    request.status = "fulfilled"
+    db.commit()
+    db.refresh(snapshot)
+
+    logger.info(f"✅ Snapshot uploaded for request {request_id[:8]}...")
+
+    return snapshot
+
+
+@router.get("/nodes/{node_id}/settings/requests/{request_id}/result")
+def get_settings_result(
+    node_id: str,
+    request_id: str,
+    response: Response,
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_admin_key),
+):
+    """
+    Poll for settings request result.
+
+    This is called by the mobile app to check if the node has responded.
+    Returns 202 if still pending, 200 with snapshot if fulfilled.
+    """
+    request = db.query(SettingsRequest).filter(
+        SettingsRequest.request_id == request_id,
+        SettingsRequest.node_id == node_id,
+    ).first()
+
+    if not request:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    # Check expiration
+    if _check_request_expired(request) and request.status == "pending":
+        raise HTTPException(status_code=410, detail="Request expired")
+
+    # Still pending
+    if request.status == "pending":
+        response.status_code = 202
+        return PendingResponse(
+            status="pending",
+            request_id=request_id,
+            message="Waiting for node response",
+        ).model_dump()
+
+    # Fulfilled - return snapshot
+    snapshot = db.query(SettingsSnapshot).filter(
+        SettingsSnapshot.request_id == request_id,
+    ).first()
+
+    if not snapshot:
+        raise HTTPException(status_code=500, detail="Snapshot missing for fulfilled request")
+
+    return {
+        "status": "fulfilled",
+        "request_id": request_id,
+        "snapshot": {
+            "snapshot_id": snapshot.snapshot_id,
+            "ciphertext": snapshot.ciphertext,
+            "nonce": snapshot.nonce,
+            "tag": snapshot.tag,
+            "aad": {
+                "node_id": snapshot.aad_node_id,
+                "schema_version": snapshot.aad_schema_version,
+                "commands_schema_version": snapshot.aad_commands_schema_version,
+                "revision": snapshot.aad_revision,
+                "request_id": snapshot.aad_request_id,
+            },
+            "created_at": snapshot.created_at.isoformat(),
+        },
+    }

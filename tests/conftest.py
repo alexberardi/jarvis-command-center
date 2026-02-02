@@ -2,7 +2,7 @@ import pytest
 import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from app.models import Base, Node
+from app.models import Base, Node, SettingsRequest, SettingsSnapshot
 from fastapi.testclient import TestClient
 from app.main import app
 
