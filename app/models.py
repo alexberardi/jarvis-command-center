@@ -1,8 +1,14 @@
-from sqlalchemy import Column, String, DateTime
-from sqlalchemy.orm import declarative_base
-from datetime import datetime
+from sqlalchemy import Column, String, DateTime, Integer, ForeignKey, func
+from sqlalchemy.orm import declarative_base, relationship
+from datetime import datetime, timedelta
 
 Base = declarative_base()
+
+
+def _default_expires_at() -> datetime:
+    """Default expiration: 5 minutes from now."""
+    return datetime.utcnow() + timedelta(minutes=5)
+
 
 class Node(Base):
     __tablename__ = 'nodes'
@@ -14,3 +20,68 @@ class Node(Base):
     last_seen = Column(DateTime, default=datetime.utcnow)
     # Per-node LoRA adapter hash (set after training completes)
     adapter_hash = Column(String, nullable=True)
+
+    # Relationships
+    settings_requests = relationship("SettingsRequest", back_populates="node", cascade="all, delete-orphan")
+    settings_snapshots = relationship("SettingsSnapshot", back_populates="node", cascade="all, delete-orphan")
+
+
+class SettingsRequest(Base):
+    """
+    A request from mobile to retrieve node settings.
+
+    Lifecycle:
+    1. Mobile creates request (status=pending)
+    2. CC publishes MQTT signal to node
+    3. Node confirms request via GET
+    4. Node uploads encrypted snapshot (status=fulfilled)
+    5. Mobile retrieves snapshot
+
+    Requests expire after expires_at to prevent replay attacks.
+    """
+    __tablename__ = 'settings_requests'
+
+    request_id = Column(String, primary_key=True)
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    status = Column(String, nullable=False, default="pending")  # pending, fulfilled, expired
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False, default=_default_expires_at)
+
+    # Relationships
+    node = relationship("Node", back_populates="settings_requests")
+    snapshot = relationship("SettingsSnapshot", back_populates="request", uselist=False)
+
+
+class SettingsSnapshot(Base):
+    """
+    An encrypted settings snapshot uploaded by a node.
+
+    The ciphertext is encrypted with K2 (mobile↔node key) using AES-256-GCM.
+    AAD fields are stored separately so clients can reconstruct the AAD for decryption.
+
+    AAD binding prevents ciphertext substitution attacks across nodes/requests.
+    """
+    __tablename__ = 'settings_snapshots'
+
+    snapshot_id = Column(String, primary_key=True)
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    request_id = Column(String, ForeignKey('settings_requests.request_id', ondelete='CASCADE'), nullable=False)
+
+    # Encrypted payload (AES-256-GCM)
+    ciphertext = Column(String, nullable=False)  # base64url encoded
+    nonce = Column(String, nullable=False)       # base64url encoded (IV)
+    tag = Column(String, nullable=False)         # base64url encoded (auth tag)
+
+    # AAD components - stored separately for client-side AAD reconstruction
+    # Clients must use these exact values when constructing AAD for decryption
+    aad_node_id = Column(String, nullable=False)
+    aad_schema_version = Column(Integer, nullable=False)
+    aad_commands_schema_version = Column(Integer, nullable=False)
+    aad_revision = Column(Integer, nullable=False)
+    aad_request_id = Column(String, nullable=False)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Relationships
+    node = relationship("Node", back_populates="settings_snapshots")
+    request = relationship("SettingsRequest", back_populates="snapshot")
