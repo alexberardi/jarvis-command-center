@@ -23,6 +23,33 @@ from app.core.utils.latency_logger import latency_logger
 from app.request_models.voice_command_request import CommandDefinition
 from contextlib import nullcontext
 
+# Extracted modules for cleaner composition
+from app.core.date_resolution import (
+    normalize_date_key,
+    flatten_date_context,
+    parse_time_string,
+    apply_time_modifier,
+    is_datetime_param,
+    is_datetime_array,
+    resolve_date_keys,
+)
+from app.core.param_validation import (
+    normalize_param_type,
+    is_iso_date,
+    is_iso_datetime,
+    validate_scalar,
+    validate_value,
+    find_invalid_params,
+)
+from app.core.system_prompt_builder import (
+    build_tool_system_message,
+    get_response_format,
+)
+from app.core.usage_logging import (
+    write_usage_log,
+    write_prompt_response_log,
+)
+
 logger = logging.getLogger("uvicorn")
 
 # Module-level singleton for tool classifier (expensive to load, reuse across requests)
@@ -783,57 +810,20 @@ class ModelService:
             adapter_settings = {"hash": adapter_hash, "enabled": True}
             logger.info(f"🔌 Using adapter {adapter_hash[:8]}... for tool loop")
 
-        def _write_usage_log(turns_used: int, status: str) -> None:
-            log_path = os.getenv(
-                "JARVIS_LLM_USAGE_LOG_PATH",
-                "/app/temp/llm_usage.log"
-            )
-            timestamp = datetime.utcnow().isoformat() + "Z"
-            entry = (
-                f"{timestamp} conversation_id={conversation_id} "
-                f"turns={turns_used} status={status} "
-                f"prompt_tokens={usage_totals['prompt_tokens']} "
-                f"completion_tokens={usage_totals['completion_tokens']} "
-                f"total_tokens={usage_totals['total_tokens']}\n"
-            )
-            try:
-                log_dir = os.path.dirname(log_path)
-                if log_dir:
-                    os.makedirs(log_dir, exist_ok=True)
-                with open(log_path, "a", encoding="utf-8") as handle:
-                    handle.write(entry)
-            except Exception as exc:
-                logger.warning("⚠️ Failed to write usage log: %s", exc)
+        # Use extracted logging functions with closures for conversation_id and usage_totals
+        def _log_usage(turns_used: int, status: str) -> None:
+            write_usage_log(conversation_id, turns_used, status, usage_totals)
 
-        def _write_prompt_response_log(
+        def _log_prompt_response(
             prompt_messages: List[Dict[str, Any]],
             response_obj: Optional[Dict[str, Any]],
             raw_content: Optional[str],
             error: Optional[str],
             iteration: int
         ) -> None:
-            log_path = os.getenv(
-                "JARVIS_LLM_TRACE_LOG_PATH",
-                "/app/temp/llm_trace.log"
+            write_prompt_response_log(
+                conversation_id, prompt_messages, response_obj, raw_content, error, iteration
             )
-            timestamp = datetime.utcnow().isoformat() + "Z"
-            entry = {
-                "timestamp": timestamp,
-                "conversation_id": conversation_id,
-                "iteration": iteration,
-                "prompt_messages": prompt_messages,
-                "raw_content": raw_content,
-                "response": response_obj,
-                "error": error,
-            }
-            try:
-                log_dir = os.path.dirname(log_path)
-                if log_dir:
-                    os.makedirs(log_dir, exist_ok=True)
-                with open(log_path, "a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(entry) + "\n")
-            except Exception as exc:
-                logger.warning("⚠️ Failed to write LLM trace log: %s", exc)
 
         def _invalid_param_retry_count() -> int:
             retry_tag = "[INVALID_PARAM_RETRY]"
@@ -856,216 +846,27 @@ class ModelService:
 
         timezone_str = conversation_cache.get_timezone(conversation_id)
 
-        def _normalize_date_key(raw: str) -> str:
-            text = raw.strip().lower()
-            text = re.sub(r"\s+", "_", text)
-            text = text.replace(":", "_")
-            return text
-
-        def _flatten_date_context(nested_context: Dict[str, Any]) -> Dict[str, Any]:
-            flat: Dict[str, Any] = {}
-            if not isinstance(nested_context, dict):
-                return flat
-
-            current = nested_context.get("current", {})
-            if isinstance(current, dict) and isinstance(current.get("utc_start_of_day"), str):
-                flat["today"] = current["utc_start_of_day"]
-
-            relative = nested_context.get("relative_dates", {})
-            if isinstance(relative, dict):
-                for key, value in relative.items():
-                    if not isinstance(value, dict):
-                        continue
-                    if isinstance(value.get("utc_start_of_day"), str):
-                        flat[key] = value["utc_start_of_day"]
-                    elif isinstance(value.get("datetime"), str):
-                        flat[key] = value["datetime"]
-
-            for bucket_name in ("weekend", "weeks", "months", "years"):
-                bucket = nested_context.get(bucket_name, {})
-                if not isinstance(bucket, dict):
-                    continue
-                for key, value in bucket.items():
-                    if not isinstance(value, list):
-                        continue
-                    dates = [
-                        item.get("utc_start_of_day")
-                        for item in value
-                        if isinstance(item, dict) and isinstance(item.get("utc_start_of_day"), str)
-                    ]
-                    if dates:
-                        flat[key] = dates
-
-            weekdays = nested_context.get("weekdays", {})
-            if isinstance(weekdays, dict):
-                for key, value in weekdays.items():
-                    if isinstance(value, dict) and isinstance(value.get("utc_start_of_day"), str):
-                        flat[key] = value["utc_start_of_day"]
-
-            this_week = nested_context.get("weeks", {}).get("this_week", [])
-            if isinstance(this_week, list):
-                for entry in this_week:
-                    if not isinstance(entry, dict):
-                        continue
-                    day = entry.get("day")
-                    if isinstance(day, str) and isinstance(entry.get("utc_start_of_day"), str):
-                        flat[f"this_{day.strip().lower()}"] = entry["utc_start_of_day"]
-
-            time_expressions = nested_context.get("time_expressions", {})
-            if isinstance(time_expressions, dict):
-                for key, value in time_expressions.items():
-                    if isinstance(value, str):
-                        flat[_normalize_date_key(key)] = value
-
-            return flat
-
-        def _is_datetime_param(param_schema: Dict[str, Any]) -> bool:
-            if not isinstance(param_schema, dict):
-                return False
-            if param_schema.get("format") == "date-time":
-                return True
-            if param_schema.get("type") == "array":
-                items = param_schema.get("items", {})
-                return isinstance(items, dict) and items.get("format") == "date-time"
-            return False
-
-        def _is_datetime_array(param_schema: Dict[str, Any]) -> bool:
-            if not isinstance(param_schema, dict):
-                return False
-            if param_schema.get("type") != "array":
-                return False
-            items = param_schema.get("items", {})
-            return isinstance(items, dict) and items.get("format") == "date-time"
-
-        def _parse_time_string(time_str: str) -> Tuple[int, int]:
-            match = re.match(r"(\d+)_(\d+)(am|pm)", time_str)
-            if match:
-                hour = int(match.group(1))
-                minute = int(match.group(2))
-                if match.group(3) == "pm" and hour != 12:
-                    hour += 12
-                elif match.group(3) == "am" and hour == 12:
-                    hour = 0
-                return hour, minute
-
-            match = re.match(r"(\d+)(am|pm)", time_str)
-            if match:
-                hour = int(match.group(1))
-                if match.group(2) == "pm" and hour != 12:
-                    hour += 12
-                elif match.group(2) == "am" and hour == 12:
-                    hour = 0
-                return hour, 0
-
-            return 0, 0
-
-        def _apply_time_modifier(base_datetime: str, modifier: str) -> Optional[str]:
-            try:
-                normalized = base_datetime.replace("Z", "+00:00") if base_datetime.endswith("Z") else base_datetime
-                dt = datetime.fromisoformat(normalized)
-            except ValueError:
-                return None
-
-            time_map = {
-                "morning": 7,
-                "afternoon": 13,
-                "evening": 18,
-                "night": 21,
-                "noon": 12,
-                "midnight": 0,
-            }
-            if modifier in time_map:
-                dt = dt.replace(hour=time_map[modifier], minute=0, second=0, microsecond=0)
-            elif modifier.startswith("at_"):
-                hour, minute = _parse_time_string(modifier[3:])
-                dt = dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-            return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-        def _resolve_date_keys(
-            date_keys: List[str],
-            date_context: Dict[str, Any]
-        ) -> Tuple[List[str], List[str]]:
-            """
-            Resolve date keys to datetime strings.
-
-            Returns:
-                Tuple of (resolved_dates, unresolved_keys)
-            """
-            if not date_keys:
-                return [], []
-            normalized_keys = [_normalize_date_key(key) for key in date_keys if isinstance(key, str)]
-            flat_context = _flatten_date_context(date_context)
-
-            resolved: List[str] = []
-            unresolved: List[str] = []
-
-            for key in normalized_keys:
-                value = flat_context.get(key)
-                if isinstance(value, list):
-                    resolved.extend([v for v in value if isinstance(v, str)])
-                elif isinstance(value, str):
-                    resolved.append(value)
-                else:
-                    # Key not found in flat_context - track for potential LLM fallback
-                    # But skip time modifiers (they combine with date keys)
-                    if key not in {"morning", "afternoon", "evening", "night", "noon", "midnight"} and not key.startswith("at_"):
-                        unresolved.append(key)
-
-            date_key = None
-            for key in normalized_keys:
-                value = flat_context.get(key)
-                if isinstance(value, str):
-                    date_key = key
-                    break
-
-            time_key = None
-            for key in normalized_keys:
-                if key in {"morning", "afternoon", "evening", "night", "noon", "midnight"} or key.startswith("at_"):
-                    time_key = key
-                    break
-
-            if date_key and time_key:
-                base = flat_context.get(date_key)
-                if isinstance(base, str):
-                    combined = _apply_time_modifier(base, time_key)
-                    if combined:
-                        resolved.append(combined)
-                elif isinstance(base, list):
-                    for entry in base:
-                        if not isinstance(entry, str):
-                            continue
-                        combined = _apply_time_modifier(entry, time_key)
-                        if combined:
-                            resolved.append(combined)
-
-            seen = set()
-            unique = []
-            for entry in resolved:
-                if entry in seen:
-                    continue
-                seen.add(entry)
-                unique.append(entry)
-            return unique, unresolved
+        # Date resolution functions are now imported from app.core.date_resolution
 
         async def _inject_date_keys(
             tool_calls: List[Dict[str, Any]],
             date_keys: List[str],
             tools_list: List[Dict[str, Any]]
         ) -> List[Dict[str, Any]]:
+            """Inject resolved date keys into tool call arguments using extracted date_resolution module."""
             if not tool_calls:
                 return tool_calls
             from app.core.general_context import generate_date_context_object
             from app.core.tools.resolve_relative_date_tool import ResolveRelativeDateTool
 
             date_context = generate_date_context_object(timezone_str)
-            flat_context = _flatten_date_context(date_context)
+            flat_context = flatten_date_context(date_context)
             available_keys = ResolveRelativeDateTool.get_available_keys(date_context)
 
-            # Resolve date_keys from LLM response
+            # Resolve date_keys from LLM response using extracted module
             resolved_dates: List[str] = []
             if date_keys:
-                resolved_dates, unresolved_keys = _resolve_date_keys(date_keys, date_context)
+                resolved_dates, unresolved_keys = resolve_date_keys(date_keys, date_context)
 
                 # LLM fallback for unresolved keys (one attempt per key)
                 if unresolved_keys and user_utterance:
@@ -1088,8 +889,8 @@ class ModelService:
 
             async def _resolve_relative_datetime(relative_value: str) -> Optional[str]:
                 """Attempt to resolve a relative datetime string (e.g., 'tomorrow') to an ISO datetime."""
-                # First try direct lookup in flat context
-                normalized = _normalize_date_key(relative_value)
+                # First try direct lookup in flat context using imported normalize_date_key
+                normalized = normalize_date_key(relative_value)
                 value = flat_context.get(normalized)
                 if isinstance(value, str):
                     logger.info(f"📅 Resolved relative datetime '{relative_value}' → '{value}'")
@@ -1150,11 +951,13 @@ class ModelService:
 
                 mutated = False
                 for param_name, param_schema in param_schemas.items():
-                    if not _is_datetime_param(param_schema):
+                    # Use imported is_datetime_param from date_resolution module
+                    if not is_datetime_param(param_schema):
                         continue
 
                     existing = args_obj.get(param_name)
-                    is_array = _is_datetime_array(param_schema)
+                    # Use imported is_datetime_array from date_resolution module
+                    is_array = is_datetime_array(param_schema)
 
                     # Case 1: Empty - inject resolved_dates
                     if existing in (None, [], ""):
@@ -1167,11 +970,12 @@ class ModelService:
                         continue
 
                     # Case 2: Has value - validate and fix if needed
+                    # Use imported is_iso_datetime from param_validation module
                     if is_array and isinstance(existing, list):
                         # Validate each item in the array
                         cleaned: List[str] = []
                         for item in existing:
-                            if isinstance(item, str) and _is_iso_datetime(item):
+                            if isinstance(item, str) and is_iso_datetime(item):
                                 cleaned.append(item)
                             elif isinstance(item, str):
                                 # Invalid datetime string - try to resolve it
@@ -1182,7 +986,7 @@ class ModelService:
                             args_obj[param_name] = cleaned if cleaned else resolved_dates
                             mutated = True
                     elif not is_array and isinstance(existing, str):
-                        if not _is_iso_datetime(existing):
+                        if not is_iso_datetime(existing):
                             # Invalid datetime string - try to resolve it
                             resolved = await _resolve_relative_datetime(existing)
                             if resolved:
@@ -1197,54 +1001,9 @@ class ModelService:
 
             return tool_calls
 
-        def _normalize_param_type(param_type: Optional[str]) -> Tuple[Optional[str], bool]:
-            if not param_type:
-                return None, False
-            raw = param_type.strip().lower()
-            if raw.startswith("array<") and raw.endswith(">"):
-                return raw[len("array<"):-1].strip(), True
-            if raw.startswith("array[") and raw.endswith("]"):
-                return raw[len("array["):-1].strip(), True
-            if raw.endswith("[]"):
-                return raw[:-2].strip(), True
-            return raw, False
-
-        def _is_iso_date(value: str) -> bool:
-            return bool(re.match(r"^\d{4}-\d{2}-\d{2}$", value))
-
-        def _is_iso_datetime(value: str) -> bool:
-            if "T" not in value:
-                return False
-            normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
-            try:
-                parsed = datetime.fromisoformat(normalized)
-            except ValueError:
-                return False
-            return parsed.tzinfo is not None
-
-        def _validate_scalar(value: Any, base_type: str) -> bool:
-            if base_type in {"string"}:
-                return isinstance(value, str)
-            if base_type in {"int", "integer"}:
-                return isinstance(value, int) and not isinstance(value, bool)
-            if base_type in {"float", "number", "double"}:
-                return isinstance(value, (int, float)) and not isinstance(value, bool)
-            if base_type in {"bool", "boolean"}:
-                return isinstance(value, bool)
-            if base_type == "date":
-                return isinstance(value, str) and _is_iso_date(value)
-            if base_type == "datetime":
-                return isinstance(value, str) and _is_iso_datetime(value)
-            return True
-
-        def _validate_value(value: Any, base_type: str, is_array: bool) -> bool:
-            if is_array:
-                if not isinstance(value, list):
-                    return False
-                return all(_validate_scalar(item, base_type) for item in value)
-            return _validate_scalar(value, base_type)
-
+        # Parameter validation functions are now imported from app.core.param_validation
         def _build_param_type_map() -> Dict[str, Dict[str, str]]:
+            """Build a map of tool_name -> {param_name: param_type} from available commands."""
             param_map: Dict[str, Dict[str, str]] = {}
             available_commands = conversation_cache.get_available_commands(conversation_id) or []
             for cmd in available_commands:
@@ -1259,31 +1018,10 @@ class ModelService:
                         param_map.setdefault(cmd_name, {})[name] = ptype
             return param_map
 
-        def _find_invalid_params(client_calls: List[Dict[str, Any]]) -> List[str]:
-            invalid: List[str] = []
+        def _validate_client_tool_params(client_calls: List[Dict[str, Any]]) -> List[str]:
+            """Validate client tool call parameters using extracted param_validation module."""
             param_types = _build_param_type_map()
-            if not param_types:
-                return invalid
-            for call in client_calls:
-                tool_name = call.get("function", {}).get("name")
-                if not tool_name or tool_name not in param_types:
-                    continue
-                args_raw = call.get("function", {}).get("arguments", "{}")
-                try:
-                    args_obj = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
-                except Exception:
-                    args_obj = {}
-                if not isinstance(args_obj, dict):
-                    continue
-                for param_name, param_type in param_types[tool_name].items():
-                    if param_name not in args_obj:
-                        continue
-                    base_type, is_array = _normalize_param_type(param_type)
-                    if not base_type:
-                        continue
-                    if not _validate_value(args_obj.get(param_name), base_type, is_array):
-                        invalid.append(f"{tool_name}.{param_name} expected {param_type}")
-            return invalid
+            return find_invalid_params(client_calls, param_types)
 
         import time as _time
         timing = latency_logger.get_request(conversation_id)
@@ -1307,8 +1045,8 @@ class ModelService:
                 logger.debug(f"⏱️  LLM call took {(_time.time()-_llm_start)*1000:.0f}ms")
             except Exception as e:
                 logger.error(f"❌ LLM call failed: {e}")
-                _write_prompt_response_log(prompt_snapshot, None, None, str(e), iteration + 1)
-                _write_usage_log(iteration + 1, "error")
+                _log_prompt_response(prompt_snapshot, None, None, str(e), iteration + 1)
+                _log_usage(iteration + 1, "error")
                 return {
                     "stop_reason": "error",
                     "error": str(e)
@@ -1344,7 +1082,7 @@ class ModelService:
             if not raw_content:
                 logger.warning(f"⚠️ Empty raw_content!")
             response_obj = response if isinstance(response, dict) else None
-            _write_prompt_response_log(prompt_snapshot, response_obj, raw_content, None, iteration + 1)
+            _log_prompt_response(prompt_snapshot, response_obj, raw_content, None, iteration + 1)
             
             # Use tool call parser to extract tool calls from JSON
             finish_reason, tool_calls, assistant_message = tool_call_parser.parse_response(raw_content)
@@ -1368,7 +1106,7 @@ class ModelService:
                     logger.info("🔁 Must-call guard triggered; retrying tool selection")
                     continue
                 # Conversation complete
-                _write_usage_log(iteration + 1, "complete")
+                _log_usage(iteration + 1, "complete")
                 return {
                     "stop_reason": "complete",
                     "assistant_message": assistant_message
@@ -1424,7 +1162,7 @@ class ModelService:
                             content = json.loads(result["content"])
                             if content.get("_validation_request"):
                                 logger.info(f"🔍 Validation request detected (only tool call)")
-                                _write_usage_log(iteration + 1, "validation_required")
+                                _log_usage(iteration + 1, "validation_required")
                                 return {
                                     "stop_reason": "validation_required",
                                     "validation_request": {
@@ -1446,7 +1184,7 @@ class ModelService:
                 
                 # If there are client tool calls and NO server tools, return them immediately
                 if client_calls:
-                    invalid_params = _find_invalid_params(client_calls)
+                    invalid_params = _validate_client_tool_params(client_calls)
                     if invalid_params:
                         max_retries = _env_int("JARVIS_INVALID_PARAM_RETRY_MAX", 1 if small_mode else 2)
                         retry_count = _invalid_param_retry_count()
@@ -1461,7 +1199,7 @@ class ModelService:
                             logger.info("🔁 Invalid parameter guard triggered; retrying tool call formatting")
                             continue
                     logger.info(f"📤 Returning {len(client_calls)} client tool calls (no server tools to wait for)")
-                    _write_usage_log(iteration + 1, "tool_calls")
+                    _log_usage(iteration + 1, "tool_calls")
                     return {
                         "stop_reason": "tool_calls",
                         "tool_calls": client_calls,
@@ -1475,7 +1213,7 @@ class ModelService:
             else:
                 # Unknown finish reason
                 logger.warning(f"⚠️ Unknown finish_reason: {finish_reason}")
-                _write_usage_log(iteration + 1, "complete")
+                _log_usage(iteration + 1, "complete")
                 return {
                     "stop_reason": "complete",
                     "assistant_message": assistant_message
@@ -1483,7 +1221,7 @@ class ModelService:
         
         # Max iterations reached
         logger.warning(f"⚠️ Max tool loop iterations ({max_iterations}) reached")
-        _write_usage_log(max_iterations, "max_iterations_exceeded")
+        _log_usage(max_iterations, "max_iterations_exceeded")
         return {
             "stop_reason": "complete",
             "assistant_message": "Maximum tool execution iterations reached.",
@@ -1491,138 +1229,19 @@ class ModelService:
         }
 
     def _get_response_format(self) -> Dict[str, Any]:
-        return {
-            "type": "json_object",
-            "json_schema": {
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string"},
-                    "tool_calls": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "arguments": {"type": "object"},
-                            },
-                            "required": ["name", "arguments"],
-                        },
-                    },
-                    "error": {
-                        "type": ["object", "null"],
-                        "properties": {
-                            "type": {"type": "string"},
-                            "message": {"type": "string"},
-                        },
-                        "required": ["type", "message"],
-                    },
-                },
-                "required": ["message", "tool_calls"],
-                "additionalProperties": True,
-            },
-        }
+        """Get the JSON response format schema."""
+        return get_response_format()
     
     def _build_tool_system_message(
-        self, 
-        node_context: Dict[str, Any], 
+        self,
+        node_context: Dict[str, Any],
         timezone: Optional[str],
         tools: List[Dict[str, Any]],
         available_commands: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """
         Build system message for tool-based conversations.
-        
-        Args:
-            node_context: Node context information
-            timezone: User's timezone
-            tools: Available tools
-            available_commands: Optional available commands for examples
-            
-        Returns:
-            System message string
+
+        Delegates to the extracted system_prompt_builder module.
         """
-        prompt_style = os.getenv("JARVIS_PROMPT_STYLE", "compact").strip().lower()
-        
-        # Format tools for prompt with primary examples
-        tools_text = tool_call_parser.format_tools_with_examples(tools, available_commands)
-        
-        include_reason = os.getenv("JARVIS_INCLUDE_REASON", "").strip().lower() in {"1", "true", "yes"}
-        reason_suffix_inline = ', "reason": "<optional>"' if include_reason else ""
-        reason_suffix_block = '\n  "reason": "<optional>"' if include_reason else ""
-
-        if prompt_style == "full":
-            system_msg = f"""You are Jarvis, a voice-controlled assistant that operates BY CALLING TOOLS.
-
-Node Context:
-- Room: {node_context.get('room', 'unknown')}
-- User: {node_context.get('user', 'default')}
-- Voice Mode: {node_context.get('voice_mode', 'brief')}
-
-YOUR PRIMARY ROLE: You are a tool router and parameter extractor.
-- Analyze the user's request
-- Determine which available tool(s) to call
-- Extract parameters from their message
-- Call the appropriate tool(s)
-
-CRITICAL - Tool Execution Order:
-- Call tools ONE AT A TIME in the order they need to be executed.
-- Do NOT select the final command/tool until all parameters have been resolved.
-- If parameters need resolution (dates, examples, etc.), resolve them FIRST before calling the final tool.
-- Read tool descriptions to understand their purpose and when to use them.
-
-CRITICAL: You do NOT have direct access to information or the ability to perform actions yourself.
-- When a user asks a question or makes a request, you MUST use the available tools
-- DO NOT attempt to answer questions, provide information, or perform actions without calling a tool
-- Review the available tools and select the one that best matches the user's intent
-- After you receive tool results, THEN you format the data into a natural spoken response for the user
-
-Think of yourself as operating in two phases:
-1. TOOL CALLING: Route the request to the appropriate tool(s) - you cannot answer directly
-2. RESPONSE FORMATTING: Once you receive tool results, format them into a conversational response for the user
-
-EXCEPTION: If it's something you can absolutely figure out without a tool (like basic math or who you are), feel free to respond directly.
-
-CRITICAL - Response Format (VALID JSON ONLY):
-You MUST respond with valid JSON only. No comments, no explanations, no markdown, no code blocks.
-- Comments (like # ...) are NOT allowed in JSON
-- Only valid JSON syntax is accepted - any other text will cause errors
-{"- You may include an optional 'reason' field explaining tool/parameter choices." if include_reason else ""}
-
-When calling a tool (ONE at a time):
-{{
-  "message": "Brief acknowledgment",
-  "tool_call": {{"name": "tool_name", "arguments": {{"param_name": "param_value"}}}}{reason_suffix_block}
-}}
-
-When you have the final answer:
-{{
-  "message": "Your natural spoken response",
-  "tool_call": null{reason_suffix_block}
-}}
-
-Available Tools:
-{tools_text}
-
-Key Guidelines:
-- Extract parameters directly from user's message when they are clearly stated. If the user says "Seattle", extract "Seattle" as the city parameter - do not ask for validation when the information is already provided.
-- Only ask for validation if a required parameter is truly missing or genuinely ambiguous after trying all other options.
-- Be conversational and {node_context.get('voice_mode', 'brief')}"""
-        else:
-            system_msg = f"""You are Jarvis. Always call tools; respond with VALID JSON only.
-
-Context: room={node_context.get('room', 'unknown')}, user={node_context.get('user', 'default')}, style={node_context.get('voice_mode', 'brief')}
-
-Rules:
-- Call ONE tool at a time.
-- Relative dates are resolved automatically; use natural terms like 'tomorrow' or 'next_week' in date parameters.
-- Ask for validation only if required params are missing/ambiguous.
-{"- You may include an optional 'reason' field explaining tool/parameter choices." if include_reason else ""}
-
-Format:
-- Tool call: {{"message":"brief ack","tool_call":{{"name":"tool_name","arguments":{{...}}}}{reason_suffix_inline}}}
-- Final: {{"message":"concise reply","tool_call":null{reason_suffix_inline}}}
-
-Tools:
-{tools_text}"""
-        
-        return system_msg
+        return build_tool_system_message(node_context, timezone, tools, available_commands)
