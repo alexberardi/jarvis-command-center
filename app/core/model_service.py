@@ -6,129 +6,58 @@ gradually replace the existing prompt provider architecture.
 """
 
 import logging
-import json
-import os
-import re
-from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from app.core.model_factory import ModelFactory
 from app.core.interfaces.imodel_interface import IModelInterface
 from app.core.llm_proxy_client import LLMProxyClient
-from app.core.tool_registry import tool_registry
-from app.core.tool_executor import tool_executor
-from app.core.tool_call_parser import tool_call_parser
-from app.core.conversation_cache import conversation_cache
-from app.core.utils.latency_logger import latency_logger
+from app.core.conversation_handler import ConversationHandler
+from app.core.system_prompt_builder import build_tool_system_message
 from app.request_models.voice_command_request import CommandDefinition
-from contextlib import nullcontext
-
-# Extracted modules for cleaner composition
-from app.core.date_resolution import (
-    normalize_date_key,
-    flatten_date_context,
-    parse_time_string,
-    apply_time_modifier,
-    is_datetime_param,
-    is_datetime_array,
-    resolve_date_keys,
-)
-from app.core.param_validation import (
-    normalize_param_type,
-    is_iso_date,
-    is_iso_datetime,
-    validate_scalar,
-    validate_value,
-    find_invalid_params,
-)
-from app.core.system_prompt_builder import (
-    build_tool_system_message,
-    get_response_format,
-)
-from app.core.usage_logging import (
-    write_usage_log,
-    write_prompt_response_log,
-)
 
 logger = logging.getLogger("uvicorn")
-
-# Module-level singleton for tool classifier (expensive to load, reuse across requests)
-_tool_classifier_instance = None
-
-
-def _get_shared_tool_classifier():
-    """Get or create the shared tool classifier singleton."""
-    global _tool_classifier_instance
-    if _tool_classifier_instance is not None:
-        return _tool_classifier_instance
-    if os.getenv("JARVIS_TOOL_CLASSIFIER_ENABLED", "false").lower() not in {"1", "true", "yes"}:
-        return None
-    try:
-        from app.core.tool_router.classifier import FastTextToolClassifier
-    except Exception as exc:
-        logger.warning("⚠️ Tool classifier unavailable: %s", exc)
-        return None
-    classifier = FastTextToolClassifier.from_env()
-    if classifier is None:
-        return None
-    _tool_classifier_instance = classifier
-    logger.info("🔧 Tool classifier loaded (singleton)")
-    return _tool_classifier_instance
 
 
 class ModelService:
     """
     Service for managing model interactions.
-    
+
     This service provides a clean interface to the model system and handles:
     1. Model instantiation and management
-    2. Conversation warmup and cleanup
+    2. Conversation warmup and cleanup (via ConversationHandler)
     3. Inference requests
     4. Error handling and logging
     """
-    
+
     def __init__(self, model_name: Optional[str] = None):
         """
         Initialize the model service.
-        
+
         Args:
             model_name: Specific model to use. If None, uses environment variable.
         """
         self.model: IModelInterface = ModelFactory.create_model(model_name)
         self.llm_client = LLMProxyClient()
+        self._conversation_handler = ConversationHandler(
+            model=self.model,
+            llm_client=self.llm_client,
+        )
         logger.info(f"🤖 ModelService initialized with {self.model.name}")
 
-    def _get_tool_classifier(self):
-        # Use module-level singleton for performance
-        return _get_shared_tool_classifier()
+    # =========================================================================
+    # Legacy Methods (delegate to model interface)
+    # =========================================================================
 
-    def _route_tool(self, utterance: str, tools: List[Dict[str, Any]]) -> Optional[Tuple[str, float]]:
-        classifier = self._get_tool_classifier()
-        if classifier is None or not utterance:
-            return None
-        tool_names = set()
-        for tool in tools or []:
-            if isinstance(tool.get("function"), dict):
-                name = tool.get("function", {}).get("name")
-            else:
-                name = tool.get("name")
-            if name:
-                tool_names.add(name)
-        prediction = classifier.predict(utterance)
-        if not prediction.tool_name or prediction.tool_name not in tool_names:
-            return None
-        return prediction.tool_name, prediction.score
-    
     async def warmup_conversation(
         self,
         node_context: Dict[str, Any],
         available_commands: List[CommandDefinition],
         conversation_id: str,
-        timezone: Optional[str] = None
+        timezone: Optional[str] = None,
     ) -> None:
         """
-        Warm up a conversation with the model.
-        
+        Warm up a conversation with the model (legacy method).
+
         Args:
             node_context: Node information (room, user, device, etc.)
             available_commands: List of commands available to this node
@@ -136,34 +65,34 @@ class ModelService:
             timezone: User's timezone for date calculations
         """
         logger.info(f"🚀 Warming up conversation {conversation_id[:8]} with {self.model.name}")
-        
+
         try:
             await self.model.perform_warmup(
                 node_context=node_context,
                 available_commands=available_commands,
                 conversation_id=conversation_id,
-                timezone=timezone
+                timezone=timezone,
             )
             logger.info(f"✅ Warmup completed for {conversation_id[:8]}")
-            
+
         except Exception as e:
             logger.error(f"❌ Warmup failed for {conversation_id[:8]}: {e}")
             raise
-    
+
     async def process_voice_command(
         self,
         voice_command: str,
         conversation_id: str,
-        node_context: Optional[Dict[str, Any]] = None
+        node_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Process a voice command and return the result.
-        
+        Process a voice command and return the result (legacy method).
+
         Args:
             voice_command: The user's voice command text
             conversation_id: Conversation ID (must match warmup call)
             node_context: Optional additional node context
-            
+
         Returns:
             Standard Jarvis response format:
             {
@@ -174,106 +103,115 @@ class ModelService:
             }
         """
         logger.info(f"🎯 Processing command with {self.model.name}: '{voice_command}'")
-        
+
         try:
             result = await self.model.perform_inference(
                 voice_command=voice_command,
                 conversation_id=conversation_id,
-                node_context=node_context
+                node_context=node_context,
             )
-            
-            logger.info(f"✅ Command processed successfully")
+
+            logger.info("✅ Command processed successfully")
             return result
-            
+
         except Exception as e:
             logger.error(f"❌ Command processing failed: {e}")
             return {
                 "s": False,
                 "n": None,
                 "p": {},
-                "e": {"type": "service_error", "message": str(e)}
+                "e": {"type": "service_error", "message": str(e)},
             }
-    
+
     async def cleanup_conversation(self, conversation_id: str) -> None:
         """
         Clean up a conversation.
-        
+
         Args:
             conversation_id: Conversation to clean up
         """
         logger.info(f"🧹 Cleaning up conversation {conversation_id[:8]}")
-        
+
         try:
+            # Clean up via legacy model interface
             await self.model.cleanup_conversation(conversation_id)
+            # Also clean up via conversation handler (for tool-based conversations)
+            await self._conversation_handler.cleanup_conversation(conversation_id)
             logger.info(f"✅ Cleanup completed for {conversation_id[:8]}")
-            
+
         except Exception as e:
             logger.error(f"❌ Cleanup failed for {conversation_id[:8]}: {e}")
             # Don't raise - cleanup failures shouldn't break the system
-    
+
+    # =========================================================================
+    # Model Info & Health Methods
+    # =========================================================================
+
     async def health_check(self) -> Dict[str, Any]:
         """
         Check the health of the model service.
-        
+
         Returns:
             Health status information
         """
         try:
             model_health = await self.model.health_check()
-            
+
             return {
                 "status": "healthy",
                 "service": "ModelService",
                 "model": model_health,
-                "capabilities": self.model.get_capabilities()
+                "capabilities": self.model.get_capabilities(),
             }
-            
+
         except Exception as e:
             logger.error(f"❌ Health check failed: {e}")
             return {
                 "status": "unhealthy",
                 "service": "ModelService",
-                "error": str(e)
+                "error": str(e),
             }
-    
+
     def get_model_info(self) -> Dict[str, Any]:
         """
         Get information about the current model.
-        
+
         Returns:
             Model information
         """
         return {
             "name": self.model.name,
             "class": self.model.__class__.__name__,
-            "capabilities": self.model.get_capabilities()
+            "capabilities": self.model.get_capabilities(),
         }
-    
+
     @staticmethod
     def get_available_models() -> List[str]:
         """
         Get list of available model names.
-        
+
         Returns:
             List of available model names
         """
         return ModelFactory.get_available_models()
-    
+
     @staticmethod
     def get_model_details(model_name: str) -> Optional[Dict[str, Any]]:
         """
         Get detailed information about a specific model.
-        
+
         Args:
             model_name: Name of the model
-            
+
         Returns:
             Model details or None if not found
         """
         return ModelFactory.get_model_info(model_name)
-    
-    # Tool-Based Architecture Methods
-    
+
+    # =========================================================================
+    # Tool-Based Architecture Methods (delegate to ConversationHandler)
+    # =========================================================================
+
     async def warmup_conversation_with_tools(
         self,
         node_context: Dict[str, Any],
@@ -281,272 +219,46 @@ class ModelService:
         timezone: Optional[str] = None,
         client_tools: Optional[List[Dict[str, Any]]] = None,
         available_commands: Optional[List[CommandDefinition]] = None,
-        skip_warmup_inference: bool = False
+        adapter_settings: Optional[Dict[str, Any]] = None,
+        skip_warmup_inference: bool = False,
     ) -> None:
         """
-        Warm up a conversation with tool support.
+        Initialize a tool-based conversation with warmup.
+
+        Sets up the conversation cache with system prompt, tools, and available commands.
+        Optionally performs a warmup inference call to reduce first-response latency.
 
         Args:
-            node_context: Node information (room, user, device, etc.)
+            node_context: Context about the node (room, user, etc.)
             conversation_id: Unique conversation identifier
-            timezone: User's timezone for date calculations
-            client_tools: Client-provided tool definitions
+            timezone: User's timezone
+            client_tools: Tools provided by the client
+            available_commands: Command definitions for examples/antipatterns
+            adapter_settings: Optional adapter configuration
+            skip_warmup_inference: If True, skip the warmup LLM call
         """
-        timing = latency_logger.get_request(conversation_id)
-        logger.info(f"🚀 Warming up tool-based conversation {conversation_id[:8]}")
+        await self._conversation_handler.warmup_conversation_with_tools(
+            conversation_id=conversation_id,
+            node_context=node_context,
+            timezone=timezone,
+            client_tools=client_tools,
+            available_commands=available_commands,
+            adapter_settings=adapter_settings,
+            skip_warmup_inference=skip_warmup_inference,
+        )
 
-        # Get server tools
-        with timing.measure("get_server_tools") if timing else nullcontext():
-            server_tools = tool_registry.get_tool_definitions()
-        
-        # Merge with client tools
-        all_tools = server_tools + (client_tools or [])
-        
-        def _get_tool_name(tool: Dict[str, Any]) -> Optional[str]:
-            if isinstance(tool.get("function"), dict):
-                return tool.get("function", {}).get("name")
-            return tool.get("name")
-        
-        available_command_names = {name for name in (_get_tool_name(t) for t in all_tools) if name}
-        if available_commands:
-            available_command_names.update(cmd.command_name for cmd in available_commands)
-        
-        def _filter_antipatterns(items: Optional[List[Dict[str, Any]]], source: str) -> List[Dict[str, Any]]:
-            if not items:
-                return []
-            filtered = []
-            dropped = 0
-            for ap in items:
-                if not isinstance(ap, dict):
-                    dropped += 1
-                    continue
-                cmd_name = ap.get("command_name")
-                desc = ap.get("description")
-                if cmd_name in available_command_names and isinstance(desc, str) and desc.strip():
-                    filtered.append({"command_name": cmd_name, "description": desc.strip()})
-                else:
-                    dropped += 1
-            logger.debug(
-                "🔎 Antipatterns filtered (%s): kept=%d dropped=%d",
-                source,
-                len(filtered),
-                dropped
-            )
-            return filtered
-        
-        logger.info(f"🔧 Total tools: {len(all_tools)} ({len(server_tools)} server + {len(client_tools or [])} client)")
-
-        # Extract examples from client_tools
-        # Each client_tool has an "examples" array at the top level with objects containing:
-        # voice_command, expected_parameters, and is_primary
-        # Build a structure similar to available_commands format for get_command_examples tool
-        command_examples_map = {}
-        if client_tools:
-            logger.info(f"🔍 Processing {len(client_tools)} client tool(s) to extract examples")
-            for i, tool in enumerate(client_tools):
-                # Extract tool name from OpenAI format
-                tool_name = tool.get("function", {}).get("name") if isinstance(tool.get("function"), dict) else None
-                if not tool_name:
-                    # Try direct name if not in function format
-                    tool_name = tool.get("name")
-                
-                logger.debug(f"   Tool {i+1}: name={tool_name}, keys={list(tool.keys())}")
-
-                tool["antipatterns"] = _filter_antipatterns(tool.get("antipatterns"), f"client_tool:{tool_name or i}")
-                if tool.get("antipatterns"):
-                    logger.debug("✅ Antipatterns attached to client tool %s: %d", tool_name, len(tool["antipatterns"]))
-                
-                if tool_name:
-                    # Check if this tool has an "examples" array at the top level
-                    examples_array = tool.get("examples", [])
-                    
-                    if examples_array and isinstance(examples_array, list):
-                        # Initialize command entry if not exists
-                        if tool_name not in command_examples_map:
-                            command_examples_map[tool_name] = {
-                                "command_name": tool_name,
-                                "examples": [],
-                                "keywords": tool.get("keywords"),
-                                "antipatterns": tool.get("antipatterns"),
-                                "allow_direct_answer": tool.get("allow_direct_answer")
-                            }
-                        
-                        # Add all examples from the array
-                        for example in examples_array:
-                            if isinstance(example, dict):
-                                voice_command = example.get("voice_command")
-                                expected_parameters = example.get("expected_parameters", {})
-                                is_primary = example.get("is_primary", False)
-                                
-                                if voice_command:
-                                    command_examples_map[tool_name]["examples"].append({
-                                        "voice_command": voice_command,
-                                        "expected_parameters": expected_parameters,
-                                        "is_primary": is_primary
-                                    })
-                                    logger.debug(f"   └─ ✅ Added example for {tool_name}: '{voice_command[:50]}...'")
-                                else:
-                                    logger.debug("   └─ ⚠️  Example missing voice_command")
-                        
-                        logger.debug(f"   └─ Processed {len(examples_array)} example(s) for {tool_name}")
-                    else:
-                        logger.debug(f"   └─ ⚠️  No examples array found for {tool_name}")
-                else:
-                    logger.warning(f"   └─ ⚠️  Could not extract tool name from tool {i+1}")
-            
-            if command_examples_map:
-                total_examples = sum(len(cmd["examples"]) for cmd in command_examples_map.values())
-                logger.info(f"📚 Extracted {total_examples} example(s) from {len(command_examples_map)} client tool(s)")
-            else:
-                logger.warning(f"⚠️  No examples found in client_tools - get_command_examples tool will not work")
-                logger.warning(f"   Expected structure: tool.examples = [{{voice_command, expected_parameters, is_primary}}]")
-        
-        # Convert to list format for cache
-        available_commands_to_cache = list(command_examples_map.values())
-        
-        # Also include available_commands if provided (for examples/metadata)
-        if available_commands:
-            logger.info(f"📚 Also received {len(available_commands)} available commands")
-            for cmd in available_commands:
-                cmd_dict = cmd.model_dump()
-                cmd_dict["antipatterns"] = _filter_antipatterns(cmd_dict.get("antipatterns"), f"available_command:{cmd_dict.get('command_name')}")
-                if cmd_dict.get("antipatterns"):
-                    logger.debug("✅ Antipatterns attached to command %s: %d", cmd_dict.get("command_name"), len(cmd_dict["antipatterns"]))
-                if cmd_dict.get("keywords"):
-                    logger.debug("🔑 Keywords attached to command %s: %s", cmd_dict.get("command_name"), cmd_dict.get("keywords"))
-                cmd_name = cmd_dict.get("command_name")
-                if cmd_name in command_examples_map:
-                    # Merge examples
-                    command_examples_map[cmd_name]["examples"].extend(cmd_dict.get("examples", []))
-                else:
-                    available_commands_to_cache.append(cmd_dict)
-        
-        # Build system message using the model's prompt builder when available
-        available_commands_dicts = []
-        if available_commands:
-            available_commands_dicts.extend([cmd.model_dump() for cmd in available_commands])
-        if client_tools:
-            for tool in client_tools:
-                tool_name = tool.get("function", {}).get("name") if isinstance(tool.get("function"), dict) else tool.get("name")
-                if tool_name:
-                    tool_flags = {
-                        "command_name": tool_name,
-                        "allow_direct_answer": tool.get("allow_direct_answer")
-                    }
-                    available_commands_dicts.append(tool_flags)
-
-        with timing.measure("build_system_prompt") if timing else nullcontext():
-            if hasattr(self.model, "_build_system_prompt"):
-                system_message = self.model._build_system_prompt(
-                    node_context,
-                    timezone,
-                    all_tools,
-                    available_commands_dicts
-                )  # type: ignore[attr-defined]
-            else:
-                # Fallback to default builder
-                system_message = self._build_tool_system_message(node_context, timezone, all_tools, available_commands_dicts)
-
-        messages = [
-            {"role": "system", "content": system_message}
-        ]
-
-        # Store in cache (including command examples extracted from client_tools)
-        with timing.measure("cache_set") if timing else nullcontext():
-            conversation_cache.set(
-                conversation_id=conversation_id,
-                messages=messages,
-                available_commands=available_commands_to_cache,
-                timezone=timezone,
-                tools=all_tools,
-                node_context=node_context
-            )
-        if available_commands_to_cache:
-            total_examples = sum(len(cmd.get("examples", [])) for cmd in available_commands_to_cache)
-            logger.info(f"📚 Cached {len(available_commands_to_cache)} command(s) with {total_examples} total examples for get_command_examples tool")
-        else:
-            logger.warning(f"⚠️  Cached empty available_commands list - get_command_examples tool will return no_commands_available")
-        
-        # Warm up LLM proxy (tools are in system message, not passed separately)
-        try:
-            from pathlib import Path
-            repo_root = Path(__file__).resolve().parents[2]
-            prompt_path = repo_root / "temp" / "warmup_prompt.txt"
-            prompt_path.parent.mkdir(parents=True, exist_ok=True)
-            prompt_path.write_text(system_message, encoding="utf-8")
-            logger.info("📝 Wrote warmup prompt to %s", prompt_path)
-        except Exception as e:
-            logger.warning("⚠️ Failed to write warmup prompt to file: %s", e)
-
-        # Check if we should skip warmup inference
-        # Skip if: explicitly requested OR engine doesn't benefit from prefix caching
-        should_skip_warmup = skip_warmup_inference
-        if not should_skip_warmup:
-            # Check if engine benefits from warmup caching
-            if not await self.llm_client.allows_warmup_caching():
-                should_skip_warmup = True
-                logger.info(f"⚡ Auto-skipping LLM warmup for {conversation_id[:8]} (engine has no prefix caching benefit)")
-
-        if should_skip_warmup:
-            logger.info(f"⏭️  Skipping LLM warmup inference for {conversation_id[:8]}")
-            if timing:
-                timing.checkpoint("warmup_skipped")
-        else:
-            try:
-                # Build adapter_settings from node's adapter_hash if present
-                adapter_settings = None
-                adapter_hash = node_context.get("adapter_hash")
-                if adapter_hash:
-                    adapter_settings = {"hash": adapter_hash, "enabled": True}
-                    logger.info(f"🔌 Using adapter {adapter_hash[:8]}... for warmup")
-
-                logger.info(f"🔥 Calling LLM proxy warmup_conversation for {conversation_id[:8]}")
-                with timing.measure("llm_warmup_call") if timing else nullcontext():
-                    result = await self.llm_client.warmup_conversation(
-                        conversation_id=conversation_id,
-                        messages=messages,
-                        adapter_settings=adapter_settings
-                    )
-                logger.info(f"✅ Tool-based warmup completed for {conversation_id[:8]}")
-                logger.info(f"   Warmup result type: {type(result)}")
-                if isinstance(result, dict):
-                    logger.info(f"   Warmup result keys: {list(result.keys())}")
-                    import json
-                    result_str = json.dumps(result, indent=2)
-                    if len(result_str) > 2000:
-                        logger.info(f"   Warmup result (first 2000 chars): {result_str[:2000]}...")
-                    else:
-                        logger.info(f"   Warmup result: {result_str}")
-                else:
-                    logger.info(f"   Warmup result (not a dict): {result}")
-            except Exception as e:
-                logger.error(f"❌ Warmup failed for {conversation_id[:8]}: {e}")
-                logger.error(f"   Exception type: {type(e).__name__}")
-                import traceback
-                logger.error(f"   Traceback: {traceback.format_exc()}")
-                raise
-
-    def _filter_tools_for_utterance(
-        self,
-        voice_command: str,
-        tools: List[Dict[str, Any]],
-        available_commands: Optional[List[Dict[str, Any]]]
-    ) -> List[Dict[str, Any]]:
-        # Keyword-based filtering disabled: always keep the full tool list.
-        return tools
-    
     async def process_voice_command_with_tools(
         self,
         voice_command: str,
-        conversation_id: str
+        conversation_id: str,
     ) -> Dict[str, Any]:
         """
         Process a voice command using tool-based architecture.
-        
+
         Args:
             voice_command: The user's voice command text
             conversation_id: Conversation ID
-            
+
         Returns:
             Response dict with:
             {
@@ -556,692 +268,42 @@ class ModelService:
                 "validation_request": Optional[Dict]
             }
         """
-        import time
-        _t0 = time.time()
-        timing = latency_logger.get_request(conversation_id)
-        logger.info(f"🎯 Processing tool-based command: '{voice_command}'")
+        return await self._conversation_handler.process_voice_command_with_tools(
+            voice_command=voice_command,
+            conversation_id=conversation_id,
+        )
 
-        # Get conversation state
-        with timing.measure("cache_lookups") if timing else nullcontext():
-            messages = conversation_cache.get_messages(conversation_id)
-            tools = conversation_cache.get_tools(conversation_id)
-            available_commands = conversation_cache.get_available_commands(conversation_id) or []
-            node_context = conversation_cache.get_node_context(conversation_id) or {}
-            timezone = conversation_cache.get_timezone(conversation_id)
-
-        logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Cache lookups done")
-
-        if not messages:
-            raise ValueError(f"Conversation {conversation_id} not found or expired")
-        if tools:
-            filtered_tools = self._filter_tools_for_utterance(voice_command, tools, available_commands)
-            if filtered_tools is not tools:
-                tools = filtered_tools
-                if node_context:
-                    def _tool_name(tool: Dict[str, Any]) -> Optional[str]:
-                        if isinstance(tool.get("function"), dict):
-                            return tool.get("function", {}).get("name")
-                        return tool.get("name")
-
-                    filtered_command_names = {
-                        _tool_name(tool) for tool in tools
-                        if _tool_name(tool) and not tool_registry.has_tool(_tool_name(tool))
-                    }
-                    filtered_available = [
-                        cmd for cmd in available_commands
-                        if cmd.get("command_name") in filtered_command_names
-                    ]
-                    available_command_flags = [
-                        {
-                            "command_name": cmd.get("command_name"),
-                            "allow_direct_answer": cmd.get("allow_direct_answer")
-                        }
-                        for cmd in filtered_available
-                    ]
-                    if hasattr(self.model, "_build_system_prompt") and messages and messages[0].get("role") == "system":
-                        messages[0] = {
-                            "role": "system",
-                            "content": self.model._build_system_prompt(node_context, timezone, tools, available_command_flags)  # type: ignore[attr-defined]
-                        }
-                        logger.info("🧹 Rebuilt system prompt with filtered tools")
-
-        logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool filtering done")
-
-        # Optional tool routing classifier (phase 1)
-        router_decision = None
-        _router_t0 = time.time()
-        if self.model.use_tool_classifier:
-            routed = self._route_tool(voice_command, tools or [])
-            if routed:
-                tool_name, score = routed
-                try:
-                    min_conf = float(os.getenv("JARVIS_TOOL_CLASSIFIER_MIN_CONFIDENCE", "0.6"))
-                except ValueError:
-                    min_conf = 0.6
-                use_hint = score >= min_conf
-                router_decision = {"tool_name": tool_name, "score": score, "used": use_hint}
-                conversation_cache.set_router_decision(conversation_id, router_decision)
-                logger.info("🧭 Router predicted tool=%s score=%.3f use_hint=%s", tool_name, score, use_hint)
-            else:
-                conversation_cache.set_router_decision(conversation_id, None)
-        else:
-            logger.info("🔇 Tool classifier disabled for %s", self.model.name)
-            conversation_cache.set_router_decision(conversation_id, None)
-
-        logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool routing done (router took {(time.time()-_router_t0)*1000:.0f}ms)")
-
-        # High-confidence tool pruning (reduce prompt size)
-        if router_decision:
-            small_mode = os.getenv("JARVIS_SMALL_MODEL_MODE", "").strip().lower() in {"1", "true", "yes"}
-            try:
-                default_conf = 0.8 if small_mode else 0.85
-                prune_conf = float(os.getenv("JARVIS_TOOL_ROUTER_FILTER_MIN_CONFIDENCE", str(default_conf)))
-            except ValueError:
-                prune_conf = 0.8 if small_mode else 0.85
-            if router_decision.get("score", 0.0) >= prune_conf:
-                predicted_tool = router_decision.get("tool_name")
-                def _tool_name(tool: Dict[str, Any]) -> Optional[str]:
-                    if isinstance(tool.get("function"), dict):
-                        return tool.get("function", {}).get("name")
-                    return tool.get("name")
-                pruned_tools = []
-                for tool in tools or []:
-                    name = _tool_name(tool)
-                    if not name:
-                        continue
-                    if name == predicted_tool or tool_registry.has_tool(name):
-                        pruned_tools.append(tool)
-                if pruned_tools and len(pruned_tools) < len(tools or []):
-                    tools = pruned_tools
-                    if node_context and messages and messages[0].get("role") == "system":
-                        filtered_available = [
-                            cmd for cmd in (available_commands or [])
-                            if cmd.get("command_name") == predicted_tool
-                        ]
-                        available_command_flags = [
-                            {
-                                "command_name": cmd.get("command_name"),
-                                "allow_direct_answer": cmd.get("allow_direct_answer")
-                            }
-                            for cmd in filtered_available
-                        ]
-                        if hasattr(self.model, "_build_system_prompt"):
-                            messages[0] = {
-                                "role": "system",
-                                "content": self.model._build_system_prompt(node_context, timezone, tools, available_command_flags)  # type: ignore[attr-defined]
-                            }
-                            logger.info("🧹 Rebuilt system prompt with high-confidence tool pruning")
-        
-        if router_decision and router_decision.get("used"):
-            hint_tool = router_decision.get("tool_name")
-            messages.append({
-                "role": "system",
-                "content": f"Router hint: likely tool is '{hint_tool}'. Use it if it matches intent; otherwise choose the best tool."
-            })
-        
-        # Add user message
-        messages.append({"role": "user", "content": voice_command})
-
-        logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Starting tool execution loop")
-
-        # Process with tool execution loop
-        with timing.measure("tool_execution_loop") if timing else nullcontext():
-            result = await self._tool_execution_loop(
-                conversation_id=conversation_id,
-                messages=messages,
-                tools=tools,
-                user_utterance=voice_command
-            )
-
-        logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool execution loop completed")
-
-        # Update cache with final messages
-        conversation_cache.update_messages(conversation_id, messages)
-        if result.get("stop_reason") == "error":
-            logger.error("❌ Tool loop returned stop_reason=error: %s", result)
-        return result
-    
     async def continue_conversation_with_tool_results(
         self,
         conversation_id: str,
-        tool_results: List[Dict[str, Any]]
+        tool_results: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """
         Continue a conversation by providing tool execution results.
-        
+
         Args:
             conversation_id: Conversation ID
             tool_results: List of tool results in format:
                 [{"tool_call_id": str, "output": Any}, ...]
-                
+
         Returns:
             Response dict (same format as process_voice_command_with_tools)
         """
-        logger.info(f"🔄 Continuing conversation {conversation_id[:8]} with {len(tool_results)} tool results")
-        
-        # Get conversation state
-        messages = conversation_cache.get_messages(conversation_id)
-        tools = conversation_cache.get_tools(conversation_id)
-        
-        if not messages:
-            raise ValueError(f"Conversation {conversation_id} not found or expired")
-        
-        # Add tool result messages
-        for result in tool_results:
-            # Convert output to string if needed
-            output = result["output"]
-            if not isinstance(output, str):
-                output = json.dumps(output)
-            
-            messages.append({
-                "role": "tool",
-                "tool_call_id": result["tool_call_id"],
-                "content": output
-            })
-        
-        # Extract last user utterance from messages for potential LLM fallback
-        last_user_utterance = None
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                last_user_utterance = msg.get("content")
-                break
-
-        # Continue with tool execution loop
-        result = await self._tool_execution_loop(
+        return await self._conversation_handler.continue_conversation_with_tool_results(
             conversation_id=conversation_id,
-            messages=messages,
-            tools=tools,
-            user_utterance=last_user_utterance
+            tool_results=tool_results,
         )
 
-        # Update cache
-        conversation_cache.update_messages(conversation_id, messages)
-        
-        return result
-    
-    async def _tool_execution_loop(
-        self,
-        conversation_id: str,
-        messages: List[Dict[str, Any]],
-        tools: List[Dict[str, Any]],
-        max_iterations: int = 10,
-        user_utterance: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Execute the tool loop: call LLM, execute server tools, repeat until done.
+    # =========================================================================
+    # Utility Methods
+    # =========================================================================
 
-        Args:
-            conversation_id: Conversation ID
-            messages: Current message history (will be modified in place)
-            tools: Available tools
-            max_iterations: Maximum tool execution iterations
-            user_utterance: Original user voice command (for LLM fallback in date resolution)
-
-        Returns:
-            Response dict with stop_reason and relevant data
-        """
-        def _get_must_call_tools() -> List[str]:
-            must_call = set()
-            available_commands = conversation_cache.get_available_commands(conversation_id) or []
-            for cmd in available_commands:
-                cmd_name = cmd.get("command_name")
-                if cmd_name and cmd.get("allow_direct_answer") is False:
-                    must_call.add(cmd_name)
-            for tool in tools or []:
-                tool_name = tool.get("function", {}).get("name") if isinstance(tool.get("function"), dict) else tool.get("name")
-                if tool_name and tool.get("allow_direct_answer") is False:
-                    must_call.add(tool_name)
-            return sorted(must_call)
-
-        def _must_call_retry_already_added() -> bool:
-            retry_tag = "[MUST_CALL_RETRY]"
-            return any(
-                msg.get("role") == "system" and retry_tag in msg.get("content", "")
-                for msg in messages
-            )
-
-        usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-
-        # Build adapter_settings from node's adapter_hash if present
-        node_context = conversation_cache.get_node_context(conversation_id) or {}
-        adapter_settings = None
-        adapter_hash = node_context.get("adapter_hash")
-        if adapter_hash:
-            adapter_settings = {"hash": adapter_hash, "enabled": True}
-            logger.info(f"🔌 Using adapter {adapter_hash[:8]}... for tool loop")
-
-        # Use extracted logging functions with closures for conversation_id and usage_totals
-        def _log_usage(turns_used: int, status: str) -> None:
-            write_usage_log(conversation_id, turns_used, status, usage_totals)
-
-        def _log_prompt_response(
-            prompt_messages: List[Dict[str, Any]],
-            response_obj: Optional[Dict[str, Any]],
-            raw_content: Optional[str],
-            error: Optional[str],
-            iteration: int
-        ) -> None:
-            write_prompt_response_log(
-                conversation_id, prompt_messages, response_obj, raw_content, error, iteration
-            )
-
-        def _invalid_param_retry_count() -> int:
-            retry_tag = "[INVALID_PARAM_RETRY]"
-            return sum(
-                1
-                for msg in messages
-                if msg.get("role") == "system" and retry_tag in msg.get("content", "")
-            )
-
-        small_mode = os.getenv("JARVIS_SMALL_MODEL_MODE", "").strip().lower() in {"1", "true", "yes"}
-
-        def _env_int(name: str, default_value: int) -> int:
-            raw = os.getenv(name)
-            if raw is None or raw.strip() == "":
-                return default_value
-            try:
-                return int(raw)
-            except ValueError:
-                return default_value
-
-        timezone_str = conversation_cache.get_timezone(conversation_id)
-
-        # Date resolution functions are now imported from app.core.date_resolution
-
-        async def _inject_date_keys(
-            tool_calls: List[Dict[str, Any]],
-            date_keys: List[str],
-            tools_list: List[Dict[str, Any]]
-        ) -> List[Dict[str, Any]]:
-            """Inject resolved date keys into tool call arguments using extracted date_resolution module."""
-            if not tool_calls:
-                return tool_calls
-            from app.core.general_context import generate_date_context_object
-            from app.core.tools.resolve_relative_date_tool import ResolveRelativeDateTool
-
-            date_context = generate_date_context_object(timezone_str)
-            flat_context = flatten_date_context(date_context)
-            available_keys = ResolveRelativeDateTool.get_available_keys(date_context)
-
-            # Resolve date_keys from LLM response using extracted module
-            resolved_dates: List[str] = []
-            if date_keys:
-                resolved_dates, unresolved_keys = resolve_date_keys(date_keys, date_context)
-
-                # LLM fallback for unresolved keys (one attempt per key)
-                if unresolved_keys and user_utterance:
-                    for unresolved_key in unresolved_keys:
-                        logger.info(f"📅 Unresolved date key '{unresolved_key}', attempting LLM fallback")
-                        fallback_key = await ResolveRelativeDateTool.resolve_with_llm_fallback(
-                            unrecognized_key=unresolved_key,
-                            available_keys=available_keys,
-                            user_utterance=user_utterance,
-                            llm_client=self.llm_client,
-                            timezone=timezone_str
-                        )
-                        if fallback_key:
-                            value = flat_context.get(fallback_key)
-                            if isinstance(value, list):
-                                resolved_dates.extend([v for v in value if isinstance(v, str)])
-                            elif isinstance(value, str):
-                                resolved_dates.append(value)
-                            logger.info(f"📅 LLM fallback resolved '{unresolved_key}' → '{fallback_key}'")
-
-            async def _resolve_relative_datetime(relative_value: str) -> Optional[str]:
-                """Attempt to resolve a relative datetime string (e.g., 'tomorrow') to an ISO datetime."""
-                # First try direct lookup in flat context using imported normalize_date_key
-                normalized = normalize_date_key(relative_value)
-                value = flat_context.get(normalized)
-                if isinstance(value, str):
-                    logger.info(f"📅 Resolved relative datetime '{relative_value}' → '{value}'")
-                    return value
-                if isinstance(value, list) and value:
-                    resolved = value[0] if isinstance(value[0], str) else None
-                    logger.info(f"📅 Resolved relative datetime '{relative_value}' → '{resolved}' (first of list)")
-                    return resolved
-
-                # LLM fallback
-                if user_utterance:
-                    logger.info(f"📅 Relative datetime '{relative_value}' not in context, attempting LLM fallback")
-                    fallback_key = await ResolveRelativeDateTool.resolve_with_llm_fallback(
-                        unrecognized_key=relative_value,
-                        available_keys=available_keys,
-                        user_utterance=user_utterance,
-                        llm_client=self.llm_client,
-                        timezone=timezone_str
-                    )
-                    if fallback_key:
-                        fb_value = flat_context.get(fallback_key)
-                        if isinstance(fb_value, str):
-                            logger.info(f"📅 LLM fallback resolved '{relative_value}' → '{fb_value}'")
-                            return fb_value
-                        if isinstance(fb_value, list) and fb_value:
-                            resolved = fb_value[0] if isinstance(fb_value[0], str) else None
-                            logger.info(f"📅 LLM fallback resolved '{relative_value}' → '{resolved}' (first of list)")
-                            return resolved
-
-                logger.warning(f"📅 Could not resolve relative datetime '{relative_value}'")
-                return None
-
-            tool_map: Dict[str, Dict[str, Any]] = {}
-            for tool in tools_list or []:
-                if isinstance(tool.get("function"), dict):
-                    name = tool.get("function", {}).get("name")
-                    if name:
-                        tool_map[name] = tool.get("function", {})
-                elif isinstance(tool.get("name"), str):
-                    tool_map[tool["name"]] = tool
-
-            for call in tool_calls:
-                tool_name = call.get("function", {}).get("name")
-                if not tool_name:
-                    continue
-                tool_def = tool_map.get(tool_name, {})
-                param_schemas = tool_def.get("parameters", {}).get("properties", {})
-                if not isinstance(param_schemas, dict):
-                    continue
-
-                args_raw = call.get("function", {}).get("arguments", "{}")
-                try:
-                    args_obj = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
-                except Exception:
-                    args_obj = {}
-                if not isinstance(args_obj, dict):
-                    continue
-
-                mutated = False
-                for param_name, param_schema in param_schemas.items():
-                    # Use imported is_datetime_param from date_resolution module
-                    if not is_datetime_param(param_schema):
-                        continue
-
-                    existing = args_obj.get(param_name)
-                    # Use imported is_datetime_array from date_resolution module
-                    is_array = is_datetime_array(param_schema)
-
-                    # Case 1: Empty - inject resolved_dates
-                    if existing in (None, [], ""):
-                        if resolved_dates:
-                            if is_array:
-                                args_obj[param_name] = resolved_dates
-                            else:
-                                args_obj[param_name] = resolved_dates[0]
-                            mutated = True
-                        continue
-
-                    # Case 2: Has value - validate and fix if needed
-                    # Use imported is_iso_datetime from param_validation module
-                    if is_array and isinstance(existing, list):
-                        # Validate each item in the array
-                        cleaned: List[str] = []
-                        for item in existing:
-                            if isinstance(item, str) and is_iso_datetime(item):
-                                cleaned.append(item)
-                            elif isinstance(item, str):
-                                # Invalid datetime string - try to resolve it
-                                resolved = await _resolve_relative_datetime(item)
-                                if resolved:
-                                    cleaned.append(resolved)
-                        if cleaned != existing:
-                            args_obj[param_name] = cleaned if cleaned else resolved_dates
-                            mutated = True
-                    elif not is_array and isinstance(existing, str):
-                        if not is_iso_datetime(existing):
-                            # Invalid datetime string - try to resolve it
-                            resolved = await _resolve_relative_datetime(existing)
-                            if resolved:
-                                args_obj[param_name] = resolved
-                                mutated = True
-                            elif resolved_dates:
-                                args_obj[param_name] = resolved_dates[0]
-                                mutated = True
-
-                if mutated:
-                    call["function"]["arguments"] = json.dumps(args_obj)
-
-            return tool_calls
-
-        # Parameter validation functions are now imported from app.core.param_validation
-        def _build_param_type_map() -> Dict[str, Dict[str, str]]:
-            """Build a map of tool_name -> {param_name: param_type} from available commands."""
-            param_map: Dict[str, Dict[str, str]] = {}
-            available_commands = conversation_cache.get_available_commands(conversation_id) or []
-            for cmd in available_commands:
-                cmd_name = cmd.get("command_name")
-                if not cmd_name:
-                    continue
-                params = cmd.get("parameters") or []
-                for param in params:
-                    name = (param or {}).get("name")
-                    ptype = (param or {}).get("type")
-                    if name and ptype:
-                        param_map.setdefault(cmd_name, {})[name] = ptype
-            return param_map
-
-        def _validate_client_tool_params(client_calls: List[Dict[str, Any]]) -> List[str]:
-            """Validate client tool call parameters using extracted param_validation module."""
-            param_types = _build_param_type_map()
-            return find_invalid_params(client_calls, param_types)
-
-        import time as _time
-        timing = latency_logger.get_request(conversation_id)
-
-        for iteration in range(max_iterations):
-            logger.info(f"🔁 Tool loop iteration {iteration + 1}/{max_iterations}")
-            prompt_snapshot = [dict(m) for m in (messages or [])]
-
-            # Call LLM (tools are in system message, not passed separately)
-            try:
-                response_format = self._get_response_format()
-                _llm_start = _time.time()
-                with timing.measure(f"llm_call_iter_{iteration+1}") if timing else nullcontext():
-                    response = await self.llm_client.chat_completion(
-                        messages=messages,
-                        conversation_id=conversation_id,
-                        response_format=response_format,
-                        include_date_context=True,
-                        adapter_settings=adapter_settings
-                    )
-                logger.debug(f"⏱️  LLM call took {(_time.time()-_llm_start)*1000:.0f}ms")
-            except Exception as e:
-                logger.error(f"❌ LLM call failed: {e}")
-                _log_prompt_response(prompt_snapshot, None, None, str(e), iteration + 1)
-                _log_usage(iteration + 1, "error")
-                return {
-                    "stop_reason": "error",
-                    "error": str(e)
-                }
-            
-            # Parse response - LLM proxy returns OpenAI-compatible format
-            logger.info(f"🔍 Full LLM proxy response structure: {list(response.keys())}")
-            
-            # Extract content from OpenAI format: choices[0].message.content
-            try:
-                raw_content = response["choices"][0]["message"]["content"]
-                finish_reason_raw = response["choices"][0].get("finish_reason", "stop")
-                logger.info(f"🔍 Extracted content length: {len(raw_content)}, finish_reason: {finish_reason_raw}")
-            except (KeyError, IndexError, TypeError) as e:
-                logger.error(f"❌ Failed to extract content from response: {e}")
-                logger.error(f"Response structure: {response}")
-                raw_content = ""
-
-            date_keys: List[str] = []
-            if isinstance(response, dict):
-                raw_keys = response.get("date_keys")
-                if isinstance(raw_keys, list):
-                    date_keys = [_normalize_date_key(key) for key in raw_keys if isinstance(key, str)]
-
-            # Accumulate token usage if present
-            if isinstance(response, dict):
-                usage = response.get("usage")
-                if isinstance(usage, dict):
-                    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-                        if isinstance(usage.get(key), int):
-                            usage_totals[key] += usage[key]
-            
-            if not raw_content:
-                logger.warning(f"⚠️ Empty raw_content!")
-            response_obj = response if isinstance(response, dict) else None
-            _log_prompt_response(prompt_snapshot, response_obj, raw_content, None, iteration + 1)
-            
-            # Use tool call parser to extract tool calls from JSON
-            finish_reason, tool_calls, assistant_message = tool_call_parser.parse_response(raw_content)
-            
-            logger.info(f"📥 LLM response parsed: finish_reason={finish_reason}, tool_calls={len(tool_calls)}")
-            
-            # Add assistant message to history (store the raw JSON output)
-            assistant_msg = {"role": "assistant", "content": raw_content}
-            messages.append(assistant_msg)
-            
-            # Handle different finish reasons
-            if finish_reason == "stop":
-                must_call_tools = _get_must_call_tools()
-                if must_call_tools and not _must_call_retry_already_added():
-                    retry_message = (
-                        "[MUST_CALL_RETRY] Direct answers are not allowed for this request. "
-                        "You must call exactly one tool next. "
-                        f"Tools that require a call: {', '.join(must_call_tools)}."
-                    )
-                    messages.append({"role": "system", "content": retry_message})
-                    logger.info("🔁 Must-call guard triggered; retrying tool selection")
-                    continue
-                # Conversation complete
-                _log_usage(iteration + 1, "complete")
-                return {
-                    "stop_reason": "complete",
-                    "assistant_message": assistant_message
-                }
-            
-            elif finish_reason == "tool_calls":
-                # Always validate/inject datetime params (fixes invalid values even without date_keys)
-                tool_calls = await _inject_date_keys(tool_calls, date_keys, tools)
-                if date_keys:
-                    logger.info("📅 Processed date keys: %s", date_keys)
-
-                # Execute tools
-                with timing.measure(f"tool_exec_iter_{iteration+1}") if timing else nullcontext():
-                    server_results, client_calls = tool_executor.execute_tool_calls(
-                        tool_calls, conversation_id=conversation_id, user_utterance=user_utterance
-                    )
-                
-                # Check if request_validation was called
-                validation_called = any(
-                    tool_call.get("function", {}).get("name") == "request_validation"
-                    for tool_call in tool_calls
-                )
-                
-                # Check if get_command_examples was called - if so, we need to continue the loop
-                # so the LLM can see the examples before making decisions
-                get_examples_called = any(
-                    tool_call.get("function", {}).get("name") == "get_command_examples"
-                    for tool_call in tool_calls
-                )
-                
-                # Always add server results to messages first (so LLM can see them)
-                if server_results:
-                    messages.extend(server_results)
-                    logger.info(f"✅ Executed {len(server_results)} server tools, added results to conversation")
-
-                # If get_command_examples was called, we MUST continue the loop so the LLM can see the examples
-                # before making any decisions (including validation requests)
-                if get_examples_called:
-                    logger.info(f"🔄 get_command_examples was called, continuing loop so LLM can see examples before making decisions")
-                    continue
-                
-                # If request_validation was called WITH other tools, continue the loop to let other tools execute first
-                # Only return validation if it's the ONLY tool call
-                other_tools_called = len(tool_calls) > 1 or client_calls or get_examples_called
-                if validation_called and other_tools_called:
-                    logger.info(f"🔄 request_validation called with other tools - continuing loop to execute other tools first")
-                    continue
-                
-                # Check for validation requests in server results (only if it's the only tool call)
-                if validation_called and not other_tools_called:
-                    for result in server_results:
-                        try:
-                            content = json.loads(result["content"])
-                            if content.get("_validation_request"):
-                                logger.info(f"🔍 Validation request detected (only tool call)")
-                                _log_usage(iteration + 1, "validation_required")
-                                return {
-                                    "stop_reason": "validation_required",
-                                    "validation_request": {
-                                        "question": content["question"],
-                                        "parameter_name": content["parameter_name"],
-                                        "options": content.get("options", [])
-                                    }
-                                }
-                        except (json.JSONDecodeError, KeyError):
-                            pass
-                
-                # If there are server tools, we need to continue the loop so the LLM can see the results
-                # and potentially update client tool calls with the new information
-                if server_results and client_calls:
-                    logger.info(f"🔄 Server tools executed, continuing loop so LLM can see results before client tools")
-                    logger.info(f"   Client tools will be called in next iteration after LLM processes server results")
-                    # Continue loop - LLM will see server results and can update client tool calls
-                    continue
-                
-                # If there are client tool calls and NO server tools, return them immediately
-                if client_calls:
-                    invalid_params = _validate_client_tool_params(client_calls)
-                    if invalid_params:
-                        max_retries = _env_int("JARVIS_INVALID_PARAM_RETRY_MAX", 1 if small_mode else 2)
-                        retry_count = _invalid_param_retry_count()
-                        if retry_count < max_retries:
-                            retry_message = (
-                                f"[INVALID_PARAM_RETRY {retry_count + 1}/{max_retries}] "
-                                "Some parameters have invalid types or formats. "
-                                "Fix the parameters to match expected types and return absolute "
-                                f"date/time values when required. Invalid: {', '.join(invalid_params)}"
-                            )
-                            messages.append({"role": "system", "content": retry_message})
-                            logger.info("🔁 Invalid parameter guard triggered; retrying tool call formatting")
-                            continue
-                    logger.info(f"📤 Returning {len(client_calls)} client tool calls (no server tools to wait for)")
-                    _log_usage(iteration + 1, "tool_calls")
-                    return {
-                        "stop_reason": "tool_calls",
-                        "tool_calls": client_calls,
-                        "assistant_message": assistant_message
-                    }
-                
-                # Only server tools - already added to messages, continue loop
-                if server_results:
-                    logger.info(f"✅ Only server tools executed, continuing loop")
-                
-            else:
-                # Unknown finish reason
-                logger.warning(f"⚠️ Unknown finish_reason: {finish_reason}")
-                _log_usage(iteration + 1, "complete")
-                return {
-                    "stop_reason": "complete",
-                    "assistant_message": assistant_message
-                }
-        
-        # Max iterations reached
-        logger.warning(f"⚠️ Max tool loop iterations ({max_iterations}) reached")
-        _log_usage(max_iterations, "max_iterations_exceeded")
-        return {
-            "stop_reason": "complete",
-            "assistant_message": "Maximum tool execution iterations reached.",
-            "error": "max_iterations_exceeded"
-        }
-
-    def _get_response_format(self) -> Dict[str, Any]:
-        """Get the JSON response format schema."""
-        return get_response_format()
-    
     def _build_tool_system_message(
         self,
         node_context: Dict[str, Any],
         timezone: Optional[str],
         tools: List[Dict[str, Any]],
-        available_commands: Optional[List[Dict[str, Any]]] = None
+        available_commands: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        """
-        Build system message for tool-based conversations.
-
-        Delegates to the extracted system_prompt_builder module.
-        """
+        """Build system message for tool-based conversations."""
         return build_tool_system_message(node_context, timezone, tools, available_commands)

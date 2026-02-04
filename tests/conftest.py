@@ -1,5 +1,6 @@
 import pytest
 import os
+import uuid
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Node, SettingsRequest, SettingsSnapshot
@@ -23,6 +24,13 @@ def test_engine():
 
     # Create all tables
     Base.metadata.create_all(bind=engine)
+
+    # Clean up any stale test data from previous runs
+    with engine.connect() as conn:
+        conn.execute(text("DELETE FROM settings_snapshots WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
+        conn.execute(text("DELETE FROM settings_requests WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
+        conn.execute(text("DELETE FROM nodes WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
+        conn.commit()
 
     yield engine
 
@@ -56,10 +64,11 @@ def client():
 
 @pytest.fixture
 def test_node(test_db):
-    """Create a test node in the database"""
+    """Create a test node in the database with unique ID."""
+    unique_id = str(uuid.uuid4())[:8]
     node = Node(
-        node_id="test-node",
-        api_key="test-key",
+        node_id=f"test-node-{unique_id}",
+        api_key=f"test-key-{unique_id}",
         room="living room",
         user="test-user"
     )
@@ -72,10 +81,11 @@ def test_node(test_db):
 
 @pytest.fixture
 def test_node_empty_room(test_db):
-    """Create a test node with empty room"""
+    """Create a test node with empty room and unique ID."""
+    unique_id = str(uuid.uuid4())[:8]
     node = Node(
-        node_id="test-node-empty",
-        api_key="test-key-empty",
+        node_id=f"test-node-empty-{unique_id}",
+        api_key=f"test-key-empty-{unique_id}",
         room="",
         user="test-user"
     )
@@ -109,11 +119,12 @@ def client_with_test_db(test_db):
 
 @pytest.fixture
 def multiple_test_nodes(test_db):
-    """Create multiple test nodes for testing"""
+    """Create multiple test nodes for testing with unique IDs."""
+    unique_id = str(uuid.uuid4())[:8]
     nodes = [
-        Node(node_id="node-1", api_key="key-1", room="kitchen", user="user1"),
-        Node(node_id="node-2", api_key="key-2", room="bedroom", user="user2"),
-        Node(node_id="node-3", api_key="key-3", room="", user="user3")  # Empty room
+        Node(node_id=f"node-1-{unique_id}", api_key=f"key-1-{unique_id}", room="kitchen", user="user1"),
+        Node(node_id=f"node-2-{unique_id}", api_key=f"key-2-{unique_id}", room="bedroom", user="user2"),
+        Node(node_id=f"node-3-{unique_id}", api_key=f"key-3-{unique_id}", room="", user="user3"),
     ]
 
     for node in nodes:
