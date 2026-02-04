@@ -81,6 +81,7 @@ async def whisper_transcribe(
         db=db,
         household_id=node_context.household_id,
         node_id=node_context.node.node_id,
+        household_member_ids=node_context.household_member_ids,
     )
 
     # Read file content

@@ -26,6 +26,7 @@ class WhisperClient:
         household_id: str,
         node_id: str | None = None,
         user_id: int | None = None,
+        household_member_ids: list[int] | None = None,
     ) -> None:
         """Initialize the Whisper client.
 
@@ -34,10 +35,12 @@ class WhisperClient:
             household_id: The household making the request (used for voice recognition)
             node_id: Optional specific node making the request
             user_id: Optional user associated with the request
+            household_member_ids: List of member IDs in household (for voice recognition)
         """
         self.household_id = household_id
         self.node_id = node_id
         self.user_id = user_id
+        self.household_member_ids = household_member_ids or []
 
         # Get URL from settings with cascade lookup (Node > Household > Default)
         settings = SettingsService(db)
@@ -52,7 +55,12 @@ class WhisperClient:
         """
         headers = {
             **get_app_headers(),
-            **build_context_headers(self.household_id, self.node_id, self.user_id),
+            **build_context_headers(
+                self.household_id,
+                self.node_id,
+                self.user_id,
+                self.household_member_ids,
+            ),
         }
         return headers
 
