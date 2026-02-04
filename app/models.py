@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Integer, ForeignKey, func
+from sqlalchemy import Column, String, DateTime, Integer, ForeignKey, UniqueConstraint, func
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime, timedelta
 
@@ -85,3 +85,30 @@ class SettingsSnapshot(Base):
     # Relationships
     node = relationship("Node", back_populates="settings_snapshots")
     request = relationship("SettingsRequest", back_populates="snapshot")
+
+
+class Setting(Base):
+    """
+    Scoped settings table with cascade lookup: Node > Household > Default.
+
+    Settings can be defined at three levels:
+    - System default: household_id=NULL, node_id=NULL
+    - Household-wide: household_id set, node_id=NULL
+    - Node-specific: both household_id and node_id set
+
+    The SettingsService handles cascade lookup to find the most specific
+    value for a given key.
+    """
+    __tablename__ = 'settings'
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String, nullable=False)
+    value = Column(String, nullable=False)
+    household_id = Column(String, nullable=True)  # NULL = system default
+    node_id = Column(String, nullable=True)       # NULL = household-wide
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('key', 'household_id', 'node_id', name='uq_setting_scope'),
+    )

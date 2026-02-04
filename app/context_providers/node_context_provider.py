@@ -7,8 +7,11 @@ import json
 class NodeContextProvider(IJarvisContextProvider):
     key: str = "NodeContext"
     node: Node
-    def __init__(self, node: Node):
+    household_id: str | None
+
+    def __init__(self, node: Node, household_id: str | None = None):
         self.node = node
+        self.household_id = household_id
 
 
     def get_context(self):

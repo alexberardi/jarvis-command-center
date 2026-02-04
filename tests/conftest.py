@@ -3,7 +3,7 @@ import os
 import uuid
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from app.models import Base, Node, SettingsRequest, SettingsSnapshot
+from app.models import Base, Node, Setting, SettingsRequest, SettingsSnapshot
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -27,6 +27,11 @@ def test_engine():
 
     # Clean up any stale test data from previous runs
     with engine.connect() as conn:
+        # Settings table may not exist yet on first run, so we use try/except
+        try:
+            conn.execute(text("DELETE FROM settings WHERE household_id LIKE 'h%' OR household_id IS NULL"))
+        except Exception:
+            pass  # Table doesn't exist yet
         conn.execute(text("DELETE FROM settings_snapshots WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
         conn.execute(text("DELETE FROM settings_requests WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
         conn.execute(text("DELETE FROM nodes WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
@@ -77,6 +82,25 @@ def test_node(test_db):
     test_db.refresh(node)
 
     yield node
+
+
+@pytest.fixture
+def test_node_with_household(test_db):
+    """Create a test node with household_id for media proxy tests."""
+    unique_id = str(uuid.uuid4())[:8]
+    household_id = f"household-{unique_id}"
+    node = Node(
+        node_id=f"test-node-{unique_id}",
+        api_key=f"test-key-{unique_id}",
+        room="living room",
+        user="test-user"
+    )
+    test_db.add(node)
+    test_db.commit()
+    test_db.refresh(node)
+
+    # Return both node and household_id since Node model doesn't have household_id yet
+    yield node, household_id
 
 
 @pytest.fixture
