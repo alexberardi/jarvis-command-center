@@ -116,7 +116,7 @@ def verify_api_key(x_api_key: str = Header(...), db: Session = Depends(get_db)):
         # Get node from local DB for additional context
         node = db.query(Node).filter(Node.node_id == cached.get("node_id")).first()
         if node:
-            return NodeContextProvider(node)
+            return NodeContextProvider(node, household_id=cached.get("household_id"))
 
     # Try centralized auth first (format: "node_id:node_key")
     if ":" in x_api_key:
@@ -128,7 +128,7 @@ def verify_api_key(x_api_key: str = Header(...), db: Session = Depends(get_db)):
             # Get node from local DB for additional context (room, voice_mode, etc.)
             node = db.query(Node).filter(Node.node_id == node_id).first()
             if node:
-                return NodeContextProvider(node)
+                return NodeContextProvider(node, household_id=result.get("household_id"))
             else:
                 # Node validated by jarvis-auth but not in local DB - create minimal context
                 logger.warning("Node %s validated but not in local DB", node_id)
