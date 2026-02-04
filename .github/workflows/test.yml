@@ -1,4 +1,4 @@
-name: Test Suite (SQLite Only)
+name: Test Suite
 
 on:
   push:
@@ -8,14 +8,29 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: jarvis_user
+          POSTGRES_PASSWORD: jarvis_password
+          POSTGRES_DB: jarvis_command_center
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
-    
+
     - name: Cache pip dependencies
       uses: actions/cache@v3
       with:
@@ -23,36 +38,21 @@ jobs:
         key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
-    
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install pytest pytest-cov
-    
-    - name: Create data directory
-      run: mkdir -p data
-    
-    - name: Run SQLite tests
+        pip install pytest pytest-cov pytest-asyncio
+
+    - name: Run tests
       env:
-        DB_TYPE: sqlite
-        DB_URL: sqlite:///./data/test.db
+        DATABASE_URL: postgresql://jarvis_user:jarvis_password@localhost:5433/jarvis_command_center
       run: |
         python -m pytest tests/ -v \
           --ignore=tests/test_llm_integration.py \
           --ignore=tests/test_postgres_integration.py \
           -k "not llm" \
-          --tb=short \
-          --cov=app \
-          --cov-report=xml \
-          --cov-report=term-missing
-
-    - name: Run database configuration tests
-      env:
-        DB_TYPE: sqlite
-        DB_URL: "sqlite:///:memory:"
-      run: |
-        python -m pytest tests/test_database_config.py -v \
           --tb=short \
           --cov=app \
           --cov-report=xml \
