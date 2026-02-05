@@ -34,7 +34,7 @@ class LLMProxyClient:
             if service_config.is_initialized():
                 return service_config.get_llm_proxy_url()
         except Exception:
-            pass
+            pass  # Service config not available, use env var fallback
         # Fallback to env var
         return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
     
@@ -197,8 +197,8 @@ class LLMProxyClient:
 
             try:
                 content = resp.json()
-            except Exception:
-                content = {"error": resp.text}
+            except (ValueError, TypeError):
+                content = {"error": resp.text}  # Response not valid JSON
 
             if resp.status_code >= 400:
                 logger.error(
