@@ -346,8 +346,9 @@ class TestSingleton:
         mock_setting = MagicMock()
         mock_session_local = MagicMock()
 
-        with patch("app.services.settings_service.get_session_local", return_value=mock_session_local):
-            with patch("app.services.settings_service.Setting", mock_setting):
+        # Patch at the module level where it's imported inside the function
+        with patch("app.db.get_session_local", return_value=mock_session_local):
+            with patch("app.models.Setting", mock_setting):
                 service1 = get_settings_service()
                 service2 = get_settings_service()
 
