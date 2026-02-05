@@ -29,8 +29,7 @@ class MalformedJsonExtractorService:
             if service_config.is_initialized():
                 return service_config.get_llm_proxy_url()
         except Exception:
-            pass
-        # Fallback to env var
+            pass  # Service config not available, use env var fallback
         return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
         
     async def extract_json_from_malformed_response(
@@ -123,4 +122,4 @@ class MalformedJsonExtractorService:
             await get(f"{self.api_url.rstrip('/')}/health", timeout=5)
             return True
         except Exception:
-            return False 
+            return False  # Service unreachable or unhealthy 

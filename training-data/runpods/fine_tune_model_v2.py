@@ -103,8 +103,8 @@ class ImprovedDateParsingDataProcessor:
                 clean_output = f'{{"date": "{date_str}", "type": "{result_type}"}}'
             else:
                 clean_output = output_text
-        except:
-            clean_output = output_text
+        except (json.JSONDecodeError, KeyError, TypeError):
+            clean_output = output_text  # Fallback to raw output on parse failure
         
         # Create a conversation with clear end marker
         formatted = f"Human: Parse date: {input_text}\nAssistant: {clean_output}<|endoftext|>"

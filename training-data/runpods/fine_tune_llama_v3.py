@@ -107,7 +107,7 @@ class SimplifiedDateProcessor:
                 else:
                     logger.warning(f"Could not extract date from: {output_text}")
                     return "INVALID_DATE"
-        except:
+        except (json.JSONDecodeError, KeyError, TypeError):
             # Try regex as fallback
             iso_pattern = r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}'
             match = re.search(iso_pattern, output_text)
