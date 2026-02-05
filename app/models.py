@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Integer, ForeignKey, UniqueConstraint, func
+from sqlalchemy import Boolean, Column, String, DateTime, Integer, ForeignKey, Text, UniqueConstraint, func
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime, timedelta
 
@@ -89,12 +89,13 @@ class SettingsSnapshot(Base):
 
 class Setting(Base):
     """
-    Scoped settings table with cascade lookup: Node > Household > Default.
+    Scoped settings table with cascade lookup: User > Node > Household > Default.
 
-    Settings can be defined at three levels:
-    - System default: household_id=NULL, node_id=NULL
-    - Household-wide: household_id set, node_id=NULL
-    - Node-specific: both household_id and node_id set
+    Settings can be defined at four levels:
+    - System default: all scope fields NULL
+    - Household-wide: household_id set, node_id=NULL, user_id=NULL
+    - Node-specific: household_id and node_id set, user_id=NULL
+    - User-specific: all scope fields set
 
     The SettingsService handles cascade lookup to find the most specific
     value for a given key.
@@ -102,13 +103,23 @@ class Setting(Base):
     __tablename__ = 'settings'
 
     id = Column(Integer, primary_key=True)
-    key = Column(String, nullable=False)
-    value = Column(String, nullable=False)
-    household_id = Column(String, nullable=True)  # NULL = system default
-    node_id = Column(String, nullable=True)       # NULL = household-wide
+    key = Column(String(255), nullable=False, index=True)
+    value = Column(Text, nullable=True)  # JSON-encoded
+    value_type = Column(String(50), nullable=False, default="string")  # string, int, float, bool, json
+    category = Column(String(100), nullable=False, default="general", index=True)
+    description = Column(Text, nullable=True)
+    requires_reload = Column(Boolean, default=False)
+    is_secret = Column(Boolean, default=False)
+    env_fallback = Column(String(255), nullable=True)
+
+    # Multi-tenant scoping
+    household_id = Column(String(255), nullable=True, index=True)  # NULL = system default
+    node_id = Column(String(255), nullable=True, index=True)       # NULL = household-wide
+    user_id = Column(Integer, nullable=True, index=True)           # NULL = not user-specific
+
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint('key', 'household_id', 'node_id', name='uq_setting_scope'),
+        UniqueConstraint('key', 'household_id', 'node_id', 'user_id', name='uq_setting_scope'),
     )

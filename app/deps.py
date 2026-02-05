@@ -161,14 +161,56 @@ def verify_admin_key(x_api_key: str = Header(...)):
 def get_model_service() -> ModelService:
     """
     Get the configured model service instance.
-    
+
     Uses JARVIS_MODEL_INTERFACE environment variable to determine which model to use.
     Defaults to BASE_MODEL if not specified.
-    
+
     Available models:
     - JarvisToolModel: Tool-based model using JSON tool calls
     - JarvisAdapterModel: Slim prompt model for adapter-tuned usage
     - Custom models can be added to app/core/models/custom/
     """
     return ModelService()
+
+
+async def require_app_auth(
+    x_jarvis_app_id: str = Header(None),
+    x_jarvis_app_key: str = Header(None),
+):
+    """
+    Validate app-to-app authentication by calling jarvis-auth /internal/app-ping.
+
+    Headers required:
+    - X-Jarvis-App-Id: App identifier
+    - X-Jarvis-App-Key: App secret key
+    """
+    if not x_jarvis_app_id or not x_jarvis_app_key:
+        raise HTTPException(status_code=401, detail="Missing app credentials")
+
+    jarvis_auth_base = _get_auth_base_url()
+    app_ping_url = jarvis_auth_base.rstrip("/") + "/internal/app-ping"
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            resp = await client.get(
+                app_ping_url,
+                headers={
+                    "X-Jarvis-App-Id": x_jarvis_app_id,
+                    "X-Jarvis-App-Key": x_jarvis_app_key,
+                },
+            )
+        except httpx.RequestError as exc:
+            logger.error("Failed to reach jarvis-auth for app auth: %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Auth service unavailable: {exc}",
+            ) from exc
+
+    if resp.status_code == 401:
+        raise HTTPException(status_code=401, detail="Invalid app credentials")
+    elif resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail="App auth failed")
+
+    # Auth succeeded
+    return None
 

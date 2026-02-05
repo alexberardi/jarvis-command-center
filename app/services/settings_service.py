@@ -1,210 +1,79 @@
-"""Settings service with cascade lookup: Node > Household > Default.
+"""Settings service for jarvis-command-center.
 
-This service manages scoped settings that can be defined at three levels:
-- System default: household_id=NULL, node_id=NULL
-- Household-wide: household_id set, node_id=NULL
-- Node-specific: both household_id and node_id set
-
-When looking up a setting, the service checks each level in order and returns
-the most specific value found.
+Provides runtime configuration that can be modified without restarting.
+Settings are stored in the database with fallback to environment variables.
+Uses the shared jarvis-settings-client library.
 """
 
-from sqlalchemy.orm import Session
+import logging
 
-from app.models import Setting
+from jarvis_settings_client import SettingsService as BaseSettingsService
+
+from app.services.settings_definitions import SETTINGS_DEFINITIONS
+
+logger = logging.getLogger(__name__)
 
 
-class SettingsService:
-    """Service for managing scoped settings."""
+class CommandCenterSettingsService(BaseSettingsService):
+    """Settings service for command-center with helper methods."""
 
-    def __init__(self, db: Session) -> None:
-        self.db = db
+    def get_llm_config(self) -> dict:
+        """Get LLM configuration settings as a dict."""
+        return {
+            "interface": self.get("llm.interface"),
+            "proxy_url": self.get("llm.proxy.url"),
+        }
 
-    def get_setting(
-        self,
-        key: str,
-        household_id: str | None = None,
-        node_id: str | None = None,
-    ) -> str | None:
-        """Get a setting value with cascade lookup.
+    def get_tool_classifier_config(self) -> dict:
+        """Get tool classifier configuration settings."""
+        return {
+            "enabled": self.get_bool("tool_classifier.enabled", True),
+            "min_confidence": self.get_float("tool_classifier.min_confidence", 0.6),
+        }
 
-        Lookup order: Node > Household > Default
+    def get_tool_router_config(self) -> dict:
+        """Get tool router configuration settings."""
+        return {
+            "filter_min_confidence": self.get_float("tool_router.filter_min_confidence", 0.85),
+        }
 
-        Args:
-            key: The setting key to look up
-            household_id: Optional household scope
-            node_id: Optional node scope (requires household_id)
+    def get_prompt_config(self) -> dict:
+        """Get prompt generation configuration settings."""
+        return {
+            "include_antipatterns": self.get_bool("prompt.include_antipatterns", True),
+            "include_param_descriptions": self.get_bool("prompt.include_param_descriptions", True),
+            "small_model_mode": self.get_bool("model.small_model_mode", True),
+        }
 
-        Returns:
-            The setting value, or None if not found at any level
-        """
-        # Level 1: Node-specific (requires both household_id and node_id)
-        if household_id is not None and node_id is not None:
-            setting = self.db.query(Setting).filter(
-                Setting.key == key,
-                Setting.household_id == household_id,
-                Setting.node_id == node_id,
-            ).first()
-            if setting:
-                return setting.value
+    def get_conversation_config(self) -> dict:
+        """Get conversation configuration settings."""
+        return {
+            "max_turns": self.get_int("conversation.max_turns", 20),
+            "cache_ttl_seconds": self.get_int("conversation.cache_ttl_seconds", 3600),
+        }
 
-        # Level 2: Household-wide (requires household_id, node_id must be NULL)
-        if household_id is not None:
-            setting = self.db.query(Setting).filter(
-                Setting.key == key,
-                Setting.household_id == household_id,
-                Setting.node_id.is_(None),
-            ).first()
-            if setting:
-                return setting.value
 
-        # Level 3: System default (both NULL)
-        setting = self.db.query(Setting).filter(
-            Setting.key == key,
-            Setting.household_id.is_(None),
-            Setting.node_id.is_(None),
-        ).first()
-        if setting:
-            return setting.value
+# Global singleton
+_settings_service: CommandCenterSettingsService | None = None
 
-        return None
 
-    def set_setting(
-        self,
-        key: str,
-        value: str,
-        household_id: str | None = None,
-        node_id: str | None = None,
-    ) -> Setting:
-        """Set a setting value at the specified scope.
+def get_settings_service() -> CommandCenterSettingsService:
+    """Get the global SettingsService instance."""
+    global _settings_service
+    if _settings_service is None:
+        from app.models import Setting
+        from app.db import get_session_local
 
-        If a setting already exists at the exact scope, it will be updated.
-        Otherwise, a new setting is created.
+        SessionLocal = get_session_local()
+        _settings_service = CommandCenterSettingsService(
+            definitions=SETTINGS_DEFINITIONS,
+            get_db_session=SessionLocal,
+            setting_model=Setting,
+        )
+    return _settings_service
 
-        Args:
-            key: The setting key
-            value: The setting value
-            household_id: Optional household scope (None = system default)
-            node_id: Optional node scope (None = household-wide)
 
-        Returns:
-            The created or updated Setting
-        """
-        # Build the filter for exact scope match
-        # We need to handle NULL values specially since == None doesn't work
-        query = self.db.query(Setting).filter(Setting.key == key)
-
-        if household_id is None:
-            query = query.filter(Setting.household_id.is_(None))
-        else:
-            query = query.filter(Setting.household_id == household_id)
-
-        if node_id is None:
-            query = query.filter(Setting.node_id.is_(None))
-        else:
-            query = query.filter(Setting.node_id == node_id)
-
-        existing = query.first()
-
-        if existing:
-            existing.value = value
-            self.db.commit()
-            self.db.refresh(existing)
-            return existing
-        else:
-            setting = Setting(
-                key=key,
-                value=value,
-                household_id=household_id,
-                node_id=node_id,
-            )
-            self.db.add(setting)
-            self.db.commit()
-            self.db.refresh(setting)
-            return setting
-
-    def get_all_settings(
-        self,
-        household_id: str | None = None,
-        node_id: str | None = None,
-    ) -> dict[str, str]:
-        """Get all settings with cascade override.
-
-        Returns a dictionary of all setting keys with their effective values
-        for the given scope. Settings are merged with the following priority:
-        Node > Household > Default
-
-        Args:
-            household_id: Optional household scope
-            node_id: Optional node scope
-
-        Returns:
-            Dictionary mapping setting keys to their effective values
-        """
-        result: dict[str, str] = {}
-
-        # Start with system defaults (lowest priority)
-        defaults = self.db.query(Setting).filter(
-            Setting.household_id.is_(None),
-            Setting.node_id.is_(None),
-        ).all()
-        for setting in defaults:
-            result[setting.key] = setting.value
-
-        # Override with household settings
-        if household_id is not None:
-            household_settings = self.db.query(Setting).filter(
-                Setting.household_id == household_id,
-                Setting.node_id.is_(None),
-            ).all()
-            for setting in household_settings:
-                result[setting.key] = setting.value
-
-        # Override with node settings (highest priority)
-        if household_id is not None and node_id is not None:
-            node_settings = self.db.query(Setting).filter(
-                Setting.household_id == household_id,
-                Setting.node_id == node_id,
-            ).all()
-            for setting in node_settings:
-                result[setting.key] = setting.value
-
-        return result
-
-    def delete_setting(
-        self,
-        key: str,
-        household_id: str | None = None,
-        node_id: str | None = None,
-    ) -> bool:
-        """Delete a setting at the specified scope.
-
-        Args:
-            key: The setting key to delete
-            household_id: The household scope (None = system default)
-            node_id: The node scope (None = household-wide)
-
-        Returns:
-            True if a setting was deleted, False if not found
-        """
-        # Build exact scope filter
-        query = self.db.query(Setting).filter(Setting.key == key)
-
-        if household_id is None:
-            query = query.filter(Setting.household_id.is_(None))
-        else:
-            query = query.filter(Setting.household_id == household_id)
-
-        if node_id is None:
-            query = query.filter(Setting.node_id.is_(None))
-        else:
-            query = query.filter(Setting.node_id == node_id)
-
-        setting = query.first()
-
-        if setting:
-            self.db.delete(setting)
-            self.db.commit()
-            return True
-
-        return False
+def reset_settings_service() -> None:
+    """Reset the settings service singleton (for testing)."""
+    global _settings_service
+    _settings_service = None

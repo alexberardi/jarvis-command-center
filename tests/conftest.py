@@ -4,8 +4,6 @@ import uuid
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Node, Setting, SettingsRequest, SettingsSnapshot
-from fastapi.testclient import TestClient
-from app.main import app
 
 
 def get_test_database_url():
@@ -62,7 +60,14 @@ def test_db(test_engine):
 
 @pytest.fixture
 def client():
-    """Create a test client without database overrides"""
+    """Create a test client without database overrides.
+
+    This fixture uses lazy import to avoid importing app.main at conftest load time,
+    which would fail in CI where jarvis_auth_client is not available.
+    """
+    from app.main import app
+    from fastapi.testclient import TestClient
+
     with TestClient(app) as client:
         yield client
 
@@ -122,8 +127,13 @@ def test_node_empty_room(test_db):
 
 @pytest.fixture
 def client_with_test_db(test_db):
-    """Create a test client with dependency override for database"""
+    """Create a test client with dependency override for database.
+
+    This fixture uses lazy import to avoid importing app.main at conftest load time.
+    """
+    from app.main import app
     from app.deps import get_db
+    from fastapi.testclient import TestClient
 
     def override_get_db():
         try:

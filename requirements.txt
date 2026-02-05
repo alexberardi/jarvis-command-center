@@ -15,3 +15,5 @@ fasttext
 numpy<2
 paho-mqtt
 # jarvis-log-client installed from local mount at runtime
+# jarvis-settings-client for settings management
+jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@main
