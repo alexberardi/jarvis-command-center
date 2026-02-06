@@ -6,10 +6,9 @@ household/node/user identification.
 """
 
 import httpx
-from sqlalchemy.orm import Session
 
 from jarvis_auth_client.headers import get_app_headers, build_context_headers
-from app.services.settings_service import SettingsService
+from app.services.settings_service import get_settings_service
 
 # Default TTS URL if not configured in settings
 DEFAULT_TTS_URL = "http://localhost:8009"
@@ -20,7 +19,6 @@ class TTSClient:
 
     def __init__(
         self,
-        db: Session,
         household_id: str,
         node_id: str | None = None,
         user_id: int | None = None,
@@ -28,7 +26,6 @@ class TTSClient:
         """Initialize the TTS client.
 
         Args:
-            db: Database session for settings lookup
             household_id: The household making the request
             node_id: Optional specific node making the request
             user_id: Optional user associated with the request
@@ -38,8 +35,12 @@ class TTSClient:
         self.user_id = user_id
 
         # Get URL from settings with cascade lookup (Node > Household > Default)
-        settings = SettingsService(db)
-        url = settings.get_setting("tts_url", household_id, node_id)
+        settings = get_settings_service()
+        url = settings.get(
+            "tts.url",
+            household_id=household_id,
+            node_id=node_id,
+        )
         self.base_url = url if url else DEFAULT_TTS_URL
 
     def _build_headers(self) -> dict[str, str]:

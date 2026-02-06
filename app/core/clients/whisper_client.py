@@ -8,10 +8,9 @@ is critical for voice recognition - Whisper uses it to filter voice profiles.
 from typing import Any
 
 import httpx
-from sqlalchemy.orm import Session
 
 from jarvis_auth_client.headers import get_app_headers, build_context_headers
-from app.services.settings_service import SettingsService
+from app.services.settings_service import get_settings_service
 
 # Default Whisper URL if not configured in settings
 DEFAULT_WHISPER_URL = "http://localhost:8012"
@@ -22,7 +21,6 @@ class WhisperClient:
 
     def __init__(
         self,
-        db: Session,
         household_id: str,
         node_id: str | None = None,
         user_id: int | None = None,
@@ -31,7 +29,6 @@ class WhisperClient:
         """Initialize the Whisper client.
 
         Args:
-            db: Database session for settings lookup
             household_id: The household making the request (used for voice recognition)
             node_id: Optional specific node making the request
             user_id: Optional user associated with the request
@@ -43,8 +40,12 @@ class WhisperClient:
         self.household_member_ids = household_member_ids or []
 
         # Get URL from settings with cascade lookup (Node > Household > Default)
-        settings = SettingsService(db)
-        url = settings.get_setting("whisper_url", household_id, node_id)
+        settings = get_settings_service()
+        url = settings.get(
+            "whisper.url",
+            household_id=household_id,
+            node_id=node_id,
+        )
         self.base_url = url if url else DEFAULT_WHISPER_URL
 
     def _build_headers(self) -> dict[str, str]:

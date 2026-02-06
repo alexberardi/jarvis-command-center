@@ -9,9 +9,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Response
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
 
-from app.deps import verify_api_key, get_db
+from app.deps import verify_api_key
 from app.context_providers.node_context_provider import NodeContextProvider
 from app.core.clients import TTSClient, WhisperClient
 
@@ -28,7 +27,6 @@ class TTSSpeakRequest(BaseModel):
 async def tts_speak(
     request: TTSSpeakRequest,
     node_context: NodeContextProvider = Depends(verify_api_key),
-    db: Session = Depends(get_db),
 ) -> Response:
     """Convert text to speech.
 
@@ -38,13 +36,11 @@ async def tts_speak(
     Args:
         request: Request body containing text to speak
         node_context: Authenticated node context (from verify_api_key)
-        db: Database session for settings lookup
 
     Returns:
         Audio bytes as WAV with content-type audio/wav
     """
     client = TTSClient(
-        db=db,
         household_id=node_context.household_id,
         node_id=node_context.node.node_id,
     )
@@ -58,7 +54,6 @@ async def whisper_transcribe(
     language: str | None = Form(None),
     task: str | None = Form(None),
     node_context: NodeContextProvider = Depends(verify_api_key),
-    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Transcribe audio to text.
 
@@ -72,13 +67,11 @@ async def whisper_transcribe(
         language: Optional language code (e.g., "en", "es")
         task: Optional task ("transcribe" or "translate")
         node_context: Authenticated node context (from verify_api_key)
-        db: Database session for settings lookup
 
     Returns:
         Transcription result dict with text, optional speaker_id, etc.
     """
     client = WhisperClient(
-        db=db,
         household_id=node_context.household_id,
         node_id=node_context.node.node_id,
         household_member_ids=node_context.household_member_ids,
@@ -101,7 +94,6 @@ async def whisper_transcribe(
 @router.post("/tts/generate-wake-response")
 async def tts_generate_wake_response(
     node_context: NodeContextProvider = Depends(verify_api_key),
-    db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """Generate a dynamic wake response greeting.
 
@@ -110,13 +102,11 @@ async def tts_generate_wake_response(
 
     Args:
         node_context: Authenticated node context (from verify_api_key)
-        db: Database session for settings lookup
 
     Returns:
         Dict with "text" key containing the greeting
     """
     client = TTSClient(
-        db=db,
         household_id=node_context.household_id,
         node_id=node_context.node.node_id,
     )
