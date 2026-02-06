@@ -1,14 +1,39 @@
-"""Tests for Settings service - Phase 1 of TTS/Whisper Architecture Migration.
+"""Tests for Settings service using jarvis-settings-client.
 
-Tests the cascade lookup behavior: Node > Household > Default.
+Tests the cascade lookup behavior: User > Node > Household > Default.
 """
 
 import pytest
-import uuid
-from datetime import datetime
+
+from jarvis_settings_client import SettingDefinition, SettingsService
 
 from app.models import Setting
-from app.services.settings_service import SettingsService
+
+
+# Test definitions for these tests
+TEST_SETTINGS_DEFINITIONS = [
+    SettingDefinition(
+        key="tts_url",
+        category="tts",
+        value_type="string",
+        default="http://localhost:8009",
+        description="TTS service URL",
+    ),
+    SettingDefinition(
+        key="whisper_url",
+        category="whisper",
+        value_type="string",
+        default="http://localhost:8012",
+        description="Whisper service URL",
+    ),
+    SettingDefinition(
+        key="tts_provider",
+        category="tts",
+        value_type="string",
+        default="default-provider",
+        description="TTS provider",
+    ),
+]
 
 
 class TestSettingModel:
@@ -19,6 +44,8 @@ class TestSettingModel:
         setting = Setting(
             key="tts_url",
             value="http://localhost:8009",
+            value_type="string",
+            category="tts",
             household_id="h123",
             node_id="kitchen-pi",
         )
@@ -39,6 +66,8 @@ class TestSettingModel:
         setting = Setting(
             key="tts_url",
             value="http://default:8009",
+            value_type="string",
+            category="tts",
             household_id=None,
             node_id=None,
         )
@@ -54,6 +83,8 @@ class TestSettingModel:
         setting = Setting(
             key="tts_url",
             value="http://household:8009",
+            value_type="string",
+            category="tts",
             household_id="h456",
             node_id=None,
         )
@@ -69,6 +100,8 @@ class TestSettingModel:
         setting1 = Setting(
             key="tts_url",
             value="http://first:8009",
+            value_type="string",
+            category="tts",
             household_id="h123",
             node_id="node1",
         )
@@ -78,6 +111,8 @@ class TestSettingModel:
         setting2 = Setting(
             key="tts_url",
             value="http://second:8009",
+            value_type="string",
+            category="tts",
             household_id="h123",
             node_id="node1",
         )
@@ -88,13 +123,20 @@ class TestSettingModel:
     def test_same_key_different_scopes_allowed(self, test_db):
         """Test that same key can exist at different scopes."""
         # System default
-        setting1 = Setting(key="tts_url", value="http://default:8009")
+        setting1 = Setting(
+            key="tts_url",
+            value="http://default:8009",
+            value_type="string",
+            category="tts",
+        )
         test_db.add(setting1)
 
         # Household level
         setting2 = Setting(
             key="tts_url",
             value="http://household:8009",
+            value_type="string",
+            category="tts",
             household_id="h123",
         )
         test_db.add(setting2)
@@ -103,6 +145,8 @@ class TestSettingModel:
         setting3 = Setting(
             key="tts_url",
             value="http://node:8009",
+            value_type="string",
+            category="tts",
             household_id="h123",
             node_id="node1",
         )
@@ -115,92 +159,117 @@ class TestSettingModel:
         assert len(settings) == 3
 
 
-class TestSettingsServiceGetSetting:
-    """Tests for SettingsService.get_setting() cascade lookup."""
+class TestSettingsServiceGet:
+    """Tests for SettingsService.get() cascade lookup."""
 
-    def test_returns_node_setting_when_exists(self, test_db):
+    @pytest.fixture
+    def service(self, test_db):
+        """Create a SettingsService for testing."""
+        return SettingsService(
+            definitions=TEST_SETTINGS_DEFINITIONS,
+            get_db_session=lambda: test_db,
+            setting_model=Setting,
+        )
+
+    def test_returns_node_setting_when_exists(self, test_db, service):
         """Should return node-specific value when it exists."""
         # Create all three levels
-        test_db.add(Setting(key="tts_url", value="http://default:8009"))
-        test_db.add(Setting(key="tts_url", value="http://household:8009", household_id="h123"))
-        test_db.add(Setting(key="tts_url", value="http://node:8009", household_id="h123", node_id="node1"))
+        test_db.add(Setting(
+            key="tts_url", value="http://default:8009",
+            value_type="string", category="tts"
+        ))
+        test_db.add(Setting(
+            key="tts_url", value="http://household:8009",
+            value_type="string", category="tts", household_id="h123"
+        ))
+        test_db.add(Setting(
+            key="tts_url", value="http://node:8009",
+            value_type="string", category="tts",
+            household_id="h123", node_id="node1"
+        ))
         test_db.commit()
 
-        service = SettingsService(test_db)
-        value = service.get_setting("tts_url", household_id="h123", node_id="node1")
-
+        value = service.get("tts_url", household_id="h123", node_id="node1")
         assert value == "http://node:8009"
 
-    def test_falls_back_to_household_when_no_node_setting(self, test_db):
+    def test_falls_back_to_household_when_no_node_setting(self, test_db, service):
         """Should fall back to household value when no node-specific setting."""
-        test_db.add(Setting(key="tts_url", value="http://default:8009"))
-        test_db.add(Setting(key="tts_url", value="http://household:8009", household_id="h123"))
+        test_db.add(Setting(
+            key="tts_url", value="http://default:8009",
+            value_type="string", category="tts"
+        ))
+        test_db.add(Setting(
+            key="tts_url", value="http://household:8009",
+            value_type="string", category="tts", household_id="h123"
+        ))
         test_db.commit()
 
-        service = SettingsService(test_db)
-        value = service.get_setting("tts_url", household_id="h123", node_id="node1")
-
+        value = service.get("tts_url", household_id="h123", node_id="node1")
         assert value == "http://household:8009"
 
-    def test_falls_back_to_default_when_no_household_setting(self, test_db):
+    def test_falls_back_to_default_when_no_household_setting(self, test_db, service):
         """Should fall back to system default when no household setting."""
-        test_db.add(Setting(key="tts_url", value="http://default:8009"))
+        test_db.add(Setting(
+            key="tts_url", value="http://default:8009",
+            value_type="string", category="tts"
+        ))
         test_db.commit()
 
-        service = SettingsService(test_db)
-        value = service.get_setting("tts_url", household_id="h123", node_id="node1")
-
+        value = service.get("tts_url", household_id="h123", node_id="node1")
         assert value == "http://default:8009"
 
-    def test_returns_none_when_no_setting_exists(self, test_db):
-        """Should return None when no setting exists at any level."""
-        service = SettingsService(test_db)
-        value = service.get_setting("nonexistent_key", household_id="h123", node_id="node1")
+    def test_returns_definition_default_when_no_setting_exists(self, service):
+        """Should return definition default when no setting exists at any level."""
+        value = service.get("tts_url", household_id="h123", node_id="node1")
+        assert value == "http://localhost:8009"  # From TEST_SETTINGS_DEFINITIONS
 
+    def test_returns_none_for_unknown_key(self, service):
+        """Should return None for unknown setting key."""
+        value = service.get("nonexistent_key", household_id="h123", node_id="node1")
         assert value is None
 
-    def test_household_lookup_without_node_id(self, test_db):
+    def test_household_lookup_without_node_id(self, test_db, service):
         """Should look up household setting when no node_id provided."""
-        test_db.add(Setting(key="tts_url", value="http://default:8009"))
-        test_db.add(Setting(key="tts_url", value="http://household:8009", household_id="h123"))
+        test_db.add(Setting(
+            key="tts_url", value="http://default:8009",
+            value_type="string", category="tts"
+        ))
+        test_db.add(Setting(
+            key="tts_url", value="http://household:8009",
+            value_type="string", category="tts", household_id="h123"
+        ))
         test_db.commit()
 
-        service = SettingsService(test_db)
-        value = service.get_setting("tts_url", household_id="h123")
-
+        value = service.get("tts_url", household_id="h123")
         assert value == "http://household:8009"
 
-    def test_default_lookup_without_any_scope(self, test_db):
+    def test_default_lookup_without_any_scope(self, test_db, service):
         """Should look up system default when no scope provided."""
-        test_db.add(Setting(key="tts_url", value="http://default:8009"))
+        test_db.add(Setting(
+            key="tts_url", value="http://default:8009",
+            value_type="string", category="tts"
+        ))
         test_db.commit()
 
-        service = SettingsService(test_db)
-        value = service.get_setting("tts_url")
-
+        value = service.get("tts_url")
         assert value == "http://default:8009"
 
-    def test_node_setting_requires_household_id(self, test_db):
-        """Node-level settings must have a household_id in the lookup."""
-        # A setting with both household and node
-        test_db.add(Setting(key="tts_url", value="http://node:8009", household_id="h123", node_id="node1"))
-        test_db.commit()
 
-        service = SettingsService(test_db)
-        # Looking up with only node_id (no household) should not find the node setting
-        value = service.get_setting("tts_url", node_id="node1")
+class TestSettingsServiceSet:
+    """Tests for SettingsService.set()."""
 
-        # Should return None since we can't look up node setting without household
-        assert value is None
+    @pytest.fixture
+    def service(self, test_db):
+        """Create a SettingsService for testing."""
+        return SettingsService(
+            definitions=TEST_SETTINGS_DEFINITIONS,
+            get_db_session=lambda: test_db,
+            setting_model=Setting,
+        )
 
-
-class TestSettingsServiceSetSetting:
-    """Tests for SettingsService.set_setting()."""
-
-    def test_set_system_default(self, test_db):
+    def test_set_system_default(self, test_db, service):
         """Should create a system default setting."""
-        service = SettingsService(test_db)
-        service.set_setting("tts_url", "http://new-default:8009")
+        service.set("tts_url", "http://new-default:8009")
 
         setting = test_db.query(Setting).filter(
             Setting.key == "tts_url",
@@ -211,10 +280,9 @@ class TestSettingsServiceSetSetting:
         assert setting is not None
         assert setting.value == "http://new-default:8009"
 
-    def test_set_household_setting(self, test_db):
+    def test_set_household_setting(self, test_db, service):
         """Should create a household-level setting."""
-        service = SettingsService(test_db)
-        service.set_setting("tts_url", "http://household:8009", household_id="h123")
+        service.set("tts_url", "http://household:8009", household_id="h123")
 
         setting = test_db.query(Setting).filter(
             Setting.key == "tts_url",
@@ -225,10 +293,9 @@ class TestSettingsServiceSetSetting:
         assert setting is not None
         assert setting.value == "http://household:8009"
 
-    def test_set_node_setting(self, test_db):
+    def test_set_node_setting(self, test_db, service):
         """Should create a node-level setting."""
-        service = SettingsService(test_db)
-        service.set_setting("tts_url", "http://node:8009", household_id="h123", node_id="node1")
+        service.set("tts_url", "http://node:8009", household_id="h123", node_id="node1")
 
         setting = test_db.query(Setting).filter(
             Setting.key == "tts_url",
@@ -239,14 +306,16 @@ class TestSettingsServiceSetSetting:
         assert setting is not None
         assert setting.value == "http://node:8009"
 
-    def test_update_existing_setting(self, test_db):
+    def test_update_existing_setting(self, test_db, service):
         """Should update value of existing setting."""
         # Create initial setting
-        test_db.add(Setting(key="tts_url", value="http://old:8009", household_id="h123"))
+        test_db.add(Setting(
+            key="tts_url", value="http://old:8009",
+            value_type="string", category="tts", household_id="h123"
+        ))
         test_db.commit()
 
-        service = SettingsService(test_db)
-        service.set_setting("tts_url", "http://new:8009", household_id="h123")
+        service.set("tts_url", "http://new:8009", household_id="h123")
 
         settings = test_db.query(Setting).filter(
             Setting.key == "tts_url",
@@ -256,117 +325,54 @@ class TestSettingsServiceSetSetting:
         assert len(settings) == 1
         assert settings[0].value == "http://new:8009"
 
-    def test_update_timestamp_on_change(self, test_db):
-        """Should update updated_at timestamp when value changes."""
-        setting = Setting(key="tts_url", value="http://old:8009", household_id="h123")
-        test_db.add(setting)
-        test_db.commit()
-        test_db.refresh(setting)
-        original_updated_at = setting.updated_at
 
-        service = SettingsService(test_db)
-        service.set_setting("tts_url", "http://new:8009", household_id="h123")
+class TestSettingsServiceListAll:
+    """Tests for SettingsService.list_all() merged lookup."""
 
-        test_db.refresh(setting)
-        # Note: This test may be flaky if executed too fast; the timestamps might be equal
-        # In production, updated_at uses onupdate trigger which handles this
+    @pytest.fixture
+    def service(self, test_db):
+        """Create a SettingsService for testing."""
+        return SettingsService(
+            definitions=TEST_SETTINGS_DEFINITIONS,
+            get_db_session=lambda: test_db,
+            setting_model=Setting,
+        )
 
+    def test_returns_all_definitions(self, service):
+        """Should return all settings from definitions."""
+        settings = service.list_all()
 
-class TestSettingsServiceGetAllSettings:
-    """Tests for SettingsService.get_all_settings() merged lookup."""
+        assert len(settings) == 3  # 3 definitions
+        keys = [s["key"] for s in settings]
+        assert "tts_url" in keys
+        assert "whisper_url" in keys
+        assert "tts_provider" in keys
 
-    def test_returns_all_settings_merged(self, test_db):
-        """Should return all settings with cascade override."""
-        # System defaults
-        test_db.add(Setting(key="tts_url", value="http://default-tts:8009"))
-        test_db.add(Setting(key="whisper_url", value="http://default-whisper:8012"))
-        test_db.add(Setting(key="tts_provider", value="default-provider"))
-
-        # Household overrides tts_url
-        test_db.add(Setting(key="tts_url", value="http://household-tts:8009", household_id="h123"))
-
-        # Node overrides whisper_url
-        test_db.add(Setting(key="whisper_url", value="http://node-whisper:8012", household_id="h123", node_id="node1"))
-
+    def test_returns_db_values_when_set(self, test_db, service):
+        """Should return database values when set."""
+        test_db.add(Setting(
+            key="tts_url", value="http://custom:8009",
+            value_type="string", category="tts"
+        ))
         test_db.commit()
 
-        service = SettingsService(test_db)
-        settings = service.get_all_settings(household_id="h123", node_id="node1")
+        settings = service.list_all()
+        tts_setting = next(s for s in settings if s["key"] == "tts_url")
 
-        assert settings["tts_url"] == "http://household-tts:8009"  # From household
-        assert settings["whisper_url"] == "http://node-whisper:8012"  # From node
-        assert settings["tts_provider"] == "default-provider"  # From default
+        assert tts_setting["value"] == "http://custom:8009"
+        assert tts_setting["from_db"] is True
 
-    def test_returns_empty_dict_when_no_settings(self, test_db):
-        """Should return empty dict when no settings exist."""
-        service = SettingsService(test_db)
-        settings = service.get_all_settings(household_id="h123", node_id="node1")
+    def test_returns_defaults_when_no_db_values(self, service):
+        """Should return definition defaults when no DB values."""
+        settings = service.list_all()
+        tts_setting = next(s for s in settings if s["key"] == "tts_url")
 
-        assert settings == {}
+        assert tts_setting["value"] == "http://localhost:8009"  # Definition default
+        assert tts_setting["from_db"] is False
 
-    def test_returns_only_defaults_when_no_scope(self, test_db):
-        """Should return only system defaults when no scope provided."""
-        test_db.add(Setting(key="tts_url", value="http://default:8009"))
-        test_db.add(Setting(key="tts_url", value="http://household:8009", household_id="h123"))
-        test_db.commit()
+    def test_filter_by_category(self, service):
+        """Should filter by category."""
+        settings = service.list_all(category="tts")
 
-        service = SettingsService(test_db)
-        settings = service.get_all_settings()
-
-        assert settings == {"tts_url": "http://default:8009"}
-
-    def test_returns_defaults_and_household_when_only_household(self, test_db):
-        """Should return defaults + household overrides when only household provided."""
-        test_db.add(Setting(key="tts_url", value="http://default:8009"))
-        test_db.add(Setting(key="whisper_url", value="http://default-whisper:8012"))
-        test_db.add(Setting(key="tts_url", value="http://household:8009", household_id="h123"))
-        test_db.commit()
-
-        service = SettingsService(test_db)
-        settings = service.get_all_settings(household_id="h123")
-
-        assert settings["tts_url"] == "http://household:8009"
-        assert settings["whisper_url"] == "http://default-whisper:8012"
-
-
-class TestSettingsServiceDeleteSetting:
-    """Tests for SettingsService.delete_setting()."""
-
-    def test_delete_existing_setting(self, test_db):
-        """Should delete a setting at the specified scope."""
-        test_db.add(Setting(key="tts_url", value="http://household:8009", household_id="h123"))
-        test_db.commit()
-
-        service = SettingsService(test_db)
-        deleted = service.delete_setting("tts_url", household_id="h123")
-
-        assert deleted is True
-        setting = test_db.query(Setting).filter(
-            Setting.key == "tts_url",
-            Setting.household_id == "h123",
-        ).first()
-        assert setting is None
-
-    def test_delete_nonexistent_setting_returns_false(self, test_db):
-        """Should return False when trying to delete nonexistent setting."""
-        service = SettingsService(test_db)
-        deleted = service.delete_setting("nonexistent", household_id="h123")
-
-        assert deleted is False
-
-    def test_delete_only_affects_specified_scope(self, test_db):
-        """Should only delete the setting at the specified scope."""
-        test_db.add(Setting(key="tts_url", value="http://default:8009"))
-        test_db.add(Setting(key="tts_url", value="http://household:8009", household_id="h123"))
-        test_db.commit()
-
-        service = SettingsService(test_db)
-        service.delete_setting("tts_url", household_id="h123")
-
-        # Default should still exist
-        default = test_db.query(Setting).filter(
-            Setting.key == "tts_url",
-            Setting.household_id.is_(None),
-        ).first()
-        assert default is not None
-        assert default.value == "http://default:8009"
+        assert len(settings) == 2
+        assert all(s["category"] == "tts" for s in settings)

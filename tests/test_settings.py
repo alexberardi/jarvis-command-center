@@ -3,7 +3,6 @@
 These tests cover:
 - Settings definitions
 - Settings service behavior
-- Helper methods
 """
 
 import os
@@ -12,16 +11,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from jarvis_settings_client import SettingDefinition
-from jarvis_settings_client.service import SettingsService
+from jarvis_settings_client import SettingDefinition, SettingsService
 from jarvis_settings_client.types import SettingValue
 
 from app.services.settings_definitions import SETTINGS_DEFINITIONS
-from app.services.settings_service import (
-    CommandCenterSettingsService,
-    get_settings_service,
-    reset_settings_service,
-)
+from app.services.settings_service import get_settings_service, reset_settings_service
 
 
 class TestSettingsDefinitions:
@@ -66,76 +60,13 @@ class TestSettingsDefinitions:
         assert categories == expected_categories
 
 
-class TestCommandCenterSettingsService:
-    """Tests for CommandCenterSettingsService helper methods."""
-
-    @pytest.fixture
-    def service(self):
-        """Create a service instance for testing."""
-        return CommandCenterSettingsService(
-            definitions=SETTINGS_DEFINITIONS,
-            get_db_session=lambda: None,
-            setting_model=None,
-        )
-
-    def test_get_llm_config(self, service):
-        """Test get_llm_config method."""
-        with patch.dict(os.environ, {
-            "JARVIS_MODEL_INTERFACE": "TestInterface",
-            "JARVIS_LLM_PROXY_API_URL": "http://test:8000",
-        }):
-            config = service.get_llm_config()
-            assert config["interface"] == "TestInterface"
-            assert config["proxy_url"] == "http://test:8000"
-
-    def test_get_tool_classifier_config(self, service):
-        """Test get_tool_classifier_config method."""
-        with patch.dict(os.environ, {
-            "JARVIS_TOOL_CLASSIFIER_ENABLED": "true",
-            "JARVIS_TOOL_CLASSIFIER_MIN_CONFIDENCE": "0.75",
-        }):
-            config = service.get_tool_classifier_config()
-            assert config["enabled"] is True
-            assert config["min_confidence"] == 0.75
-
-    def test_get_tool_router_config(self, service):
-        """Test get_tool_router_config method."""
-        with patch.dict(os.environ, {
-            "JARVIS_TOOL_ROUTER_FILTER_MIN_CONFIDENCE": "0.9",
-        }):
-            config = service.get_tool_router_config()
-            assert config["filter_min_confidence"] == 0.9
-
-    def test_get_prompt_config(self, service):
-        """Test get_prompt_config method."""
-        with patch.dict(os.environ, {
-            "JARVIS_PROMPT_INCLUDE_ANTIPATTERNS": "false",
-            "JARVIS_PROMPT_INCLUDE_PARAM_DESCRIPTIONS": "true",
-            "JARVIS_SMALL_MODEL_MODE": "true",
-        }):
-            config = service.get_prompt_config()
-            assert config["include_antipatterns"] is False
-            assert config["include_param_descriptions"] is True
-            assert config["small_model_mode"] is True
-
-    def test_get_conversation_config(self, service):
-        """Test get_conversation_config method."""
-        with patch.dict(os.environ, {
-            "JARVIS_CONVERSATION_MAX_TURNS": "30",
-            "JARVIS_CONVERSATION_CACHE_TTL": "7200",
-        }):
-            config = service.get_conversation_config()
-            assert config["max_turns"] == 30
-            assert config["cache_ttl_seconds"] == 7200
-
-
 class TestSettingsServiceCache:
     """Tests for SettingsService caching behavior."""
 
     @pytest.fixture
     def service(self):
         """Create a service instance for testing."""
-        return CommandCenterSettingsService(
+        return SettingsService(
             definitions=SETTINGS_DEFINITIONS,
             get_db_session=lambda: None,
             setting_model=None,
@@ -213,7 +144,7 @@ class TestSettingsServiceEnvFallback:
     @pytest.fixture
     def service(self):
         """Create a service instance for testing."""
-        return CommandCenterSettingsService(
+        return SettingsService(
             definitions=SETTINGS_DEFINITIONS,
             get_db_session=lambda: None,
             setting_model=None,
@@ -249,7 +180,7 @@ class TestSettingsServiceTypedGetters:
     @pytest.fixture
     def service(self):
         """Create a service instance for testing."""
-        return CommandCenterSettingsService(
+        return SettingsService(
             definitions=SETTINGS_DEFINITIONS,
             get_db_session=lambda: None,
             setting_model=None,
@@ -290,7 +221,7 @@ class TestSettingsServiceListMethods:
     @pytest.fixture
     def service(self):
         """Create a service instance for testing."""
-        return CommandCenterSettingsService(
+        return SettingsService(
             definitions=SETTINGS_DEFINITIONS,
             get_db_session=lambda: None,
             setting_model=None,
