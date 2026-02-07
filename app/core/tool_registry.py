@@ -85,6 +85,10 @@ class ToolRegistry:
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """Get all tool definitions in OpenAI format."""
         return [tool.to_openai_format() for tool in self._tools.values()]
+
+    def get_tools_for_model(self, model_name: str) -> List[Dict[str, Any]]:
+        """Get tool definitions for a specific model. Currently returns all tools."""
+        return self.get_tool_definitions()
     
     def get_tool_names(self) -> List[str]:
         """Get list of registered tool names."""
