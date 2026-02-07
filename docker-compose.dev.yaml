@@ -23,7 +23,7 @@ services:
       - DATABASE_URL=${DB_URL}
       - JARVIS_CONFIG_URL_STYLE=dockerized
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "${DOCKER_HOST_ALIAS:-host.docker.internal}:host-gateway"
     command: >
       sh -c "pip install -q -e /app/jarvis-log-client -e /app/jarvis-config-client &&
              alembic upgrade head &&
