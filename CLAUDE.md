@@ -9,7 +9,7 @@ Central voice command API. Routes voice from Pi Zero nodes through speech-to-tex
 bash run-docker-dev.sh
 
 # Health check
-curl http://localhost:8002/api/v0/health
+curl http://localhost:8002/health
 
 # Test (requires PostgreSQL via Docker)
 python run_database_tests.py --type docker
@@ -57,7 +57,7 @@ app/
 - `POST /api/v0/adapters/train` → Queue adapter training
 
 **Health:**
-- `GET /api/v0/health` → Health check
+- `GET /health` → Health check
 
 ## Node Authentication
 
