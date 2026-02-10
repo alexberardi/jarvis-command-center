@@ -156,7 +156,7 @@ class TestPostgreSQLIntegration:
         assert response.json() == {"message": "pong"}
         
         # Test health endpoint
-        response = client.get("/api/v0/health")
+        response = client.get("/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"

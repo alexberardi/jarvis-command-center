@@ -185,15 +185,17 @@ app.include_router(node_settings.router, prefix="/api/v0", tags=["node-settings"
 app.include_router(media.router, prefix="/api/v0", tags=["media"])
 
 # Include settings router from shared library
-from jarvis_settings_client import create_settings_router
+from jarvis_settings_client import create_settings_router, create_superuser_auth
 from app.services.settings_service import get_settings_service
 from app.deps import require_app_auth
 
+_auth_url = os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
 _settings_router = create_settings_router(
     service=get_settings_service(),
     auth_dependency=require_app_auth,
+    write_auth_dependency=create_superuser_auth(_auth_url),
 )
-app.include_router(_settings_router, prefix="/api/v0/settings", tags=["settings"])
+app.include_router(_settings_router, prefix="/settings", tags=["settings"])
 
 
 # Basic routes
@@ -201,29 +203,6 @@ app.include_router(_settings_router, prefix="/api/v0/settings", tags=["settings"
 def ping():
     return {"message": "pong"}
 
-
-@v0_router.get("/health")
-def health_check():
-    """Health check endpoint for monitoring and load balancers"""
-    from datetime import datetime
-
-    # Check LLM API availability
-    llm_proxy_available = True
-    try:
-        # We could add an actual health check to the LLM proxy here
-        pass
-    except Exception as e:
-        llm_proxy_available = False
-
-    return {
-        "status": "healthy" if llm_proxy_available else "degraded",
-        "timestamp": datetime.utcnow().isoformat(),
-        "services": {
-            "llm_proxy": "available" if llm_proxy_available else "unavailable",
-            "database": "available",  # We could add database health check here
-            "conversation_cache": "available"  # Could add cache health check
-        }
-    }
 
 
 
