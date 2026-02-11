@@ -4,7 +4,7 @@ Tests for date resolution helpers.
 These tests cover the date resolution functionality extracted from model_service.py.
 """
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 class TestNormalizeDateKey:
@@ -371,3 +371,81 @@ class TestResolveDateKeys:
         resolved, unresolved = resolve_date_keys(["tomorrow", "tomorrow"], date_context)
         # Should deduplicate
         assert resolved.count("2025-01-16T00:00:00Z") == 1
+
+    def test_relative_time_key(self):
+        from app.core.date_resolution import resolve_date_keys
+        now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        date_context = {
+            "current": {"datetime": now.isoformat().replace("+00:00", "Z")}
+        }
+        resolved, unresolved = resolve_date_keys(["in_30_minutes"], date_context)
+        expected = (now + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+        assert resolved == [expected]
+        assert unresolved == []
+
+    def test_mixed_semantic_and_relative(self):
+        from app.core.date_resolution import resolve_date_keys
+        now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        date_context = {
+            "current": {"datetime": now.isoformat().replace("+00:00", "Z")},
+            "relative_dates": {
+                "tomorrow": {"utc_start_of_day": "2025-01-16T00:00:00Z"}
+            }
+        }
+        resolved, unresolved = resolve_date_keys(["tomorrow", "in_30_minutes"], date_context)
+        assert "2025-01-16T00:00:00Z" in resolved
+        expected_relative = (now + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+        assert expected_relative in resolved
+        assert unresolved == []
+
+
+class TestResolveRelativeTime:
+    """Tests for resolving relative time keys to ISO datetimes."""
+
+    def _make_context(self, now: datetime) -> dict:
+        return {"current": {"datetime": now.isoformat().replace("+00:00", "Z")}}
+
+    def test_resolve_relative_minutes(self):
+        from app.core.date_resolution import resolve_relative_time
+        now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        result = resolve_relative_time("in_30_minutes", self._make_context(now))
+        expected = (now + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
+        assert result == expected
+
+    def test_resolve_relative_hours(self):
+        from app.core.date_resolution import resolve_relative_time
+        now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        result = resolve_relative_time("in_2_hours", self._make_context(now))
+        expected = (now + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        assert result == expected
+
+    def test_resolve_relative_days(self):
+        from app.core.date_resolution import resolve_relative_time
+        now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        result = resolve_relative_time("in_3_days", self._make_context(now))
+        expected = (now + timedelta(days=3)).isoformat().replace("+00:00", "Z")
+        assert result == expected
+
+    def test_resolve_relative_compound(self):
+        from app.core.date_resolution import resolve_relative_time
+        now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        result = resolve_relative_time("in_1_hours_30_minutes", self._make_context(now))
+        expected = (now + timedelta(hours=1, minutes=30)).isoformat().replace("+00:00", "Z")
+        assert result == expected
+
+    def test_resolve_invalid_relative_key(self):
+        from app.core.date_resolution import resolve_relative_time
+        now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        result = resolve_relative_time("in_abc_minutes", self._make_context(now))
+        assert result is None
+
+    def test_resolve_non_matching_key(self):
+        from app.core.date_resolution import resolve_relative_time
+        now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        result = resolve_relative_time("tomorrow", self._make_context(now))
+        assert result is None
+
+    def test_resolve_missing_current_datetime(self):
+        from app.core.date_resolution import resolve_relative_time
+        result = resolve_relative_time("in_30_minutes", {})
+        assert result is None

@@ -6,7 +6,7 @@ and resolving relative date expressions to ISO datetime strings.
 """
 
 import re
-from datetime import datetime, timezone as tz
+from datetime import datetime, timedelta, timezone as tz
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -27,6 +27,58 @@ def normalize_date_key(raw: str) -> str:
     text = re.sub(r"\s+", "_", text)
     text = text.replace(":", "_")
     return text
+
+
+RELATIVE_TIME_PATTERN = re.compile(
+    r"^in_(\d+)_(minutes|hours|days)(?:_(\d+)_(minutes))?$"
+)
+
+
+def resolve_relative_time(key: str, date_context: Dict[str, Any]) -> Optional[str]:
+    """
+    Resolve a relative time key like 'in_30_minutes' to an ISO datetime string.
+
+    Args:
+        key: Normalized relative time key (e.g., 'in_30_minutes', 'in_2_hours')
+        date_context: The nested date context object (needs current.datetime)
+
+    Returns:
+        ISO datetime string or None if key doesn't match pattern
+    """
+    match = RELATIVE_TIME_PATTERN.match(key)
+    if not match:
+        return None
+
+    now_str = (
+        date_context.get("current", {}).get("datetime")
+        or date_context.get("current", {}).get("utc_start_of_day")
+    )
+    if not now_str:
+        return None
+
+    try:
+        normalized = now_str.replace("Z", "+00:00") if now_str.endswith("Z") else now_str
+        now = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+
+    offset = timedelta()
+    if unit == "minutes":
+        offset = timedelta(minutes=amount)
+    elif unit == "hours":
+        offset = timedelta(hours=amount)
+    elif unit == "days":
+        offset = timedelta(days=amount)
+
+    # Handle compound: in_1_hours_30_minutes
+    if match.group(3) and match.group(4):
+        offset += timedelta(minutes=int(match.group(3)))
+
+    result = now + offset
+    return result.astimezone(tz.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def flatten_date_context(nested_context: Dict[str, Any]) -> Dict[str, Any]:
@@ -242,6 +294,12 @@ def resolve_date_keys(
     unresolved: List[str] = []
 
     for key in normalized_keys:
+        # Try relative time resolution first (e.g., in_30_minutes, in_2_hours)
+        relative_result = resolve_relative_time(key, date_context)
+        if relative_result:
+            resolved.append(relative_result)
+            continue
+
         value = flat_context.get(key)
         if isinstance(value, list):
             resolved.extend([v for v in value if isinstance(v, str)])
