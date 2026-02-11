@@ -62,35 +62,79 @@ RELATIVE_DATE_PATTERNS = [
     r'\bthis year\b',
     r'\bnext year\b',
     r'\blast year\b',
+
+    # Relative time offsets
+    r'\bin\s+\d+\s+hours?\s+(?:and\s+)?\d+\s+minutes?\b',
+    r'\bin\s+half\s+an?\s+hour\b',
+    r'\bin\s+an?\s+hour\b',
+    r'\bin\s+\d+\s+minutes?\b',
+    r'\bin\s+\d+\s+hours?\b',
+    r'\bin\s+\d+\s+days?\b',
 ]
+
+
+def _normalize_relative_time(phrase: str) -> str:
+    """
+    Normalize a relative time phrase to the in_N_unit key format.
+
+    Handles special forms like "an hour" -> "in_1_hours",
+    "half an hour" -> "in_30_minutes", and compound forms like
+    "1 hour and 30 minutes" -> "in_1_hours_30_minutes".
+
+    Args:
+        phrase: Matched phrase (e.g., "in 30 minutes", "in an hour")
+
+    Returns:
+        Normalized key string
+    """
+    # "in half an hour" / "in half a hour"
+    if re.match(r"^in\s+half\s+an?\s+hour$", phrase):
+        return "in_30_minutes"
+
+    # "in an hour" / "in a hour"
+    if re.match(r"^in\s+an?\s+hour$", phrase):
+        return "in_1_hours"
+
+    # Compound: "in N hour(s) (and) M minute(s)"
+    compound = re.match(
+        r"^in\s+(\d+)\s+hours?\s+(?:and\s+)?(\d+)\s+minutes?$", phrase
+    )
+    if compound:
+        return f"in_{compound.group(1)}_hours_{compound.group(2)}_minutes"
+
+    # Simple: "in N unit(s)" — just replace spaces with underscores
+    return phrase.replace(" ", "_")
 
 
 def detect_relative_dates(utterance: str) -> List[str]:
     """
     Detect relative date phrases in a user utterance.
-    
+
     Args:
         utterance: The user's utterance text
-        
+
     Returns:
         List of detected relative date phrases (normalized)
     """
     if not utterance:
         return []
-    
+
     utterance_lower = utterance.lower()
     detected = []
-    
+
     # Check each pattern
     for pattern in RELATIVE_DATE_PATTERNS:
         matches = re.finditer(pattern, utterance_lower)
         for match in matches:
             phrase = match.group(0).strip()
-            # Normalize: replace spaces with underscores
-            normalized = phrase.replace(" ", "_")
+            # Normalize relative time offsets to in_N_unit format
+            if phrase.startswith("in "):
+                normalized = _normalize_relative_time(phrase)
+            else:
+                normalized = phrase.replace(" ", "_")
             if normalized not in detected:
                 detected.append(normalized)
-    
+
     return detected
 
 
