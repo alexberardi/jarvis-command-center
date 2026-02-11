@@ -21,7 +21,7 @@ from app.debug_setup import setup_debugger
 from app.core.malformed_json_extractor import MalformedJsonExtractorService
 from app.core.conversation_cache import conversation_cache
 from app.core.utils.latency_logger import latency_logger
-from . import admin, chat, date_context, node_settings
+from . import admin, chat, date_context, node_settings, provisioning
 from app.api import media
 from app.deps import verify_api_key, get_model_service
 from app.core.model_service import ModelService
@@ -124,10 +124,44 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on app startup."""
+    import asyncio
+    from app.provisioning import cleanup_expired_tokens
+
     # Initialize service discovery first
     _setup_service_config()
     # Then set up remote logging
     _setup_remote_logging()
+
+    # Clean up expired provisioning tokens from previous runs
+    try:
+        from app.db import get_session_local
+        SessionLocal = get_session_local()
+        db = SessionLocal()
+        try:
+            removed = cleanup_expired_tokens(db)
+            if removed:
+                logger.info("Cleaned up %d expired provisioning tokens on startup", removed)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Could not clean up provisioning tokens on startup: %s", e)
+
+    # Schedule hourly cleanup
+    async def _periodic_cleanup() -> None:
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                db = SessionLocal()
+                try:
+                    removed = cleanup_expired_tokens(db)
+                    if removed:
+                        logger.info("Hourly cleanup removed %d provisioning tokens", removed)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("Hourly provisioning token cleanup failed: %s", e)
+
+    asyncio.create_task(_periodic_cleanup())
 
 
 # Add shutdown event for cleanup
@@ -172,6 +206,9 @@ v0_router = APIRouter()
 # Include admin router with versioning
 app.include_router(admin.router, prefix="/api/v0/admin", tags=["admin"])
 
+# Include provisioning router
+app.include_router(provisioning.router, prefix="/api/v0", tags=["provisioning"])
+
 # Include chat router
 app.include_router(chat.chat_router, prefix="/api/v0", tags=["chat"])
 
@@ -185,14 +222,13 @@ app.include_router(node_settings.router, prefix="/api/v0", tags=["node-settings"
 app.include_router(media.router, prefix="/api/v0", tags=["media"])
 
 # Include settings router from shared library
-from jarvis_settings_client import create_settings_router, create_superuser_auth
+from jarvis_settings_client import create_settings_router, create_combined_auth, create_superuser_auth
 from app.services.settings_service import get_settings_service
-from app.deps import require_app_auth
 
 _auth_url = os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
 _settings_router = create_settings_router(
     service=get_settings_service(),
-    auth_dependency=require_app_auth,
+    auth_dependency=create_combined_auth(_auth_url),
     write_auth_dependency=create_superuser_auth(_auth_url),
 )
 app.include_router(_settings_router, prefix="/settings", tags=["settings"])

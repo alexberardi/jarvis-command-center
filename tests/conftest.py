@@ -3,7 +3,7 @@ import os
 import uuid
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from app.models import Base, Node, Setting, SettingsRequest, SettingsSnapshot
+from app.models import Base, Node, ProvisioningToken, Setting, SettingsRequest, SettingsSnapshot
 
 
 def get_test_database_url():
@@ -32,6 +32,10 @@ def test_engine():
             pass  # Table doesn't exist yet
         conn.execute(text("DELETE FROM settings_snapshots WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
         conn.execute(text("DELETE FROM settings_requests WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
+        try:
+            conn.execute(text("DELETE FROM provisioning_tokens WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
+        except Exception:
+            pass  # Table may not exist on first run
         conn.execute(text("DELETE FROM nodes WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
         conn.commit()
 
