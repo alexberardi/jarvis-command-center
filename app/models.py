@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from sqlalchemy import Boolean, Column, String, DateTime, Integer, ForeignKey, Text, UniqueConstraint, func
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime, timedelta
@@ -123,3 +125,26 @@ class Setting(Base):
     __table_args__ = (
         UniqueConstraint('key', 'household_id', 'node_id', 'user_id', name='uq_setting_scope'),
     )
+
+
+class ProvisioningToken(Base):
+    """Short-lived token for node self-registration.
+
+    Flow:
+    1. Authenticated user requests a provisioning token (gets GUID + raw token)
+    2. Raw token is passed to the node (e.g., via mobile app)
+    3. Node calls /nodes/register with node_id + raw token
+    4. CC validates hash, creates node, consumes token
+    """
+    __tablename__ = "provisioning_tokens"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    token_hash = Column(String(64), nullable=False, unique=True)  # SHA-256 hex
+    node_id = Column(String(36), nullable=False, index=True)
+    household_id = Column(String(255), nullable=False)
+    room = Column(String(255), nullable=True)
+    name = Column(String(255), nullable=True)
+    created_by_user_id = Column(Integer, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    consumed_at = Column(DateTime, nullable=True)
