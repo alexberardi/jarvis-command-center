@@ -20,8 +20,8 @@ logger = logging.getLogger("uvicorn")
 # Configuration
 # ============================================================
 
-JARVIS_AUTH_APP_ID = os.getenv("JARVIS_APP_ID", "command-center")
-JARVIS_AUTH_APP_KEY = os.getenv("JARVIS_APP_KEY")
+JARVIS_AUTH_APP_ID = os.getenv("JARVIS_AUTH_APP_ID", "command-center")
+JARVIS_AUTH_APP_KEY = os.getenv("JARVIS_AUTH_APP_KEY")
 
 
 def _get_auth_base_url() -> str:
@@ -30,7 +30,7 @@ def _get_auth_base_url() -> str:
         from app.core import service_config
         if service_config.is_initialized():
             return service_config.get_auth_url()
-    except Exception:
+    except (ImportError, AttributeError):
         pass
     return os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
 
@@ -106,7 +106,7 @@ def _register_node_with_auth(
     if not JARVIS_AUTH_APP_KEY:
         raise HTTPException(
             status_code=500,
-            detail="JARVIS_APP_KEY not configured for auth integration"
+            detail="JARVIS_AUTH_APP_KEY not configured for auth integration"
         )
 
     auth_url = _get_auth_base_url().rstrip("/") + "/internal/nodes/register"
@@ -157,7 +157,7 @@ def _deactivate_node_with_auth(node_id: str) -> bool:
     Returns True if successful or node not found, False on error.
     """
     if not JARVIS_AUTH_APP_KEY:
-        logger.warning("JARVIS_APP_KEY not configured, skipping auth deactivation")
+        logger.warning("JARVIS_AUTH_APP_KEY not configured, skipping auth deactivation")
         return True
 
     auth_url = _get_auth_base_url().rstrip("/") + f"/internal/nodes/{node_id}"

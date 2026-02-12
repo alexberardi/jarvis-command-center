@@ -28,7 +28,7 @@ class MalformedJsonExtractorService:
             from app.core import service_config
             if service_config.is_initialized():
                 return service_config.get_llm_proxy_url()
-        except Exception:
+        except (ImportError, AttributeError):
             pass  # Service config not available, use env var fallback
         return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
         
@@ -121,5 +121,5 @@ class MalformedJsonExtractorService:
             # Health check is a GET request (no auth required)
             await get(f"{self.api_url.rstrip('/')}/health", timeout=5)
             return True
-        except Exception:
-            return False  # Service unreachable or unhealthy 
+        except Exception as e:
+            return False  # Service unreachable or unhealthy

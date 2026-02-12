@@ -33,7 +33,7 @@ class LLMProxyClient:
             from app.core import service_config
             if service_config.is_initialized():
                 return service_config.get_llm_proxy_url()
-        except Exception:
+        except (ImportError, AttributeError):
             pass  # Service config not available, use env var fallback
         # Fallback to env var
         return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")

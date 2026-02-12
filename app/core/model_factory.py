@@ -118,10 +118,10 @@ class ModelFactory:
                                 instance = cls()
                                 if instance.name not in models:
                                     models.append(instance.name)
-                            except Exception:
+                            except (TypeError, ValueError) as e:
                                 pass
-                                
-                except Exception:
+
+                except (ImportError, AttributeError) as e:
                     continue
         
         return sorted(models)

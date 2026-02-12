@@ -69,8 +69,8 @@ def _setup_remote_logging() -> None:
     try:
         from jarvis_log_client import init as init_log_client, JarvisLogHandler
 
-        app_id = os.getenv("JARVIS_APP_ID", "command-center")
-        app_key = os.getenv("JARVIS_APP_KEY")
+        app_id = os.getenv("JARVIS_AUTH_APP_ID", "command-center")
+        app_key = os.getenv("JARVIS_AUTH_APP_KEY")
         if not app_key:
             return
 
@@ -173,13 +173,13 @@ async def shutdown_event():
     try:
         from app.core import service_config
         service_config.shutdown()
-    except Exception:
+    except Exception as e:
         pass
     # Disconnect MQTT client
     try:
         if node_settings.mqtt_client is not None:
             node_settings.mqtt_client.disconnect()
-    except Exception:
+    except Exception as e:
         pass
     # Flush and close remote log handler
     for handler in logger.handlers:
@@ -224,12 +224,12 @@ app.include_router(media.router, prefix="/api/v0", tags=["media"])
 # Include settings router from shared library
 from jarvis_settings_client import create_settings_router, create_combined_auth, create_superuser_auth
 from app.services.settings_service import get_settings_service
+from app.deps import _get_auth_base_url
 
-_auth_url = os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
 _settings_router = create_settings_router(
     service=get_settings_service(),
-    auth_dependency=create_combined_auth(_auth_url),
-    write_auth_dependency=create_superuser_auth(_auth_url),
+    auth_dependency=create_combined_auth(_get_auth_base_url),
+    write_auth_dependency=create_superuser_auth(_get_auth_base_url),
 )
 app.include_router(_settings_router, prefix="/settings", tags=["settings"])
 
