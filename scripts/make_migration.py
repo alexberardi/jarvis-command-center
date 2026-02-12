@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import logging
 import os
 import subprocess
 import sys
@@ -6,10 +7,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+logger = logging.getLogger(__name__)
+
 
 def main():
     if len(sys.argv) < 2:
-        print('Usage: python scripts/make_migration.py "message"')
+        logger.error('Usage: python scripts/make_migration.py "message"')
         sys.exit(1)
 
     # Load .env at repo root
