@@ -7,7 +7,7 @@ before sending to the LLM.
 
 import re
 import logging
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 from app.core.general_context import generate_date_context_object
 

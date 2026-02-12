@@ -2,7 +2,6 @@ import os
 import sys
 import logging
 import time
-from dataclasses import dataclass
 
 import httpx
 from fastapi import Header, HTTPException, Depends

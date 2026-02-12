@@ -7,7 +7,6 @@ Falls back to environment variables and defaults when services aren't found.
 
 import logging
 import os
-from typing import Optional
 
 from jarvis_config_client import (
     init as config_init,
@@ -140,7 +139,7 @@ def _get_url(service_name: str) -> str:
 
 def get_llm_proxy_url() -> str:
     """Get LLM proxy service URL."""
-    return _get_url("jarvis-llm-proxy")
+    return _get_url("jarvis-llm-proxy-api")
 
 
 def get_auth_url() -> str:
