@@ -20,7 +20,7 @@ def run_postgres_tests():
     print("   Database: jarvis_command_center, User: jarvis_user, Password: jarvis_password")
 
     # Set environment for PostgreSQL tests
-    os.environ["DATABASE_URL"] = "postgresql://jarvis_user:jarvis_password@localhost:5433/jarvis_command_center"
+    os.environ["TEST_DATABASE_URL"] = "postgresql://jarvis_user:jarvis_password@localhost:5433/jarvis_command_center"
 
     # Run tests
     cmd = [
@@ -56,7 +56,7 @@ def run_docker_postgres_tests():
 
     try:
         # Set environment for Docker PostgreSQL tests
-        os.environ["DATABASE_URL"] = "postgresql://jarvis_user:jarvis_password@localhost:5433/jarvis_command_center"
+        os.environ["TEST_DATABASE_URL"] = "postgresql://jarvis_user:jarvis_password@localhost:5433/jarvis_command_center"
 
         # Run tests
         cmd = [
@@ -90,7 +90,7 @@ def check_postgres_connection():
         )
         conn.close()
         return True
-    except Exception:
+    except Exception as e:
         return False
 
 
