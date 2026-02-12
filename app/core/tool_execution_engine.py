@@ -267,7 +267,7 @@ class ToolExecutionEngine:
                 args_raw = call.get("function", {}).get("arguments", "{}")
                 try:
                     args_obj = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
-                except Exception:
+                except (json.JSONDecodeError, ValueError, TypeError):
                     args_obj = {}
                 if not isinstance(args_obj, dict):
                     continue

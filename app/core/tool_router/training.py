@@ -70,7 +70,7 @@ def _parse_training_jsonl(jsonl_text: str) -> List[TrainingExample]:
             continue
         try:
             record = json.loads(line)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             continue
         utterance = record.get("utterance")
         tool_name = record.get("tool_name")
