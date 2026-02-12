@@ -5,7 +5,7 @@ Tool router classifier interface and fastText implementation.
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 logger = logging.getLogger("uvicorn")
 

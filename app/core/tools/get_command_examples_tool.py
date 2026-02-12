@@ -10,7 +10,6 @@ from typing import Dict, Any, Optional, List
 
 from app.core.interfaces.iserver_tool import IServerTool
 from app.core.conversation_cache import conversation_cache
-from app.request_models.voice_command_request import CommandDefinition
 
 logger = logging.getLogger("uvicorn")
 

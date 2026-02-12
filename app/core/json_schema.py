@@ -3,7 +3,7 @@ Single source of truth for JSON response format used by LLM providers.
 This module defines the schema and format for voice command responses.
 """
 
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
 class CommandError(BaseModel):

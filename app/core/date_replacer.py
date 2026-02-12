@@ -5,8 +5,7 @@ Converts relative date references to absolute dates using the date context.
 """
 
 import re
-from typing import Dict, List, Tuple, Optional
-from datetime import datetime
+from typing import Dict, List, Tuple
 
 class DateReplacer:
     """Handles replacement of relative date references with absolute dates in voice commands."""

@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from sqlalchemy import Boolean, Column, String, DateTime, Integer, ForeignKey, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Column, String, DateTime, Integer, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime, timedelta
 

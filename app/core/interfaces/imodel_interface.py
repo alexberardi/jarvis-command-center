@@ -8,7 +8,7 @@ and custom implementations can override methods to optimize for their specific m
 
 import json
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from app.request_models.voice_command_request import CommandDefinition
 
 class IModelInterface(ABC):
