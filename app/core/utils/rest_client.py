@@ -7,8 +7,8 @@ def build_jarvis_app_headers() -> dict:
     """
     Build Jarvis app-to-app authentication headers if environment variables are set.
     """
-    app_id = os.getenv("JARVIS_AUTH_APP_ID")
-    app_key = os.getenv("JARVIS_AUTH_APP_KEY")
+    app_id = os.getenv("JARVIS_APP_ID")
+    app_key = os.getenv("JARVIS_APP_KEY")
 
     headers = {}
     if app_id:

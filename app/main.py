@@ -22,7 +22,7 @@ from app.core.malformed_json_extractor import MalformedJsonExtractorService
 from app.core.conversation_cache import conversation_cache
 from app.core.utils.latency_logger import latency_logger
 from . import admin, chat, date_context, node_settings, provisioning
-from app.api import media
+from app.api import media, node_commands
 from app.deps import verify_api_key, get_model_service
 from app.core.model_service import ModelService
 from app.core.utils.rest_client import post  # For test mocking compatibility
@@ -69,8 +69,8 @@ def _setup_remote_logging() -> None:
     try:
         from jarvis_log_client import init as init_log_client, JarvisLogHandler
 
-        app_id = os.getenv("JARVIS_AUTH_APP_ID", "command-center")
-        app_key = os.getenv("JARVIS_AUTH_APP_KEY")
+        app_id = os.getenv("JARVIS_APP_ID", "command-center")
+        app_key = os.getenv("JARVIS_APP_KEY")
         if not app_key:
             return
 
@@ -220,6 +220,9 @@ app.include_router(node_settings.router, prefix="/api/v0", tags=["node-settings"
 
 # Include media proxy router
 app.include_router(media.router, prefix="/api/v0", tags=["media"])
+
+# Include node commands router
+app.include_router(node_commands.router, prefix="/api/v0", tags=["node-commands"])
 
 # Include settings router from shared library
 from jarvis_settings_client import create_settings_router, create_combined_auth, create_superuser_auth
@@ -584,7 +587,6 @@ async def train_adapter(
 @v0_router.post("/adapters/jobs/callback", name="adapter_training_callback")
 async def adapter_training_callback(request: Request):
     """Receive llm-proxy training job callbacks and update node adapter_hash on success."""
-    from app.deps import get_db
     from app.models import Node
 
     callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")

@@ -20,8 +20,8 @@ logger = logging.getLogger("uvicorn")
 # Configuration
 # ============================================================
 
-JARVIS_AUTH_APP_ID = os.getenv("JARVIS_AUTH_APP_ID", "command-center")
-JARVIS_AUTH_APP_KEY = os.getenv("JARVIS_AUTH_APP_KEY")
+JARVIS_APP_ID = os.getenv("JARVIS_APP_ID", "command-center")
+JARVIS_APP_KEY = os.getenv("JARVIS_APP_KEY")
 
 
 def _get_auth_base_url() -> str:
@@ -103,10 +103,10 @@ def _register_node_with_auth(
     Raises:
         HTTPException: If registration fails
     """
-    if not JARVIS_AUTH_APP_KEY:
+    if not JARVIS_APP_KEY:
         raise HTTPException(
             status_code=500,
-            detail="JARVIS_AUTH_APP_KEY not configured for auth integration"
+            detail="JARVIS_APP_KEY not configured for auth integration"
         )
 
     auth_url = _get_auth_base_url().rstrip("/") + "/internal/nodes/register"
@@ -116,8 +116,8 @@ def _register_node_with_auth(
             resp = client.post(
                 auth_url,
                 headers={
-                    "X-Jarvis-App-Id": JARVIS_AUTH_APP_ID,
-                    "X-Jarvis-App-Key": JARVIS_AUTH_APP_KEY,
+                    "X-Jarvis-App-Id": JARVIS_APP_ID,
+                    "X-Jarvis-App-Key": JARVIS_APP_KEY,
                 },
                 json={
                     "node_id": node_id,
@@ -156,8 +156,8 @@ def _deactivate_node_with_auth(node_id: str) -> bool:
 
     Returns True if successful or node not found, False on error.
     """
-    if not JARVIS_AUTH_APP_KEY:
-        logger.warning("JARVIS_AUTH_APP_KEY not configured, skipping auth deactivation")
+    if not JARVIS_APP_KEY:
+        logger.warning("JARVIS_APP_KEY not configured, skipping auth deactivation")
         return True
 
     auth_url = _get_auth_base_url().rstrip("/") + f"/internal/nodes/{node_id}"
@@ -167,8 +167,8 @@ def _deactivate_node_with_auth(node_id: str) -> bool:
             resp = client.delete(
                 auth_url,
                 headers={
-                    "X-Jarvis-App-Id": JARVIS_AUTH_APP_ID,
-                    "X-Jarvis-App-Key": JARVIS_AUTH_APP_KEY,
+                    "X-Jarvis-App-Id": JARVIS_APP_ID,
+                    "X-Jarvis-App-Key": JARVIS_APP_KEY,
                 },
             )
     except httpx.RequestError as exc:
