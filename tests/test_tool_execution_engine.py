@@ -430,6 +430,164 @@ class TestDateKeyInjection:
             # Should have resolved tomorrow to a datetime
             assert args.get("when") or args.get("when") == ""
 
+    @pytest.mark.asyncio
+    async def test_datetime_array_param_symbolic_keys_resolved(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Test that array<datetime> params get symbolic date keys resolved to ISO.
+
+        When a parameter has format: date-time in its items schema, the LLM may
+        return symbolic keys like 'today'. _inject_date_keys should detect the
+        datetime type and resolve them to ISO dates—no special param names needed.
+        """
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": json.dumps({
+                    "message": "Checking weather.",
+                    "tool_calls": [{
+                        "name": "get_weather",
+                        "arguments": {"location": "NYC", "dates": ["today"]}
+                    }]
+                })},
+                "finish_reason": "tool_calls"
+            }],
+            "date_keys": ["today"],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        # array<datetime> schema: items have format: date-time
+        tools = [{
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "properties": {
+                        "location": {"type": "string"},
+                        "dates": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "date-time"}
+                        }
+                    }
+                }
+            }
+        }]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                captured_calls = []
+
+                def capture_calls(tool_calls, **kwargs):
+                    captured_calls.extend(tool_calls)
+                    return ([], tool_calls)
+                mock_executor.execute_tool_calls.side_effect = capture_calls
+
+                with patch("app.core.tool_execution_engine.generate_date_context_object") as mock_date_ctx:
+                    mock_date_ctx.return_value = {
+                        "current": {
+                            "date_iso": "2025-01-15",
+                            "datetime": "2025-01-15T12:00:00-05:00",
+                            "utc_start_of_day": "2025-01-15T05:00:00Z"
+                        },
+                        "relative_dates": {
+                            "today": {"utc_start_of_day": "2025-01-15T05:00:00Z"}
+                        }
+                    }
+
+                    result = await engine.execute(
+                        conversation_id="test-conv-456",
+                        messages=[{"role": "system", "content": "You are a helpful assistant."}],
+                        tools=tools,
+                        user_utterance="what's the weather today"
+                    )
+
+        # The "dates" param (generic name) should have "today" resolved to ISO
+        assert captured_calls, "Expected client tool calls to be captured"
+        args = json.loads(captured_calls[0]["function"]["arguments"])
+        resolved = args.get("dates", [])
+        assert len(resolved) >= 1, f"Expected dates to have at least 1 entry, got {resolved}"
+        # The resolved value should be an ISO datetime, not the symbolic "today"
+        assert resolved[0] != "today", (
+            f"Expected 'today' to be resolved to ISO datetime, but got {resolved}"
+        )
+        assert "2025-01-15" in resolved[0], (
+            f"Expected resolved date to contain 2025-01-15, got {resolved[0]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_datetime_array_filled_from_date_keys(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Test that empty datetime array params get filled from date_keys."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        # LLM returns tool call with empty datetime array but date_keys present
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": json.dumps({
+                    "message": "Getting scores.",
+                    "tool_calls": [{
+                        "name": "get_scores",
+                        "arguments": {"team": "Lakers", "game_dates": []}
+                    }]
+                })},
+                "finish_reason": "tool_calls"
+            }],
+            "date_keys": ["yesterday"],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        # Generic param name "game_dates" — type-based detection, not name-based
+        tools = [{
+            "function": {
+                "name": "get_scores",
+                "parameters": {
+                    "properties": {
+                        "team": {"type": "string"},
+                        "game_dates": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "date-time"}
+                        }
+                    }
+                }
+            }
+        }]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                captured_calls = []
+
+                def capture_calls(tool_calls, **kwargs):
+                    captured_calls.extend(tool_calls)
+                    return ([], tool_calls)
+                mock_executor.execute_tool_calls.side_effect = capture_calls
+
+                with patch("app.core.tool_execution_engine.generate_date_context_object") as mock_date_ctx:
+                    mock_date_ctx.return_value = {
+                        "relative_dates": {
+                            "yesterday": {"utc_start_of_day": "2025-01-14T05:00:00Z"}
+                        }
+                    }
+
+                    result = await engine.execute(
+                        conversation_id="test-conv-789",
+                        messages=[{"role": "system", "content": "You are a helpful assistant."}],
+                        tools=tools,
+                        user_utterance="how did the Lakers do yesterday"
+                    )
+
+        assert captured_calls, "Expected client tool calls to be captured"
+        args = json.loads(captured_calls[0]["function"]["arguments"])
+        resolved = args.get("game_dates", [])
+        assert len(resolved) >= 1, f"Expected game_dates to be filled, got {resolved}"
+        assert "2025-01-14" in resolved[0], (
+            f"Expected resolved date to contain 2025-01-14, got {resolved[0]}"
+        )
+
 
 class TestValidationRequest:
     """Tests for validation request handling."""

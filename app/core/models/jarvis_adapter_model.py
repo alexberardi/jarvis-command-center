@@ -36,6 +36,62 @@ class JarvisAdapterModel(JarvisToolModel):
         """Disable fastText classifier - let LLM + adapter handle routing."""
         return False
 
+    def _build_agent_context_section(self, node_context: Dict[str, Any]) -> str:
+        """Build agent context section (e.g., Home Assistant devices) from node context."""
+        agent_context_section = ""
+        agents_data = node_context.get("agents", {})
+        if not agents_data:
+            return agent_context_section
+
+        ha_data = agents_data.get("home_assistant", {})
+        if not ha_data:
+            return agent_context_section
+
+        # Include light controls for room-based light control
+        light_controls = ha_data.get("light_controls", {})
+        if light_controls:
+            agent_context_section += "\nAvailable Light Controls (room groups):\n"
+            for name, info in light_controls.items():
+                entity_id = info.get("entity_id", "")
+                state = info.get("state", "unknown")
+                agent_context_section += f"- {name}: {entity_id} (currently {state})\n"
+
+        # Include device controls for other device types
+        device_controls = ha_data.get("device_controls", {})
+        if device_controls:
+            # Include individual lights (not room groups)
+            lights = device_controls.get("light", [])
+            room_group_ids = {info.get("entity_id") for info in light_controls.values()} if light_controls else set()
+            individual_lights = [l for l in lights if l.get("entity_id") not in room_group_ids]
+            if individual_lights:
+                agent_context_section += "\nAvailable Individual Lights:\n"
+                for dev in individual_lights[:15]:  # Limit to 15
+                    entity_id = dev.get("entity_id", "")
+                    name = dev.get("name", "")
+                    state = dev.get("state", "unknown")
+                    agent_context_section += f"- {name}: {entity_id} (currently {state})\n"
+
+            # Include switches (HA devices - use control_device, NOT set_timer/check_timers)
+            switches = device_controls.get("switch", [])
+            if switches:
+                agent_context_section += "\nAvailable Switches (HA devices - use control_device/get_device_status):\n"
+                for dev in switches[:10]:  # Limit to 10
+                    entity_id = dev.get("entity_id", "")
+                    name = dev.get("name", "")
+                    state = dev.get("state", "unknown")
+                    agent_context_section += f"- {name}: {entity_id} (currently {state})\n"
+
+            # Include scenes
+            scenes = device_controls.get("scene", [])
+            if scenes:
+                agent_context_section += "\nAvailable Scenes:\n"
+                for dev in scenes[:20]:  # Limit to 20
+                    entity_id = dev.get("entity_id", "")
+                    name = dev.get("name", "")
+                    agent_context_section += f"- {name}: {entity_id}\n"
+
+        return agent_context_section
+
     def _build_system_prompt(
         self,
         node_context: Dict[str, Any],
@@ -84,54 +140,7 @@ class JarvisAdapterModel(JarvisToolModel):
             primary_examples_only=True
         )
 
-        # Build agent context section (e.g., Home Assistant devices)
-        agent_context_section = ""
-        agents_data = node_context.get("agents", {})
-        if agents_data:
-            ha_data = agents_data.get("home_assistant", {})
-            if ha_data:
-                # Include light controls for room-based light control
-                light_controls = ha_data.get("light_controls", {})
-                if light_controls:
-                    agent_context_section += "\nAvailable Light Controls (room groups):\n"
-                    for name, info in light_controls.items():
-                        entity_id = info.get("entity_id", "")
-                        state = info.get("state", "unknown")
-                        agent_context_section += f"- {name}: {entity_id} (currently {state})\n"
-
-                # Include device controls for other device types
-                device_controls = ha_data.get("device_controls", {})
-                if device_controls:
-                    # Include individual lights (not room groups)
-                    lights = device_controls.get("light", [])
-                    room_group_ids = {info.get("entity_id") for info in light_controls.values()} if light_controls else set()
-                    individual_lights = [l for l in lights if l.get("entity_id") not in room_group_ids]
-                    if individual_lights:
-                        agent_context_section += "\nAvailable Individual Lights:\n"
-                        for dev in individual_lights[:15]:  # Limit to 15
-                            entity_id = dev.get("entity_id", "")
-                            name = dev.get("name", "")
-                            state = dev.get("state", "unknown")
-                            agent_context_section += f"- {name}: {entity_id} (currently {state})\n"
-
-                    # Include switches (HA devices - use control_device, NOT set_timer/check_timers)
-                    switches = device_controls.get("switch", [])
-                    if switches:
-                        agent_context_section += "\nAvailable Switches (HA devices - use control_device/get_device_status):\n"
-                        for dev in switches[:10]:  # Limit to 10
-                            entity_id = dev.get("entity_id", "")
-                            name = dev.get("name", "")
-                            state = dev.get("state", "unknown")
-                            agent_context_section += f"- {name}: {entity_id} (currently {state})\n"
-
-                    # Include scenes
-                    scenes = device_controls.get("scene", [])
-                    if scenes:
-                        agent_context_section += "\nAvailable Scenes:\n"
-                        for dev in scenes[:20]:  # Limit to 20
-                            entity_id = dev.get("entity_id", "")
-                            name = dev.get("name", "")
-                            agent_context_section += f"- {name}: {entity_id}\n"
+        agent_context_section = self._build_agent_context_section(node_context)
 
         system_prompt = f"""You are Jarvis, a voice assistant that uses tools.
 Context: room={room}, user={user}, style={voice_mode}

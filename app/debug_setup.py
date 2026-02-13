@@ -3,8 +3,11 @@ Debug setup module for handling debugpy configuration.
 This module handles the optional debugpy import and setup to avoid linter errors.
 """
 
+import logging
 import os
 from typing import Optional
+
+logger = logging.getLogger("uvicorn")
 
 def setup_debugger(host: str = "0.0.0.0", port: Optional[int] = None) -> Optional[bool]:
     """
@@ -26,17 +29,17 @@ def setup_debugger(host: str = "0.0.0.0", port: Optional[int] = None) -> Optiona
         try:
             port = int(debug_port)
         except ValueError:
-            print(f"⚠️  Invalid DEBUG_PORT '{debug_port}', falling back to 5678")
+            logger.warning("Invalid DEBUG_PORT '%s', falling back to 5678", debug_port)
             port = 5678
     
     try:
         import debugpy
         debugpy.listen((host, port))
-        print(f"🔧 Debugger listening on {host}:{port}")
+        logger.info("Debugger listening on %s:%s", host, port)
         return True
     except ImportError:
-        print("⚠️  debugpy not available - debugging disabled")
+        logger.warning("debugpy not available - debugging disabled")
         return False
     except Exception as e:
-        print(f"⚠️  Failed to start debugger: {e}")
+        logger.warning("Failed to start debugger: %s", e)
         return False 

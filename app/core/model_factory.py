@@ -26,26 +26,29 @@ class ModelFactory:
     - app/core/models/ (built-in models)
     - app/core/models/custom/ (custom models)
     
-    Matches models by their `name` property against JARVIS_MODEL_INTERFACE env variable.
+    Matches models by their `name` property against the ``llm.interface`` database
+    setting (cascade: DB → JARVIS_MODEL_INTERFACE env var → default).
     """
-    
+
     @classmethod
     def create_model(cls, model_name: Optional[str] = None) -> IModelInterface:
         """
         Create a model instance based on configuration.
-        
+
         Args:
-            model_name: Specific model name to create. If None, uses environment variable.
-            
+            model_name: Specific model name to create. If None, reads from
+                        database setting ``llm.interface`` (falls back to
+                        JARVIS_MODEL_INTERFACE env var, then JarvisToolModel).
+
         Returns:
             Model implementation instance
-            
+
         Raises:
             ValueError: If model name is not found
         """
-        # Determine model name from env or parameter
+        # Determine model name: explicit arg → DB setting → env var → default
         if model_name is None:
-            model_name = os.getenv("JARVIS_MODEL_INTERFACE", "JarvisToolModel")
+            model_name = ModelFactory._resolve_model_name()
         
         logger.info(f"🏭 Creating model: {model_name}")
         
@@ -87,6 +90,31 @@ class ModelFactory:
             f"Model '{model_name}' not found. Available models: {available}"
         )
     
+    @staticmethod
+    def _resolve_model_name() -> str:
+        """Resolve model name from database settings with env var fallback.
+
+        Precedence (handled by settings service):
+        1. Database value (user > node > household > system)
+        2. JARVIS_MODEL_INTERFACE environment variable
+        3. Definition default (JarvisAdapterModel)
+        4. Hardcoded fallback (JarvisToolModel)
+        """
+        try:
+            from app.services.settings_service import get_settings_service
+            settings = get_settings_service()
+            name = settings.get("llm.interface")
+            if name:
+                logger.info(f"🏭 Resolved model from settings: {name}")
+                return name
+        except Exception as e:
+            logger.warning(f"🏭 Could not read llm.interface from settings: {e}")
+
+        # Final fallback if settings service is unavailable
+        fallback = os.getenv("JARVIS_MODEL_INTERFACE", "JarvisToolModel")
+        logger.info(f"🏭 Using env/default fallback for model: {fallback}")
+        return fallback
+
     @classmethod
     def get_available_models(cls) -> List[str]:
         """

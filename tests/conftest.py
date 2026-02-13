@@ -3,15 +3,39 @@ import os
 import uuid
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from app.models import Base, Node, ProvisioningToken, Setting, SettingsRequest, SettingsSnapshot
+from alembic.config import Config
+from alembic import command
+from app.models import Node
 
 
-def get_test_database_url():
-    """Get the test database URL from environment or use default Docker setup."""
+def get_test_database_url() -> str:
+    """Get the test database URL from environment or use default.
+
+    Checks TEST_DATABASE_URL first to keep the test database separate
+    from the dev database, then falls back to DATABASE_URL and finally
+    the default local PostgreSQL setup.
+    """
     return os.getenv(
-        "DATABASE_URL",
-        "postgresql://jarvis_user:jarvis_password@localhost:5433/jarvis_command_center"
+        "TEST_DATABASE_URL",
+        os.getenv(
+            "DATABASE_URL",
+            "postgresql://jarvis_user:jarvis_password@localhost:5433/jarvis_command_center"
+        )
     )
+
+
+def _run_alembic_upgrade(database_url: str) -> None:
+    """Run alembic migrations against the given database URL."""
+    old_db_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = database_url
+    try:
+        alembic_cfg = Config("alembic.ini")
+        command.upgrade(alembic_cfg, "head")
+    finally:
+        if old_db_url is not None:
+            os.environ["DATABASE_URL"] = old_db_url
+        else:
+            os.environ.pop("DATABASE_URL", None)
 
 
 @pytest.fixture(scope="session")
@@ -20,22 +44,15 @@ def test_engine():
     database_url = get_test_database_url()
     engine = create_engine(database_url)
 
-    # Create all tables
-    Base.metadata.create_all(bind=engine)
+    # Run alembic migrations to create/update tables
+    _run_alembic_upgrade(database_url)
 
     # Clean up any stale test data from previous runs
     with engine.connect() as conn:
-        # Settings table may not exist yet on first run, so we use try/except
-        try:
-            conn.execute(text("DELETE FROM settings WHERE household_id LIKE 'h%' OR household_id IS NULL"))
-        except Exception:
-            pass  # Table doesn't exist yet
+        conn.execute(text("DELETE FROM settings WHERE household_id LIKE 'h%' OR household_id IS NULL"))
         conn.execute(text("DELETE FROM settings_snapshots WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
         conn.execute(text("DELETE FROM settings_requests WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
-        try:
-            conn.execute(text("DELETE FROM provisioning_tokens WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
-        except Exception:
-            pass  # Table may not exist on first run
+        conn.execute(text("DELETE FROM provisioning_tokens WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
         conn.execute(text("DELETE FROM nodes WHERE node_id LIKE 'test-%' OR node_id LIKE 'node-%'"))
         conn.commit()
 
