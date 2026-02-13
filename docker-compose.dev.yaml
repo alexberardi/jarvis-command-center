@@ -14,6 +14,7 @@ services:
       - ../jarvis-log-client:/app/jarvis-log-client
       - ../jarvis-config-client:/app/jarvis-config-client
       - ../jarvis-settings-client:/app/jarvis-settings-client
+      - ../jarvis-auth-client:/app/jarvis-auth-client
     env_file:
       - .env
     environment:
@@ -26,6 +27,6 @@ services:
     extra_hosts:
       - "${DOCKER_HOST_ALIAS:-host.docker.internal}:host-gateway"
     command: >
-      sh -c "pip install -q -e /app/jarvis-log-client -e /app/jarvis-config-client -e /app/jarvis-settings-client &&
+      sh -c "pip install -q -e /app/jarvis-log-client -e /app/jarvis-config-client -e /app/jarvis-settings-client -e /app/jarvis-auth-client &&
              alembic upgrade head &&
              python -Xfrozen_modules=off -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload"

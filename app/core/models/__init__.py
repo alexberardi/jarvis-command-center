@@ -8,12 +8,15 @@ can have different inference strategies.
 Available Models:
 - JarvisToolModel: Tool-based model for prompt-driven tool calling
 - JarvisAdapterModel: Slim prompt model for adapter-tuned usage
+- JarvisTrainedAdapterModel: Minimal prompt for LoRA-trained adapters
 """
 
 from app.core.models.jarvis_tool_model import JarvisToolModel
 from app.core.models.jarvis_adapter_model import JarvisAdapterModel
+from app.core.models.jarvis_trained_adapter_model import JarvisTrainedAdapterModel
 
 __all__ = [
     "JarvisToolModel",
-    "JarvisAdapterModel"
+    "JarvisAdapterModel",
+    "JarvisTrainedAdapterModel",
 ]

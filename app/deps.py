@@ -34,6 +34,8 @@ def _get_auth_base_url() -> str:
             return service_config.get_auth_url()
     except (ImportError, AttributeError):
         pass
+    except Exception as e:
+        logger.warning("Service discovery failed for auth, falling back to env var: %s", e)
     # Fallback to env var
     return os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
 
@@ -161,8 +163,8 @@ def get_model_service() -> ModelService:
     """
     Get the configured model service instance.
 
-    Uses JARVIS_MODEL_INTERFACE environment variable to determine which model to use.
-    Defaults to BASE_MODEL if not specified.
+    Uses the ``llm.interface`` database setting to determine which model to use
+    (falls back to JARVIS_MODEL_INTERFACE env var, then default).
 
     Available models:
     - JarvisToolModel: Tool-based model using JSON tool calls
