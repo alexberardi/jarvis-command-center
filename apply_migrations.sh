@@ -1,15 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Apply latest Alembic migrations using Python helper
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Activate virtual environment
-if [ -d "$SCRIPT_DIR/.venv" ]; then
-    source "$SCRIPT_DIR/.venv/bin/activate"
-elif [ -d "$SCRIPT_DIR/venv" ]; then
-    source "$SCRIPT_DIR/venv/bin/activate"
+VENV_PYTHON="${SCRIPT_DIR}/.venv/bin/python"
+if [ ! -x "$VENV_PYTHON" ]; then
+    VENV_PYTHON="${SCRIPT_DIR}/venv/bin/python"
 fi
 
-python3 scripts/apply_migrations.py
+if [ ! -x "$VENV_PYTHON" ]; then
+    echo "Error: .venv not found. Create it with:"
+    echo "  python3 -m venv .venv && .venv/bin/pip install -e ."
+    exit 1
+fi
 
+# Load .env for DATABASE_URL / MIGRATIONS_DATABASE_URL
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+    set -a
+    source "${SCRIPT_DIR}/.env"
+    set +a
+fi
+
+# Use MIGRATIONS_DATABASE_URL if set, otherwise DATABASE_URL
+if [ -n "${MIGRATIONS_DATABASE_URL:-}" ]; then
+    export DATABASE_URL="$MIGRATIONS_DATABASE_URL"
+fi
+
+exec "$VENV_PYTHON" -m alembic upgrade head

@@ -80,8 +80,26 @@ python run_database_tests.py --type docker
 
 ## Dependencies
 
+**Python Libraries:**
 - FastAPI, SQLAlchemy, Alembic
 - psycopg2 (PostgreSQL driver)
 - httpx (service calls)
 - fasttext (tool routing)
 - jarvis-log-client
+
+**Service Dependencies:**
+- ✅ **Required**: `jarvis-llm-proxy-api` (8000) - LLM inference for command parsing
+- ✅ **Required**: `jarvis-auth` (8007) - Node authentication validation
+- ✅ **Required**: PostgreSQL - Database for nodes, conversations
+- ⚠️ **Optional**: `jarvis-logs` (8006) - Centralized logging (degrades to console if unavailable)
+- ⚠️ **Optional**: `jarvis-whisper-api` (8012) - Speech-to-text (if used)
+- ⚠️ **Optional**: `jarvis-ocr-service` (5009) - OCR (if used)
+- ⚠️ **Optional**: `jarvis-config-service` (8013) - Service discovery
+
+**Used By:**
+- `jarvis-node-setup` - Pi Zero voice nodes send commands here
+
+**Impact if Down:**
+- ❌ Voice commands cannot be processed
+- ❌ Nodes cannot communicate with Jarvis
+- ❌ No LLM-based intent classification or tool routing
