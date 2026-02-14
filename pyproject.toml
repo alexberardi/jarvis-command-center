@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-command-center"
+version = "0.1.0"
+description = "Central voice command API for the Jarvis ecosystem"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "sqlalchemy",
+    "alembic",
+    "pydantic",
+    "watchdog",
+    "python-dotenv",
+    "httpx",
+    "websockets",
+    "debugpy",
+    "rapidfuzz",
+    "psycopg2-binary",
+    "pytz",
+    "fasttext",
+    "numpy<2",
+    "paho-mqtt",
+    "jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@main",
+    "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@main",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
