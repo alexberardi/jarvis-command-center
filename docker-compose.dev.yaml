@@ -2,8 +2,7 @@ services:
   jarvis-voice-api:
     build: .
     ports:
-      - "${PORT:-8002}:8002"
-      - "${DEBUG_PORT:-5678}:${DEBUG_PORT:-5678}"
+      - "8002:8002"
     volumes:
       - ./app:/app/app
       - ./data:/app/data
@@ -15,18 +14,35 @@ services:
       - ../jarvis-config-client:/app/jarvis-config-client
       - ../jarvis-settings-client:/app/jarvis-settings-client
       - ../jarvis-auth-client:/app/jarvis-auth-client
+      - ../jarvis-mcp-client:/app/jarvis-mcp-client
     env_file:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
-      - DEBUG=${DEBUG:-true}
-      - DEBUG_PORT=${DEBUG_PORT:-5678}
       # Use DB_URL from .env (central postgres)
       - DATABASE_URL=${DB_URL}
-      - JARVIS_CONFIG_URL_STYLE=dockerized
     extra_hosts:
       - "${DOCKER_HOST_ALIAS:-host.docker.internal}:host-gateway"
     command: >
-      sh -c "pip install -q -e /app/jarvis-log-client -e /app/jarvis-config-client -e /app/jarvis-settings-client -e /app/jarvis-auth-client &&
+      sh -c "pip install -q -e /app/jarvis-log-client -e /app/jarvis-config-client -e /app/jarvis-settings-client -e /app/jarvis-auth-client -e /app/jarvis-mcp-client &&
              alembic upgrade head &&
              python -Xfrozen_modules=off -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload"
+
+  postgres:
+    profiles: ["standalone"]
+    image: postgres:15
+    environment:
+      POSTGRES_DB: jarvis_command_center
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - cc-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  cc-pg-data:
