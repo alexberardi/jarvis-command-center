@@ -22,7 +22,7 @@ def get_database_url() -> str:
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
 
-    if not database_url.startswith("postgresql://"):
+    if not database_url.startswith(("postgresql://", "postgresql+")):
         raise ValueError(
             f"Invalid database URL. Expected PostgreSQL URL starting with 'postgresql://', "
             f"got: {database_url[:20]}..."
