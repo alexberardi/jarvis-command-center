@@ -24,7 +24,9 @@ services:
     extra_hosts:
       - "${DOCKER_HOST_ALIAS:-host.docker.internal}:host-gateway"
     command: >
-      sh -c "pip install -q -e /app/jarvis-log-client -e /app/jarvis-config-client -e /app/jarvis-settings-client -e /app/jarvis-auth-client -e /app/jarvis-mcp-client &&
+      sh -c "for lib in jarvis-log-client jarvis-config-client jarvis-settings-client jarvis-auth-client jarvis-mcp-client; do
+               [ -f /app/$$lib/pyproject.toml ] && pip install -q -e /app/$$lib || echo \"SKIP $$lib (not found)\";
+             done &&
              alembic upgrade head &&
              python -Xfrozen_modules=off -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload"
 
