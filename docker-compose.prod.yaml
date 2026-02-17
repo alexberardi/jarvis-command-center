@@ -1,6 +1,23 @@
 version: '3.9'
 
 services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      - JARVIS_DOMAIN=${JARVIS_DOMAIN:-localhost}
+      - CADDY_PORT=${CADDY_PORT:-443}
+    depends_on:
+      jarvis-voice-api:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: postgres:15
     environment:
@@ -40,3 +57,5 @@ services:
 
 volumes:
   postgres_data:
+  caddy-data:
+  caddy-config:

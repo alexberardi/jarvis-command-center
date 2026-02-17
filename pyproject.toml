@@ -25,6 +25,7 @@ dependencies = [
     "fasttext",
     "numpy<2",
     "paho-mqtt",
+    "cryptography",
     "jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@main",
     "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@main",
 ]
