@@ -23,9 +23,90 @@ class Node(Base):
     # Per-node LoRA adapter hash (set after training completes)
     adapter_hash = Column(String, nullable=True)
 
+    # Smart home: link to Room entity and household
+    room_id = Column(String(36), ForeignKey('rooms.id', ondelete='SET NULL', use_alter=True), nullable=True)
+    household_id = Column(String(255), nullable=True, index=True)
+
     # Relationships
     settings_requests = relationship("SettingsRequest", back_populates="node", cascade="all, delete-orphan")
     settings_snapshots = relationship("SettingsSnapshot", back_populates="node", cascade="all, delete-orphan")
+    room_ref = relationship("Room", back_populates="nodes", foreign_keys=[room_id])
+    config_pushes = relationship("ConfigPush", back_populates="node", cascade="all, delete-orphan")
+
+
+class Room(Base):
+    __tablename__ = 'rooms'
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    household_id = Column(String(255), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    normalized_name = Column(String(255), nullable=False)
+    icon = Column(String(50), nullable=True)
+    ha_area_id = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('household_id', 'normalized_name', name='uq_room_household_name'),
+    )
+
+    # Relationships
+    devices = relationship("Device", back_populates="room")
+    nodes = relationship("Node", back_populates="room_ref", foreign_keys=[Node.room_id])
+
+
+class Device(Base):
+    __tablename__ = 'devices'
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    household_id = Column(String(255), nullable=False, index=True)
+    room_id = Column(String(36), ForeignKey('rooms.id', ondelete='SET NULL'), nullable=True)
+    entity_id = Column(String(255), nullable=False)
+    name = Column(String(255), nullable=False)
+    domain = Column(String(50), nullable=False)
+    device_class = Column(String(100), nullable=True)
+    manufacturer = Column(String(255), nullable=True)
+    model = Column(String(255), nullable=True)
+    source = Column(String(50), default="home_assistant")
+    ha_device_id = Column(String(255), nullable=True)
+    is_controllable = Column(Boolean, default=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('household_id', 'entity_id', name='uq_device_household_entity'),
+    )
+
+    # Relationships
+    room = relationship("Room", back_populates="devices")
+
+
+class ConfigPush(Base):
+    """Encrypted config blob staged for a node to pick up via MQTT + poll.
+
+    Flow:
+    1. Mobile encrypts config with K2 and POSTs to CC
+    2. CC stores the blob and publishes MQTT notification
+    3. Node hears MQTT, GETs the blob from CC
+    4. Node decrypts with K2 and writes to local secrets DB
+    5. Node ACKs (marks consumed)
+
+    Auth pushes (config_type="auth:*") set expires_at to auto-expire
+    after 5 minutes, preventing stale tokens from sitting in the DB.
+    """
+    __tablename__ = 'config_pushes'
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    config_type = Column(String(50), nullable=False)  # e.g. "home_assistant", "auth:home_assistant"
+    ciphertext = Column(Text, nullable=False)  # base64url encoded
+    nonce = Column(Text, nullable=False)       # base64url encoded
+    tag = Column(Text, nullable=False)         # base64url encoded
+    status = Column(String(20), nullable=False, default="pending")  # pending, consumed
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    consumed_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)  # null = no expiry; auth pushes set 5 min TTL
+
+    # Relationships
+    node = relationship("Node", back_populates="config_pushes")
 
 
 class SettingsRequest(Base):
@@ -125,6 +206,45 @@ class Setting(Base):
     __table_args__ = (
         UniqueConstraint('key', 'household_id', 'node_id', 'user_id', name='uq_setting_scope'),
     )
+
+
+class AuthSession(Base):
+    """OAuth session managed by JCC as redirect authority.
+
+    Flow:
+    1. Mobile creates session (status=pending) with provider + auth config
+    2. JCC generates state + PKCE, builds authorize_url, returns session_id + URL
+    3. Mobile opens authorize_url in WebView → provider redirects to JCC callback
+    4. JCC validates state, exchanges code for tokens, encrypts + stores them
+    5. Session marked active; MQTT notification sent
+    6. Node pulls credentials from JCC via app-to-app auth
+
+    Tokens are encrypted at rest with AES-256-GCM using JARVIS_TOKEN_ENCRYPTION_KEY.
+    """
+    __tablename__ = 'auth_sessions'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    provider = Column(String(100), nullable=False)           # "home_assistant"
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    status = Column(String(20), nullable=False, default="pending")  # pending → active → consumed
+    state = Column(String(64), nullable=False, unique=True)  # CSRF token
+    code_verifier = Column(String(128), nullable=True)       # PKCE (null if provider doesn't support it)
+    provider_base_url = Column(String(500), nullable=True)   # e.g., "http://192.168.1.100:8123"
+    authorize_url = Column(Text, nullable=True)              # Full URL mobile opens
+    exchange_url = Column(Text, nullable=True)               # Token exchange endpoint
+    client_id = Column(String(255), nullable=False)
+
+    # Result (populated after successful exchange, encrypted at rest)
+    access_token_enc = Column(Text, nullable=True)
+    refresh_token_enc = Column(Text, nullable=True)
+    token_data_enc = Column(Text, nullable=True)             # Full token response, encrypted
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)            # Session expires after 10 min
+    completed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    node = relationship("Node", backref="auth_sessions")
 
 
 class ProvisioningToken(Base):

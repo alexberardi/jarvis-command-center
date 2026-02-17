@@ -22,7 +22,7 @@ from app.core.malformed_json_extractor import MalformedJsonExtractorService
 from app.core.conversation_cache import conversation_cache
 from app.core.utils.latency_logger import latency_logger
 from . import admin, chat, date_context, node_settings, provisioning
-from app.api import media, node_commands
+from app.api import media, node_commands, oauth, smart_home
 from app.deps import verify_api_key, get_model_service
 from app.core.model_service import ModelService
 from app.core.utils.rest_client import post  # For test mocking compatibility
@@ -223,6 +223,12 @@ app.include_router(media.router, prefix="/api/v0", tags=["media"])
 
 # Include node commands router
 app.include_router(node_commands.router, prefix="/api/v0", tags=["node-commands"])
+
+# Include smart home router (rooms, devices, config push)
+app.include_router(smart_home.router, prefix="/api/v1", tags=["smart-home"])
+
+# Include OAuth session router (JCC as redirect authority)
+app.include_router(oauth.router, tags=["oauth"])
 
 # Include settings router from shared library
 from jarvis_settings_client import create_settings_router, create_combined_auth, create_superuser_auth
