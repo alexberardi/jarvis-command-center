@@ -11,7 +11,7 @@ from jarvis_auth_client.headers import get_app_headers, build_context_headers
 from app.services.settings_service import get_settings_service
 
 # Default TTS URL if not configured in settings
-DEFAULT_TTS_URL = "http://localhost:8009"
+DEFAULT_TTS_URL = "http://localhost:7707"
 
 
 class TTSClient:

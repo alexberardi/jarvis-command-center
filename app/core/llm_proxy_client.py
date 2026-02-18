@@ -36,7 +36,7 @@ class LLMProxyClient:
         except (ImportError, AttributeError):
             pass  # Service config not available, use env var fallback
         # Fallback to env var
-        return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
+        return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:7704")
     
     def _build_url(self, endpoint: str) -> str:
         """Build full URL from endpoint."""

@@ -22,7 +22,7 @@ from app.core.malformed_json_extractor import MalformedJsonExtractorService
 from app.core.conversation_cache import conversation_cache
 from app.core.utils.latency_logger import latency_logger
 from . import admin, chat, date_context, node_settings, provisioning
-from app.api import media, node_commands, oauth, smart_home
+from app.api import media, node_commands, oauth, smart_home, test_commands
 from app.deps import verify_api_key, get_model_service
 from app.core.model_service import ModelService
 from app.core.utils.rest_client import post  # For test mocking compatibility
@@ -132,6 +132,17 @@ async def startup_event():
     # Then set up remote logging
     _setup_remote_logging()
 
+    # Connect MCP client (non-blocking, service works without it)
+    try:
+        from jarvis_mcp_client import init as init_mcp
+        mcp_url = os.getenv("JARVIS_MCP_URL", "http://localhost:7709")
+        await init_mcp(mcp_url=mcp_url)
+        logger.info("MCP client connected to %s", mcp_url)
+    except ImportError:
+        logger.info("jarvis-mcp-client not installed, MCP tools unavailable")
+    except Exception as e:
+        logger.warning("MCP client connection failed (non-fatal): %s", e)
+
     # Clean up expired provisioning tokens from previous runs
     try:
         from app.db import get_session_local
@@ -163,6 +174,19 @@ async def startup_event():
 
     asyncio.create_task(_periodic_cleanup())
 
+    # Include settings router (after service_config is initialized so auth URL resolves)
+    from jarvis_settings_client import create_settings_router, create_combined_auth, create_superuser_auth
+    from app.services.settings_service import get_settings_service
+    from app.core import service_config
+
+    auth_url = service_config.get_auth_url()
+    _settings_router = create_settings_router(
+        service=get_settings_service(),
+        auth_dependency=create_combined_auth(auth_url),
+        write_auth_dependency=create_superuser_auth(auth_url),
+    )
+    app.include_router(_settings_router, prefix="/settings", tags=["settings"])
+
 
 # Add shutdown event for cleanup
 @app.on_event("shutdown")
@@ -181,6 +205,14 @@ async def shutdown_event():
             node_settings.mqtt_client.disconnect()
     except Exception as e:
         pass
+    # Disconnect MCP client
+    try:
+        from jarvis_mcp_client import get_client
+        client = get_client()
+        if client and client.is_connected():
+            await client.disconnect()
+    except Exception as e:
+        logger.debug("MCP client disconnect error (non-fatal): %s", e)
     # Flush and close remote log handler
     for handler in logger.handlers:
         if hasattr(handler, 'close'):
@@ -230,17 +262,10 @@ app.include_router(smart_home.router, prefix="/api/v1", tags=["smart-home"])
 # Include OAuth session router (JCC as redirect authority)
 app.include_router(oauth.router, tags=["oauth"])
 
-# Include settings router from shared library
-from jarvis_settings_client import create_settings_router, create_combined_auth, create_superuser_auth
-from app.services.settings_service import get_settings_service
-from app.deps import _get_auth_base_url
+# Include test commands router (app-to-app auth)
+app.include_router(test_commands.router, prefix="/api/v0", tags=["testing"])
 
-_settings_router = create_settings_router(
-    service=get_settings_service(),
-    auth_dependency=create_combined_auth(_get_auth_base_url),
-    write_auth_dependency=create_superuser_auth(_get_auth_base_url),
-)
-app.include_router(_settings_router, prefix="/settings", tags=["settings"])
+# Settings router is included in startup_event after service_config is initialized
 
 
 # Basic routes
@@ -568,7 +593,7 @@ async def train_adapter(
     if service_config.is_initialized():
         llm_proxy_base_url = service_config.get_llm_proxy_url()
     else:
-        llm_proxy_base_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
+        llm_proxy_base_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:7704")
     queue_url = f"{llm_proxy_base_url.rstrip('/')}/internal/queue/enqueue"
     headers = {}
     internal_token = os.getenv("LLM_PROXY_INTERNAL_TOKEN")

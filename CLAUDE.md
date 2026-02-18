@@ -9,7 +9,7 @@ Central voice command API. Routes voice from Pi Zero nodes through speech-to-tex
 bash run-docker-dev.sh
 
 # Health check
-curl http://localhost:8002/health
+curl http://localhost:7703/health
 
 # Test (requires PostgreSQL via Docker)
 python run_database_tests.py --type docker
@@ -88,13 +88,13 @@ python run_database_tests.py --type docker
 - jarvis-log-client
 
 **Service Dependencies:**
-- ✅ **Required**: `jarvis-llm-proxy-api` (8000) - LLM inference for command parsing
-- ✅ **Required**: `jarvis-auth` (8007) - Node authentication validation
+- ✅ **Required**: `jarvis-llm-proxy-api` (7704) - LLM inference for command parsing
+- ✅ **Required**: `jarvis-auth` (7701) - Node authentication validation
 - ✅ **Required**: PostgreSQL - Database for nodes, conversations
-- ⚠️ **Optional**: `jarvis-logs` (8006) - Centralized logging (degrades to console if unavailable)
-- ⚠️ **Optional**: `jarvis-whisper-api` (8012) - Speech-to-text (if used)
-- ⚠️ **Optional**: `jarvis-ocr-service` (5009) - OCR (if used)
-- ⚠️ **Optional**: `jarvis-config-service` (8013) - Service discovery
+- ⚠️ **Optional**: `jarvis-logs` (7702) - Centralized logging (degrades to console if unavailable)
+- ⚠️ **Optional**: `jarvis-whisper-api` (7706) - Speech-to-text (if used)
+- ⚠️ **Optional**: `jarvis-ocr-service` (7031) - OCR (if used)
+- ⚠️ **Optional**: `jarvis-config-service` (7700) - Service discovery
 
 **Used By:**
 - `jarvis-node-setup` - Pi Zero voice nodes send commands here

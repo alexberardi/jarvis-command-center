@@ -94,7 +94,7 @@ The database test suite covers:
 
 ## Dev Run
 ```bash
-uvicorn app.main:app --reload --port 8002
+uvicorn app.main:app --reload --port 7703
 ```
 Optional debugger port override:
 ```bash
@@ -139,7 +139,7 @@ docker-compose -f docker-compose.postgres.yaml up --build
 ## Docker Run (Production-style)
 ```bash
 docker build -t voice-api .
-docker run -p 8002:8002 voice-api
+docker run -p 7703:7703 voice-api
 ```
 
 ## Endpoints

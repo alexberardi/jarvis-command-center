@@ -156,7 +156,7 @@ import requests
 import json
 
 API_KEY = "your-api-key"
-BASE_URL = "http://localhost:8000/api/v0"
+BASE_URL = "http://localhost:7703/api/v0"
 
 headers = {"X-API-Key": API_KEY}
 
@@ -343,7 +343,7 @@ The LLM proxy API must support:
 
 ```bash
 # Start conversation
-curl -X POST http://localhost:8000/api/v0/conversation/start \
+curl -X POST http://localhost:7703/api/v0/conversation/start \
   -H "X-API-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -359,7 +359,7 @@ curl -X POST http://localhost:8000/api/v0/conversation/start \
   }'
 
 # Send command
-curl -X POST http://localhost:8000/api/v0/voice/command \
+curl -X POST http://localhost:7703/api/v0/voice/command \
   -H "X-API-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{

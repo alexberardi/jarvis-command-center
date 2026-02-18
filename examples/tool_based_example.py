@@ -18,7 +18,7 @@ from typing import Dict, Any, List
 class JarvisToolClient:
     """Example client for tool-based Jarvis API."""
     
-    def __init__(self, api_key: str, base_url: str = "http://localhost:8000"):
+    def __init__(self, api_key: str, base_url: str = "http://localhost:7703"):
         self.api_key = api_key
         self.base_url = base_url
         self.headers = {"X-API-Key": api_key}
@@ -217,7 +217,7 @@ def main():
     # Initialize client
     client = JarvisToolClient(
         api_key="your-api-key-here",
-        base_url="http://localhost:8000"
+        base_url="http://localhost:7703"
     )
     
     # Define client tools

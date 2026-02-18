@@ -30,7 +30,7 @@ class MalformedJsonExtractorService:
                 return service_config.get_llm_proxy_url()
         except (ImportError, AttributeError):
             pass  # Service config not available, use env var fallback
-        return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:8000")
+        return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:7704")
         
     async def extract_json_from_malformed_response(
         self, 

@@ -17,7 +17,7 @@ services:
   jarvis-voice-api:
     build: .
     ports:
-      - "8002:8002"
+      - "7703:7703"
     volumes:
       - ./app:/app/app
       - ./data:/app/data
@@ -43,7 +43,7 @@ services:
                [ -f /app/$$lib/pyproject.toml ] && pip install -q -e /app/$$lib || echo \"SKIP $$lib (not found)\";
              done &&
              alembic upgrade head &&
-             python -Xfrozen_modules=off -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload"
+             python -Xfrozen_modules=off -m uvicorn app.main:app --host 0.0.0.0 --port 7703 --reload"
 
   postgres:
     profiles: ["standalone"]

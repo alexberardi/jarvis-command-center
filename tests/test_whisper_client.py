@@ -52,10 +52,10 @@ class TestWhisperClientInit:
         from app.core.clients.whisper_client import WhisperClient
 
         with patch("app.core.clients.whisper_client.get_settings_service") as mock_settings:
-            mock_settings.return_value.get.return_value = "http://custom-whisper:8012"
+            mock_settings.return_value.get.return_value = "http://custom-whisper:7706"
 
             client = WhisperClient(household_id="h123")
-            assert client.base_url == "http://custom-whisper:8012"
+            assert client.base_url == "http://custom-whisper:7706"
 
     def test_init_uses_default_url_if_no_setting(self):
         """Client uses default URL if no setting found."""
@@ -65,7 +65,7 @@ class TestWhisperClientInit:
             mock_settings.return_value.get.return_value = None
 
             client = WhisperClient(household_id="h123")
-            assert client.base_url == "http://localhost:8012"
+            assert client.base_url == "http://localhost:7706"
 
 
 class TestWhisperClientHeaders:
