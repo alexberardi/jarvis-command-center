@@ -10,8 +10,10 @@ from typing import Any, Dict, List, Optional
 
 from app.core.model_factory import ModelFactory
 from app.core.interfaces.imodel_interface import IModelInterface
+from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.llm_proxy_client import LLMProxyClient
 from app.core.conversation_handler import ConversationHandler
+from app.core.prompt_provider_factory import PromptProviderFactory
 from app.core.system_prompt_builder import build_tool_system_message
 from app.request_models.voice_command_request import CommandDefinition
 
@@ -33,16 +35,36 @@ class ModelService:
         """
         Initialize the model service.
 
+        Tries PromptProviderFactory first for new-style providers, then
+        falls back to ModelFactory for legacy IModelInterface classes.
+
         Args:
             model_name: Specific model to use. If None, uses environment variable.
         """
+        # Try new prompt provider first
+        self.prompt_provider: Optional[IJarvisPromptProvider] = None
+        try:
+            self.prompt_provider = PromptProviderFactory.create_provider(model_name)
+        except Exception as e:
+            logger.debug("PromptProviderFactory lookup failed: %s", e)
+
+        # Always create legacy model (needed for perform_warmup, perform_inference, etc.)
         self.model: IModelInterface = ModelFactory.create_model(model_name)
         self.llm_client = LLMProxyClient()
         self._conversation_handler = ConversationHandler(
             model=self.model,
             llm_client=self.llm_client,
+            prompt_provider=self.prompt_provider,
         )
-        logger.info(f"🤖 ModelService initialized with {self.model.name}")
+
+        if self.prompt_provider:
+            logger.info(
+                "ModelService initialized with provider=%s, model=%s",
+                self.prompt_provider.name,
+                self.model.name,
+            )
+        else:
+            logger.info("ModelService initialized with model=%s (legacy)", self.model.name)
 
     # =========================================================================
     # Legacy Methods (delegate to model interface)

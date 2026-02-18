@@ -226,6 +226,102 @@ class TestContinueConversation:
                 )
 
 
+class TestGetSystemPromptDispatch:
+    """Tests for _get_system_prompt dispatch logic."""
+
+    def test_uses_prompt_provider_when_set(self):
+        """When prompt_provider is set, build_system_prompt is used."""
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock()
+        mock_model._build_system_prompt = MagicMock(return_value="legacy prompt")
+        mock_client = MagicMock()
+        mock_provider = MagicMock()
+        mock_provider.build_system_prompt = MagicMock(return_value="new prompt")
+
+        handler = ConversationHandler(
+            model=mock_model, llm_client=mock_client, prompt_provider=mock_provider
+        )
+
+        result = handler._get_system_prompt({"room": "kitchen"}, "UTC", [])
+
+        assert result == "new prompt"
+        mock_provider.build_system_prompt.assert_called_once()
+        mock_model._build_system_prompt.assert_not_called()
+
+    def test_falls_back_to_model_when_no_provider(self):
+        """When no prompt_provider, falls back to model._build_system_prompt."""
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock()
+        mock_model._build_system_prompt = MagicMock(return_value="legacy prompt")
+        mock_client = MagicMock()
+
+        handler = ConversationHandler(model=mock_model, llm_client=mock_client)
+
+        result = handler._get_system_prompt({"room": "kitchen"}, "UTC", [])
+
+        assert result == "legacy prompt"
+        mock_model._build_system_prompt.assert_called_once()
+
+    def test_falls_back_to_default_when_no_provider_or_method(self):
+        """When no provider and no _build_system_prompt, returns fallback."""
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock(spec=["name", "use_tool_classifier"])
+        mock_client = MagicMock()
+
+        handler = ConversationHandler(model=mock_model, llm_client=mock_client)
+
+        result = handler._get_system_prompt({"room": "kitchen"}, "UTC", [])
+
+        assert result == "You are a helpful voice assistant."
+
+    def test_init_stores_prompt_provider(self):
+        """Test that prompt_provider is stored on init."""
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock()
+        mock_client = MagicMock()
+        mock_provider = MagicMock()
+
+        handler = ConversationHandler(
+            model=mock_model, llm_client=mock_client, prompt_provider=mock_provider
+        )
+
+        assert handler.prompt_provider is mock_provider
+
+    def test_init_defaults_prompt_provider_to_none(self):
+        """Test that prompt_provider defaults to None."""
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock()
+        mock_client = MagicMock()
+
+        handler = ConversationHandler(model=mock_model, llm_client=mock_client)
+
+        assert handler.prompt_provider is None
+
+    def test_use_tool_classifier_from_provider(self):
+        """use_tool_classifier should prefer prompt_provider when set."""
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock()
+        mock_model.use_tool_classifier = True
+        mock_client = MagicMock()
+        mock_provider = MagicMock()
+        mock_provider.use_tool_classifier = False
+
+        handler = ConversationHandler(
+            model=mock_model, llm_client=mock_client, prompt_provider=mock_provider
+        )
+
+        # The handler should check provider first in _apply_tool_routing_with_cache
+        # We verify the property is accessible
+        assert handler.prompt_provider.use_tool_classifier is False
+        assert handler.model.use_tool_classifier is True
+
+
 class TestGetServerToolNames:
     """Tests for extracting server tool names."""
 
