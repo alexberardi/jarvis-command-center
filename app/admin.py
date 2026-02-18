@@ -32,7 +32,7 @@ def _get_auth_base_url() -> str:
             return service_config.get_auth_url()
     except (ImportError, AttributeError):
         pass
-    return os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
+    return os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:7701")
 
 
 # ============================================================

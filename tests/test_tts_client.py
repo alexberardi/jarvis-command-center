@@ -42,10 +42,10 @@ class TestTTSClientInit:
         from app.core.clients.tts_client import TTSClient
 
         with patch("app.core.clients.tts_client.get_settings_service") as mock_settings:
-            mock_settings.return_value.get.return_value = "http://custom-tts:8009"
+            mock_settings.return_value.get.return_value = "http://custom-tts:7707"
 
             client = TTSClient(household_id="h123")
-            assert client.base_url == "http://custom-tts:8009"
+            assert client.base_url == "http://custom-tts:7707"
 
     def test_init_uses_default_url_if_no_setting(self):
         """Client uses default URL if no setting found."""
@@ -55,7 +55,7 @@ class TestTTSClientInit:
             mock_settings.return_value.get.return_value = None
 
             client = TTSClient(household_id="h123")
-            assert client.base_url == "http://localhost:8009"
+            assert client.base_url == "http://localhost:7707"
 
 
 class TestTTSClientHeaders:

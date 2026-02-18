@@ -219,7 +219,7 @@ class WarmupService:
             return result
 
         for cmd in available_commands:
-            cmd_dict = cmd.model_dump()
+            cmd_dict = cmd.model_dump() if hasattr(cmd, "model_dump") else dict(cmd)
             cmd_dict["antipatterns"] = self.filter_antipatterns(
                 cmd_dict.get("antipatterns"),
                 available_command_names,

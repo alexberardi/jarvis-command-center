@@ -91,7 +91,7 @@ client_tools = [
 import requests
 
 response = requests.post(
-    "http://localhost:8000/api/v0/conversation/start",
+    "http://localhost:7703/api/v0/conversation/start",
     headers={"X-API-Key": "your-key"},
     json={
         "conversation_id": "conv-123",
@@ -104,7 +104,7 @@ response = requests.post(
 
 ```python
 response = requests.post(
-    "http://localhost:8000/api/v0/voice/command",
+    "http://localhost:7703/api/v0/voice/command",
     headers={"X-API-Key": "your-key"},
     json={
         "voice_command": "Turn on the bedroom light",
@@ -299,12 +299,12 @@ python examples/tool_based_example.py
 
 ### Manual Test
 ```bash
-curl -X POST http://localhost:8000/api/v0/conversation/start \
+curl -X POST http://localhost:7703/api/v0/conversation/start \
   -H "X-API-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{"conversation_id": "test", "client_tools": []}'
 
-curl -X POST http://localhost:8000/api/v0/voice/command \
+curl -X POST http://localhost:7703/api/v0/voice/command \
   -H "X-API-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{"voice_command": "What time is it?", "conversation_id": "test"}'

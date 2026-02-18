@@ -37,6 +37,12 @@ from app.core.usage_logging import (
 from app.core.general_context import generate_date_context_object
 from app.core.tools.resolve_relative_date_tool import ResolveRelativeDateTool
 
+try:
+    from jarvis_mcp_client import resolve_date_keys as _mcp_resolve_date_keys
+    _HAS_MCP_CLIENT = True
+except ImportError:
+    _HAS_MCP_CLIENT = False
+
 logger = logging.getLogger("uvicorn")
 
 
@@ -181,17 +187,40 @@ class ToolExecutionEngine:
             if not tool_calls:
                 return tool_calls
 
-            date_context = generate_date_context_object(timezone_str)
-            flat_context = flatten_date_context(date_context)
-            available_keys = ResolveRelativeDateTool.get_available_keys(date_context)
-
-            # Resolve date_keys from LLM response
+            # MCP-first date resolution with local fallback
+            date_context = None
+            flat_context = None
+            available_keys = None
             resolved_dates: List[str] = []
-            if date_keys:
-                resolved_dates, unresolved_keys = resolve_date_keys(date_keys, date_context)
+            unresolved_keys: List[str] = []
 
-                # LLM fallback for unresolved keys
+            if date_keys:
+                mcp_succeeded = False
+                if _HAS_MCP_CLIENT:
+                    try:
+                        mcp_result = await _mcp_resolve_date_keys(date_keys, timezone=timezone_str)
+                        if mcp_result is not None:
+                            resolved_dates = mcp_result.get("resolved", [])
+                            unresolved_keys = mcp_result.get("unresolved", [])
+                            logger.info("MCP resolved %d/%d date keys", len(resolved_dates), len(date_keys))
+                            mcp_succeeded = True
+                    except (RuntimeError, ConnectionError, TimeoutError, OSError) as e:
+                        logger.info("MCP date resolution unavailable (%s), using local fallback", e)
+
+                if not mcp_succeeded:
+                    # Local fallback — identical to previous behavior
+                    date_context = generate_date_context_object(timezone_str)
+                    flat_context = flatten_date_context(date_context)
+                    available_keys = ResolveRelativeDateTool.get_available_keys(date_context)
+                    resolved_dates, unresolved_keys = resolve_date_keys(date_keys, date_context)
+                    logger.info("Local fallback resolved %d/%d date keys", len(resolved_dates), len(date_keys))
+
+                # LLM fallback for unresolved keys (needs local context)
                 if unresolved_keys and user_utterance:
+                    if date_context is None:
+                        date_context = generate_date_context_object(timezone_str)
+                        flat_context = flatten_date_context(date_context)
+                        available_keys = ResolveRelativeDateTool.get_available_keys(date_context)
                     for unresolved_key in unresolved_keys:
                         logger.info(f"Unresolved date key '{unresolved_key}', attempting LLM fallback")
                         fallback_key = await ResolveRelativeDateTool.resolve_with_llm_fallback(
@@ -211,6 +240,12 @@ class ToolExecutionEngine:
 
             async def _resolve_relative_datetime(relative_value: str) -> Optional[str]:
                 """Attempt to resolve a relative datetime string to an ISO datetime."""
+                nonlocal date_context, flat_context, available_keys
+                # Lazily initialize local context if MCP resolved everything
+                if flat_context is None:
+                    date_context = generate_date_context_object(timezone_str)
+                    flat_context = flatten_date_context(date_context)
+                    available_keys = ResolveRelativeDateTool.get_available_keys(date_context)
                 normalized = normalize_date_key(relative_value)
                 value = flat_context.get(normalized)
                 if isinstance(value, str):

@@ -13,7 +13,7 @@ from jarvis_auth_client.headers import get_app_headers, build_context_headers
 from app.services.settings_service import get_settings_service
 
 # Default Whisper URL if not configured in settings
-DEFAULT_WHISPER_URL = "http://localhost:8012"
+DEFAULT_WHISPER_URL = "http://localhost:7706"
 
 
 class WhisperClient:

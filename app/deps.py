@@ -37,7 +37,7 @@ def _get_auth_base_url() -> str:
     except Exception as e:
         logger.warning("Service discovery failed for auth, falling back to env var: %s", e)
     # Fallback to env var
-    return os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
+    return os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:7701")
 
 # Cache for node validation results
 _node_validation_cache: dict[str, tuple[dict, float]] = {}

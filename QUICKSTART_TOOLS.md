@@ -42,7 +42,7 @@ API_KEY = "your-api-key"
 headers = {"X-API-Key": API_KEY}
 
 response = requests.post(
-    "http://localhost:8000/api/v0/conversation/start",
+    "http://localhost:7703/api/v0/conversation/start",
     headers=headers,
     json={
         "conversation_id": "my-conv-123",
@@ -55,7 +55,7 @@ response = requests.post(
 
 ```python
 response = requests.post(
-    "http://localhost:8000/api/v0/voice/command",
+    "http://localhost:7703/api/v0/voice/command",
     headers=headers,
     json={
         "voice_command": "Turn on the bedroom light",
@@ -76,7 +76,7 @@ result = turn_on_light(room="bedroom", brightness=100)
 
 # Send results back
 response = requests.post(
-    "http://localhost:8000/api/v0/voice/command/continue",
+    "http://localhost:7703/api/v0/voice/command/continue",
     headers=headers,
     json={
         "conversation_id": "my-conv-123",
@@ -102,7 +102,7 @@ Returns comprehensive date/time context.
 ```python
 # Just ask!
 response = requests.post(
-    "http://localhost:8000/api/v0/voice/command",
+    "http://localhost:7703/api/v0/voice/command",
     headers=headers,
     json={
         "voice_command": "What time is it?",
@@ -168,7 +168,7 @@ import json
 import uuid
 
 class JarvisClient:
-    def __init__(self, api_key, base_url="http://localhost:8000"):
+    def __init__(self, api_key, base_url="http://localhost:7703"):
         self.api_key = api_key
         self.base_url = base_url
         self.headers = {"X-API-Key": api_key}
@@ -269,13 +269,13 @@ tail -f logs/jarvis.log | grep -E "🔧|⚙️|🔁"
 
 ```bash
 # Check tool registry
-curl -X POST http://localhost:8000/api/v0/conversation/start \
+curl -X POST http://localhost:7703/api/v0/conversation/start \
   -H "X-API-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{"conversation_id": "test", "client_tools": []}'
 
 # Send test command
-curl -X POST http://localhost:8000/api/v0/voice/command \
+curl -X POST http://localhost:7703/api/v0/voice/command \
   -H "X-API-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{"voice_command": "What time is it?", "conversation_id": "test"}'
