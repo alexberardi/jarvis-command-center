@@ -13,6 +13,7 @@ from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.core.conversation_cache import conversation_cache
+from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.interfaces.imodel_interface import IModelInterface
 from app.core.llm_proxy_client import LLMProxyClient
 from app.core.tool_execution_engine import ToolExecutionEngine
@@ -71,16 +72,24 @@ class ConversationHandler:
     and model interface to process voice commands through the tool-based architecture.
     """
 
-    def __init__(self, model: IModelInterface, llm_client: LLMProxyClient):
+    def __init__(
+        self,
+        model: IModelInterface,
+        llm_client: LLMProxyClient,
+        prompt_provider: Optional[IJarvisPromptProvider] = None,
+    ):
         """
         Initialize the conversation handler.
 
         Args:
             model: The model interface for building prompts and configuration
             llm_client: The LLM proxy client for API calls
+            prompt_provider: Optional new-style prompt provider. When set,
+                build_system_prompt is used instead of model._build_system_prompt.
         """
         self.model = model
         self.llm_client = llm_client
+        self.prompt_provider = prompt_provider
 
     async def cleanup_conversation(self, conversation_id: str) -> None:
         """
@@ -148,13 +157,10 @@ class ConversationHandler:
             [cmd for cmd in command_examples if cmd.get("command_name")]
         )
 
-        # Build system prompt
-        if hasattr(self.model, "_build_system_prompt"):
-            system_prompt = self.model._build_system_prompt(  # type: ignore[attr-defined]
-                node_context, timezone, all_tools, available_command_flags
-            )
-        else:
-            system_prompt = "You are a helpful voice assistant."
+        # Build system prompt (new provider first, then legacy model)
+        system_prompt = self._get_system_prompt(
+            node_context, timezone, all_tools, available_command_flags
+        )
 
         messages = [{"role": "system", "content": system_prompt}]
 
@@ -376,8 +382,15 @@ class ConversationHandler:
         Returns:
             Router decision dict or None
         """
-        if not self.model.use_tool_classifier:
-            logger.info("🔇 Tool classifier disabled for %s", self.model.name)
+        # Check prompt provider first, then model
+        use_classifier = (
+            self.prompt_provider.use_tool_classifier
+            if self.prompt_provider is not None
+            else self.model.use_tool_classifier
+        )
+        if not use_classifier:
+            name = self.prompt_provider.name if self.prompt_provider else self.model.name
+            logger.info("Tool classifier disabled for %s", name)
             conversation_cache.set_router_decision(conversation_id, None)
             return None
 
@@ -454,6 +467,34 @@ class ConversationHandler:
 
         return pruned_tools, messages
 
+    def _get_system_prompt(
+        self,
+        node_context: Dict[str, Any],
+        timezone: Optional[str],
+        tools: List[Dict[str, Any]],
+        available_command_flags: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """
+        Build system prompt using the best available source.
+
+        Dispatch order:
+        1. New-style IJarvisPromptProvider.build_system_prompt (if set)
+        2. Legacy model._build_system_prompt (duck-typed)
+        3. Minimal fallback
+
+        Returns:
+            System prompt string.
+        """
+        if self.prompt_provider is not None:
+            return self.prompt_provider.build_system_prompt(
+                node_context, timezone, tools, available_command_flags
+            )
+        if hasattr(self.model, "_build_system_prompt"):
+            return self.model._build_system_prompt(  # type: ignore[attr-defined]
+                node_context, timezone, tools, available_command_flags
+            )
+        return "You are a helpful voice assistant."
+
     def _rebuild_system_prompt(
         self,
         messages: List[Dict[str, Any]],
@@ -468,12 +509,12 @@ class ConversationHandler:
         Returns:
             Updated messages list with new system prompt
         """
-        if not hasattr(self.model, "_build_system_prompt"):
+        if self.prompt_provider is None and not hasattr(self.model, "_build_system_prompt"):
             return messages
 
         messages[0] = {
             "role": "system",
-            "content": self.model._build_system_prompt(  # type: ignore[attr-defined]
+            "content": self._get_system_prompt(
                 node_context, timezone, tools, available_command_flags
             ),
         }
