@@ -72,20 +72,20 @@ class ModelFactory:
                     continue
                 
                 # Look for classes that implement IModelInterface
-                for class_name, cls in inspect.getmembers(imported_module, inspect.isclass):
-                    if issubclass(cls, IModelInterface) and cls is not IModelInterface:
+                for class_name, klass in inspect.getmembers(imported_module, inspect.isclass):
+                    if issubclass(klass, IModelInterface) and klass is not IModelInterface:
                         try:
-                            instance = cls()
+                            instance = klass()
                             # Match by instance.name property (case-insensitive)
                             if instance.name.upper() == model_name.upper():
-                                logger.info(f"✅ Found model: {cls.__name__} (name={instance.name})")
+                                logger.info(f"✅ Found model: {klass.__name__} (name={instance.name})")
                                 return instance
                         except Exception as e:
-                            logger.warning(f"Failed to instantiate {cls.__name__}: {e}")
+                            logger.warning(f"Failed to instantiate {klass.__name__}: {e}")
                             continue
-        
+
         # Model not found
-        available = cls.get_available_models()
+        available = ModelFactory.get_available_models()
         raise ValueError(
             f"Model '{model_name}' not found. Available models: {available}"
         )
@@ -111,8 +111,8 @@ class ModelFactory:
             logger.warning(f"🏭 Could not read llm.interface from settings: {e}")
 
         # Final fallback if settings service is unavailable
-        fallback = os.getenv("JARVIS_MODEL_INTERFACE", "JarvisToolModel")
-        logger.info(f"🏭 Using env/default fallback for model: {fallback}")
+        fallback = "JarvisToolModel"
+        logger.info(f"🏭 Using fallback for model: {fallback}")
         return fallback
 
     @classmethod

@@ -163,15 +163,22 @@ def get_model_service() -> ModelService:
     """
     Get the configured model service instance.
 
-    Uses the ``llm.interface`` database setting to determine which model to use
-    (falls back to JARVIS_MODEL_INTERFACE env var, then default).
+    Uses the ``llm.interface`` database setting to determine which model to use.
 
     Available models:
     - JarvisToolModel: Tool-based model using JSON tool calls
     - JarvisAdapterModel: Slim prompt model for adapter-tuned usage
     - Custom models can be added to app/core/models/custom/
+    - Prompt providers can be added to app/core/prompt_providers/
     """
-    return ModelService()
+    try:
+        return ModelService()
+    except (ValueError, AttributeError) as e:
+        logger.error("Invalid LLM interface configuration: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invalid LLM Interface: {e}",
+        ) from e
 
 
 async def require_app_auth(

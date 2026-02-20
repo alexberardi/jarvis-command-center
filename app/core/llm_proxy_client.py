@@ -5,7 +5,7 @@ LLM Proxy Client for handling all LLM API interactions.
 import os
 import logging
 import httpx
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 from app.core.utils.rest_client import post, get, build_jarvis_app_headers
 
 logger = logging.getLogger("uvicorn")
@@ -55,6 +55,7 @@ class LLMProxyClient:
         temperature: float = 0,
         conversation_id: Optional[str] = None,
         tools: Optional[list] = None,
+        tool_choice: Optional[Any] = None,
         response_format: Optional[Dict[str, Any]] = None,
         include_date_context: bool = True,
         adapter_settings: Optional[Dict[str, Any]] = None
@@ -62,6 +63,8 @@ class LLMProxyClient:
         """Make a chat completion request.
 
         Args:
+            tools: Optional list of OpenAI-format tool definitions for native tool calling.
+            tool_choice: Optional tool choice ("auto", "none", or specific tool).
             adapter_settings: Optional dict with adapter configuration.
                 Expected keys: hash (str), scale (float, default 1.0), enabled (bool, default True)
         """
@@ -79,6 +82,8 @@ class LLMProxyClient:
             payload["conversation_id"] = conversation_id
         if tools is not None:
             payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
         if response_format is not None:
             payload["response_format"] = response_format
         payload["include_date_context"] = include_date_context

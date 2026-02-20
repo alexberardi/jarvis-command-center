@@ -798,3 +798,168 @@ class TestUsageTracking:
                         # Should have accumulated usage from both calls
                         # 100 + 200 = 300 prompt tokens
                         # 50 + 30 = 80 completion tokens
+
+
+class TestPromptProviderIntegration:
+    """Tests for prompt_provider wiring in ToolExecutionEngine."""
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_available_commands.return_value = []
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_prompt_provider_parse_response_transforms_content(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Test that prompt_provider.parse_response transforms content before ToolCallParser."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        # LLM returns native format (e.g., XML tool_call tags)
+        native_output = '<tool_call>{"name":"get_weather","arguments":{"location":"NYC"}}</tool_call>'
+        # Provider transforms it to Jarvis JSON
+        jarvis_json = json.dumps({
+            "message": "",
+            "tool_calls": [{"name": "get_weather", "arguments": {"location": "NYC"}}],
+            "error": None,
+        })
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": native_output},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+
+        mock_provider = MagicMock()
+        mock_provider.supports_native_tools = False  # Text-based path
+        mock_provider.parse_response.return_value = jarvis_json
+        mock_provider.get_response_format.return_value = {"type": "text"}
+
+        engine = ToolExecutionEngine(mock_llm_client, prompt_provider=mock_provider)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                mock_executor.execute_tool_calls.return_value = ([], [{
+                    "id": "call_abc123",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"location": "NYC"}'}
+                }])
+
+                result = await engine.execute(
+                    conversation_id="test-conv-123",
+                    messages=[{"role": "system", "content": "You are helpful."}],
+                    tools=[{"function": {"name": "get_weather"}}]
+                )
+
+        # Provider's parse_response should have been called with native output
+        mock_provider.parse_response.assert_called_once_with(native_output)
+        assert result["stop_reason"] == "tool_calls"
+
+    @pytest.mark.asyncio
+    async def test_prompt_provider_get_response_format_used(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Test that prompt_provider.get_response_format is used when non-None."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": '{"message": "Hello!", "tool_calls": []}'},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+
+        mock_provider = MagicMock()
+        mock_provider.supports_native_tools = False  # Text-based path
+        mock_provider.get_response_format.return_value = {"type": "text"}
+        mock_provider.parse_response.return_value = None
+
+        engine = ToolExecutionEngine(mock_llm_client, prompt_provider=mock_provider)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-123",
+                messages=[{"role": "system", "content": "You are helpful."}],
+                tools=[]
+            )
+
+        # Verify the LLM was called with the provider's response_format
+        call_kwargs = mock_llm_client.chat_completion.call_args[1]
+        assert call_kwargs["response_format"] == {"type": "text"}
+
+    @pytest.mark.asyncio
+    async def test_no_prompt_provider_uses_default_response_format(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Test that default response format is used when no prompt_provider."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": '{"message": "Hello!", "tool_calls": []}'},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+
+        engine = ToolExecutionEngine(mock_llm_client)  # No prompt_provider
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.get_response_format") as mock_get_format:
+                mock_get_format.return_value = {"type": "json_object"}
+                result = await engine.execute(
+                    conversation_id="test-conv-123",
+                    messages=[{"role": "system", "content": "You are helpful."}],
+                    tools=[]
+                )
+
+        # Should have used the default get_response_format()
+        mock_get_format.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_prompt_provider_none_response_format_falls_back(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Test that None from provider.get_response_format falls back to default."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": '{"message": "Hello!", "tool_calls": []}'},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+
+        mock_provider = MagicMock()
+        mock_provider.supports_native_tools = False  # Text-based path
+        mock_provider.get_response_format.return_value = None  # Falls back to default
+        mock_provider.parse_response.return_value = None
+
+        engine = ToolExecutionEngine(mock_llm_client, prompt_provider=mock_provider)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.get_response_format") as mock_get_format:
+                mock_get_format.return_value = {"type": "json_object"}
+                result = await engine.execute(
+                    conversation_id="test-conv-123",
+                    messages=[{"role": "system", "content": "You are helpful."}],
+                    tools=[]
+                )
+
+        # Should have fallen back to default
+        mock_get_format.assert_called_once()
+        call_kwargs = mock_llm_client.chat_completion.call_args[1]
+        assert call_kwargs["response_format"] == {"type": "json_object"}

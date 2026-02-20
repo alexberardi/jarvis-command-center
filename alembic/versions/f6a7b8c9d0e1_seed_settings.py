@@ -5,6 +5,8 @@ Revises: e5f6a7b8c9d0
 Create Date: 2026-02-05 17:00:00.000000
 """
 
+import os
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -16,15 +18,20 @@ depends_on = None
 
 # Settings definitions from app/services/settings_definitions.py
 # EXCLUDED: llm.proxy.url (use config-service), admin.api_key (is_secret=True)
+#
+# LLM_INTERFACE_SEED: One-time seed value from the installer wizard.
+# After this migration runs, the DB value is the source of truth.
+_LLM_INTERFACE_SEED = os.getenv("LLM_INTERFACE_SEED", "JarvisAdapterModel")
+
 SETTINGS = [
     # LLM settings (only interface, NOT url)
     {
         "key": "llm.interface",
-        "value": "JarvisAdapterModel",
+        "value": _LLM_INTERFACE_SEED,
         "value_type": "string",
         "category": "llm",
         "description": "LLM interface type for command processing",
-        "env_fallback": "JARVIS_MODEL_INTERFACE",
+        "env_fallback": None,
         "requires_reload": False,
         "is_secret": False,
     },

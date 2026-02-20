@@ -14,9 +14,8 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         key="llm.interface",
         category="llm",
         value_type="string",
-        default="JarvisAdapterModel",
+        default="HermesMediumUntrained",
         description="LLM interface type for command processing",
-        env_fallback="JARVIS_MODEL_INTERFACE",
     ),
     SettingDefinition(
         key="llm.proxy.url",

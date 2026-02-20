@@ -77,20 +77,54 @@ class IJarvisPromptProvider(ABC):
         """
         return None
 
-    def parse_response_quirks(self, raw_content: str) -> Optional[str]:
+    def parse_response(self, raw_content: str) -> Optional[str]:
         """
-        Hook for model-specific JSON cleanup before parsing.
+        Transform raw LLM output into Jarvis JSON format string.
 
-        Some models emit trailing commas, comments, or markdown fences.
-        Return cleaned content, or None to skip (use raw_content as-is).
+        Each provider can override this to handle its model's native output
+        format (e.g., XML tool_call tags, markdown fences, trailing commas)
+        and transform it into the Jarvis JSON shape that ToolCallParser expects.
+
+        Return the transformed string, or None to pass raw content to
+        ToolCallParser as-is.
 
         Args:
             raw_content: Raw LLM response text
 
         Returns:
-            Cleaned text, or None to use raw_content unchanged.
+            Transformed Jarvis JSON string, or None to use raw_content unchanged.
         """
         return None
+
+    @property
+    def supports_native_tools(self) -> bool:
+        """
+        Whether to pass tools natively to the LLM proxy.
+
+        When True: tools passed via API 'tools' parameter, tool_calls read
+        from structured response (finish_reason="tool_calls").
+        When False: tools embedded in system prompt, parsed from text output.
+
+        Default: False (backward compatible).
+        """
+        return False
+
+    def build_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Build OpenAI-format tool definitions for native tool calling.
+
+        Override to customize tool schemas for a specific model family
+        (e.g., strip descriptions, adjust parameter schemas).
+
+        Only called when supports_native_tools is True.
+
+        Args:
+            tools: Raw tool definitions from tool registry.
+
+        Returns:
+            OpenAI-format tool definitions ready for the API.
+        """
+        return tools
 
     def get_capabilities(self) -> Dict[str, Any]:
         """

@@ -186,6 +186,6 @@ class PromptProviderFactory:
                 "PromptProviderFactory: could not read llm.interface: %s", e
             )
 
-        fallback = os.getenv("JARVIS_MODEL_INTERFACE", "JarvisToolModel")
+        fallback = "JarvisToolModel"
         logger.info("PromptProviderFactory: using fallback '%s'", fallback)
         return fallback

@@ -101,8 +101,8 @@ class TestLlamaSmallUntrainedInterface:
     def test_get_response_format_default(self, provider: LlamaSmallUntrained):
         assert provider.get_response_format() is None
 
-    def test_parse_response_quirks_default(self, provider: LlamaSmallUntrained):
-        assert provider.parse_response_quirks("some content") is None
+    def test_parse_response_default(self, provider: LlamaSmallUntrained):
+        assert provider.parse_response("some content") is None
 
     def test_get_capabilities(self, provider: LlamaSmallUntrained):
         caps = provider.get_capabilities()
