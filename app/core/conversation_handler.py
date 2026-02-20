@@ -264,7 +264,7 @@ class ConversationHandler:
 
         # Execute tool loop
         with timing.measure("tool_execution_loop") if timing else nullcontext():
-            engine = ToolExecutionEngine(self.llm_client)
+            engine = ToolExecutionEngine(self.llm_client, prompt_provider=self.prompt_provider)
             result = await engine.execute(
                 conversation_id=conversation_id,
                 messages=messages,
@@ -325,7 +325,7 @@ class ConversationHandler:
                 break
 
         # Continue with tool execution loop
-        engine = ToolExecutionEngine(self.llm_client)
+        engine = ToolExecutionEngine(self.llm_client, prompt_provider=self.prompt_provider)
         result = await engine.execute(
             conversation_id=conversation_id,
             messages=messages,

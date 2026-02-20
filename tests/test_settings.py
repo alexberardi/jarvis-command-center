@@ -92,22 +92,22 @@ class TestSettingsServiceCache:
 
     def test_cache_expiry(self, service):
         """Test that expired cache entries are not used."""
-        # Populate cache with expired entry
-        cache_key = service._make_cache_key("llm.interface")
+        # Populate cache with expired entry (use a setting with env_fallback)
+        cache_key = service._make_cache_key("tool_classifier.enabled")
         service._cache[cache_key] = SettingValue(
             value="ExpiredValue",
-            value_type="string",
+            value_type="bool",
             requires_reload=False,
             is_secret=False,
-            env_fallback="JARVIS_MODEL_INTERFACE",
+            env_fallback="JARVIS_TOOL_CLASSIFIER_ENABLED",
             from_db=True,
             cached_at=time.time() - 120,  # 2 minutes ago (expired)
         )
 
         # Should fall through to env/default since cache is expired
-        with patch.dict(os.environ, {"JARVIS_MODEL_INTERFACE": "EnvValue"}):
-            result = service.get("llm.interface")
-            assert result == "EnvValue"
+        with patch.dict(os.environ, {"JARVIS_TOOL_CLASSIFIER_ENABLED": "false"}):
+            result = service.get("tool_classifier.enabled")
+            assert result is False
 
     def test_invalidate_all(self, service):
         """Test invalidating entire cache."""
@@ -152,9 +152,16 @@ class TestSettingsServiceEnvFallback:
 
     def test_env_fallback_when_db_unavailable(self, service):
         """Test that env vars are used when DB is unavailable."""
+        with patch.dict(os.environ, {"JARVIS_TOOL_CLASSIFIER_ENABLED": "false"}):
+            result = service.get("tool_classifier.enabled")
+            assert result is False
+
+    def test_llm_interface_uses_definition_default_not_env(self, service):
+        """Test that llm.interface uses definition default, not env var."""
         with patch.dict(os.environ, {"JARVIS_MODEL_INTERFACE": "EnvInterface"}):
             result = service.get("llm.interface")
-            assert result == "EnvInterface"
+            # Should return definition default, NOT env var (no env_fallback)
+            assert result == "JarvisAdapterModel"
 
     def test_default_when_no_env(self, service):
         """Test that defaults are used when no env var is set."""
@@ -209,9 +216,9 @@ class TestSettingsServiceTypedGetters:
 
     def test_get_str(self, service):
         """Test get_str method."""
-        with patch.dict(os.environ, {"JARVIS_MODEL_INTERFACE": "TestModel"}):
-            result = service.get_str("llm.interface", "")
-            assert result == "TestModel"
+        with patch.dict(os.environ, {"JARVIS_LLM_PROXY_API_URL": "http://test:1234"}):
+            result = service.get_str("llm.proxy.url", "")
+            assert result == "http://test:1234"
             assert isinstance(result, str)
 
 

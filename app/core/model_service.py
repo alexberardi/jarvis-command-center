@@ -49,7 +49,21 @@ class ModelService:
             logger.debug("PromptProviderFactory lookup failed: %s", e)
 
         # Always create legacy model (needed for perform_warmup, perform_inference, etc.)
-        self.model: IModelInterface = ModelFactory.create_model(model_name)
+        # If a new-style prompt provider was found, the legacy model may not exist
+        # under the same name — fall back to default legacy model.
+        if self.prompt_provider:
+            try:
+                self.model: IModelInterface = ModelFactory.create_model(model_name)
+            except ValueError:
+                logger.info(
+                    "Legacy model '%s' not found; using default legacy model "
+                    "alongside prompt provider '%s'",
+                    self.prompt_provider.name,
+                    self.prompt_provider.name,
+                )
+                self.model = ModelFactory.create_model("JarvisToolModel")
+        else:
+            self.model = ModelFactory.create_model(model_name)
         self.llm_client = LLMProxyClient()
         self._conversation_handler = ConversationHandler(
             model=self.model,

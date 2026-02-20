@@ -9,10 +9,13 @@ import json
 import logging
 import os
 import time as _time
+import uuid
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 from app.core.conversation_cache import conversation_cache
+from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
+from app.core.tool_builder import ToolBuilder
 from app.core.tool_executor import tool_executor
 from app.core.tool_call_parser import tool_call_parser
 from app.core.utils.latency_logger import latency_logger
@@ -46,6 +49,46 @@ except ImportError:
 logger = logging.getLogger("uvicorn")
 
 
+def _normalize_native_tool_calls(raw_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Normalize native OpenAI-format tool_calls into internal format.
+
+    Native format from LLM proxy:
+        [{"id": "call_abc", "type": "function",
+          "function": {"name": "x", "arguments": "{...}"}}]
+
+    Internal format expected by tool_executor:
+        [{"id": "call_abc", "type": "function",
+          "function": {"name": "x", "arguments": "{...}"}}]
+
+    The formats are compatible, but we ensure all fields are present
+    and arguments is always a JSON string.
+    """
+    normalized: List[Dict[str, Any]] = []
+    for call in raw_calls:
+        func = call.get("function", {})
+        name = func.get("name")
+        if not name:
+            continue
+
+        arguments = func.get("arguments", "{}")
+        if isinstance(arguments, dict):
+            arguments = json.dumps(arguments)
+        elif not isinstance(arguments, str):
+            arguments = "{}"
+
+        call_id = call.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+        normalized.append({
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": arguments,
+            },
+        })
+    return normalized
+
+
 class ToolExecutionEngine:
     """
     Engine for executing the tool loop.
@@ -59,14 +102,21 @@ class ToolExecutionEngine:
     - Must-call guard logic
     """
 
-    def __init__(self, llm_client):
+    def __init__(
+        self,
+        llm_client,
+        prompt_provider: Optional[IJarvisPromptProvider] = None,
+    ):
         """
         Initialize the tool execution engine.
 
         Args:
             llm_client: LLM proxy client for chat completions
+            prompt_provider: Optional prompt provider for model-specific
+                response format and parse_response hooks.
         """
         self.llm_client = llm_client
+        self.prompt_provider = prompt_provider
 
     async def execute(
         self,
@@ -356,23 +406,52 @@ class ToolExecutionEngine:
         # Get timing context
         timing = latency_logger.get_request(conversation_id)
 
+        # Determine if we should use native tool calling
+        use_native_tools: bool = (
+            self.prompt_provider is not None
+            and self.prompt_provider.supports_native_tools
+        )
+        native_tools: Optional[List[Dict[str, Any]]] = None
+        if use_native_tools:
+            native_tools = self.prompt_provider.build_tools(
+                ToolBuilder.strip_jarvis_extensions(tools)
+            )
+            logger.info("Native tool calling enabled (%d tools)", len(native_tools or []))
+
         # Main execution loop
         for iteration in range(max_iterations):
             logger.info(f"Tool loop iteration {iteration + 1}/{max_iterations}")
             prompt_snapshot = [dict(m) for m in (messages or [])]
 
-            # Call LLM
+            # Call LLM — dual path: native tools vs text-based
             try:
-                response_format = get_response_format()
                 _llm_start = _time.time()
                 with timing.measure(f"llm_call_iter_{iteration+1}") if timing else nullcontext():
-                    response = await self.llm_client.chat_completion(
-                        messages=messages,
-                        conversation_id=conversation_id,
-                        response_format=response_format,
-                        include_date_context=True,
-                        adapter_settings=adapter_settings
-                    )
+                    if use_native_tools:
+                        # Native path: pass tools via API, no response_format constraint
+                        response = await self.llm_client.chat_completion(
+                            messages=messages,
+                            conversation_id=conversation_id,
+                            tools=native_tools,
+                            tool_choice="auto",
+                            include_date_context=True,
+                            adapter_settings=adapter_settings
+                        )
+                    else:
+                        # Text-based path: tools in system prompt, JSON response format
+                        if self.prompt_provider is not None:
+                            response_format = self.prompt_provider.get_response_format()
+                            if response_format is None:
+                                response_format = get_response_format()
+                        else:
+                            response_format = get_response_format()
+                        response = await self.llm_client.chat_completion(
+                            messages=messages,
+                            conversation_id=conversation_id,
+                            response_format=response_format,
+                            include_date_context=True,
+                            adapter_settings=adapter_settings
+                        )
                 logger.debug(f"LLM call took {(_time.time()-_llm_start)*1000:.0f}ms")
             except Exception as e:
                 logger.error(f"LLM call failed: {e}")
@@ -387,7 +466,7 @@ class ToolExecutionEngine:
             logger.info(f"Full LLM proxy response structure: {list(response.keys())}")
 
             try:
-                raw_content = response["choices"][0]["message"]["content"]
+                raw_content = response["choices"][0]["message"].get("content") or ""
                 finish_reason_raw = response["choices"][0].get("finish_reason", "stop")
                 logger.info(f"Extracted content length: {len(raw_content)}, finish_reason: {finish_reason_raw}")
             except (KeyError, IndexError, TypeError) as e:
@@ -415,8 +494,28 @@ class ToolExecutionEngine:
             response_obj = response if isinstance(response, dict) else None
             _log_prompt_response(prompt_snapshot, response_obj, raw_content, None, iteration + 1)
 
-            # Parse tool calls from JSON
-            finish_reason, tool_calls, assistant_message = tool_call_parser.parse_response(raw_content)
+            # Dual path: extract tool calls
+            if use_native_tools:
+                # Native path: read structured tool_calls directly from response
+                tool_calls_raw = response["choices"][0]["message"].get("tool_calls")
+                if finish_reason_raw == "tool_calls" and tool_calls_raw:
+                    tool_calls = _normalize_native_tool_calls(tool_calls_raw)
+                    finish_reason = "tool_calls"
+                    assistant_message = raw_content
+                else:
+                    tool_calls = []
+                    finish_reason = "stop"
+                    assistant_message = raw_content
+            else:
+                # Text-based path: let prompt provider transform, then parse JSON
+                content_for_parsing = raw_content
+                if self.prompt_provider is not None:
+                    transformed = self.prompt_provider.parse_response(raw_content)
+                    if transformed is not None:
+                        content_for_parsing = transformed
+
+                # Parse tool calls from JSON
+                finish_reason, tool_calls, assistant_message = tool_call_parser.parse_response(content_for_parsing)
 
             logger.info(f"LLM response parsed: finish_reason={finish_reason}, tool_calls={len(tool_calls)}")
 

@@ -322,6 +322,85 @@ class TestGetSystemPromptDispatch:
         assert handler.model.use_tool_classifier is True
 
 
+class TestPromptProviderThreading:
+    """Tests for prompt_provider being passed to ToolExecutionEngine."""
+
+    @pytest.mark.asyncio
+    async def test_process_voice_command_passes_prompt_provider(self):
+        """Test that process_voice_command_with_tools passes prompt_provider to engine."""
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock()
+        mock_model.use_tool_classifier = False
+        mock_client = MagicMock()
+        mock_provider = MagicMock()
+
+        handler = ConversationHandler(
+            model=mock_model, llm_client=mock_client, prompt_provider=mock_provider
+        )
+
+        with patch("app.core.conversation_handler.conversation_cache") as mock_cache:
+            mock_cache.get_messages.return_value = [{"role": "system", "content": "Hi"}]
+            mock_cache.get_tools.return_value = []
+            mock_cache.get_available_commands.return_value = []
+            mock_cache.get_node_context.return_value = {}
+            mock_cache.get_timezone.return_value = None
+
+            with patch("app.core.conversation_handler.ToolExecutionEngine") as MockEngine:
+                mock_engine = MagicMock()
+                mock_engine.execute = AsyncMock(return_value={
+                    "stop_reason": "complete",
+                    "assistant_message": "Done",
+                })
+                MockEngine.return_value = mock_engine
+
+                await handler.process_voice_command_with_tools(
+                    voice_command="hello",
+                    conversation_id="test-conv",
+                )
+
+                MockEngine.assert_called_once_with(
+                    mock_client, prompt_provider=mock_provider
+                )
+
+    @pytest.mark.asyncio
+    async def test_continue_conversation_passes_prompt_provider(self):
+        """Test that continue_conversation_with_tool_results passes prompt_provider to engine."""
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock()
+        mock_client = MagicMock()
+        mock_provider = MagicMock()
+
+        handler = ConversationHandler(
+            model=mock_model, llm_client=mock_client, prompt_provider=mock_provider
+        )
+
+        with patch("app.core.conversation_handler.conversation_cache") as mock_cache:
+            mock_cache.get_messages.return_value = [
+                {"role": "system", "content": "System"},
+                {"role": "user", "content": "test"},
+            ]
+            mock_cache.get_tools.return_value = []
+
+            with patch("app.core.conversation_handler.ToolExecutionEngine") as MockEngine:
+                mock_engine = MagicMock()
+                mock_engine.execute = AsyncMock(return_value={
+                    "stop_reason": "complete",
+                    "assistant_message": "Done",
+                })
+                MockEngine.return_value = mock_engine
+
+                await handler.continue_conversation_with_tool_results(
+                    conversation_id="test-conv",
+                    tool_results=[{"tool_call_id": "call_123", "output": "result"}],
+                )
+
+                MockEngine.assert_called_once_with(
+                    mock_client, prompt_provider=mock_provider
+                )
+
+
 class TestGetServerToolNames:
     """Tests for extracting server tool names."""
 
