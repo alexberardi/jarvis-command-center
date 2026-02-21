@@ -1,14 +1,14 @@
 """
-HermesMediumUntrained - Prompt provider for Hermes 3 Llama 3.1 8B Instruct.
+Qwen25MediumUntrained - Prompt provider for Qwen 2.5 7B Instruct.
 
-Optimized for NousResearch Hermes 3 (Q4_K_M GGUF) with text-based tool calling.
+Optimized for Qwen 2.5 7B Instruct (Q4_K_M GGUF) with text-based tool calling.
 
 Key features:
-- Tools presented in <tools> XML tags (Hermes's fine-tuned format)
-- Concise rules leveraging Hermes's function-calling training
+- Tools presented as one-per-line JSON in <tools> XML tags (Qwen's chat template format)
+- Model emits <tool_call>{"name": ..., "arguments": ...}</tool_call> responses
 - parse_response transforms <tool_call> XML tags into Jarvis JSON
-- supports_native_tools=False (text-based): set to True when backend model
-  reliably uses structured tool_calls via llama-cpp-python's tools parameter
+- supports_native_tools=False (text-based): model outputs tool_call tags, not
+  structured tool_calls via llama-cpp-python's tools parameter
 - build_tools() ready for native path via ToolBuilder
 """
 
@@ -28,22 +28,22 @@ from app.core.tool_builder import ToolBuilder
 
 logger = logging.getLogger("uvicorn")
 
-# Patterns for stripping Hermes-native tags from responses
+# Pattern for Qwen 2.5 tool call format: <tool_call>{"name":...,"arguments":...}</tool_call>
 _TOOL_CALL_TAG_RE = re.compile(
     r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL
 )
-_SCRATCH_PAD_RE = re.compile(
-    r"<scratch_pad>.*?</scratch_pad>", re.DOTALL
-)
+
+# Parameters that are always arrays — normalize string values to single-element lists
+_ARRAY_PARAMS = frozenset({"resolved_datetimes"})
 
 
-class HermesMediumUntrained(IJarvisPromptProvider):
+class Qwen25MediumUntrained(IJarvisPromptProvider):
     """
-    Prompt provider for Hermes 3 Llama 3.1 8B Instruct (untrained).
+    Prompt provider for Qwen 2.5 7B Instruct (untrained).
 
     Strategy:
-    - Tools in <tools> XML tags (Hermes's fine-tuned format)
-    - Concise rules leveraging Hermes's function-calling training
+    - Tools as one-per-line JSON in <tools> tags (Qwen's chat template format)
+    - Model emits <tool_call> tags matching its fine-tuned function-calling training
     - Agent context (HA devices) included for device awareness
     - Primary examples only to save context window
     - fastText classifier enabled for routing hints
@@ -51,7 +51,7 @@ class HermesMediumUntrained(IJarvisPromptProvider):
 
     @property
     def name(self) -> str:
-        return "HermesMediumUntrained"
+        return "Qwen25MediumUntrained"
 
     @property
     def use_tool_classifier(self) -> bool:
@@ -59,9 +59,8 @@ class HermesMediumUntrained(IJarvisPromptProvider):
 
     @property
     def supports_native_tools(self) -> bool:
-        # chatml-function-calling causes extreme latency (15-30s vs 1.3s)
-        # and hallucinated parameters. Text-based path is far superior
-        # for Hermes 3 Q4_K_M via llama-cpp-python.
+        # Text-based <tool_call> format is more reliable than
+        # structured tool_calls via llama-cpp-python for this model.
         return False
 
     def build_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -69,13 +68,17 @@ class HermesMediumUntrained(IJarvisPromptProvider):
         return ToolBuilder.build(tools)
 
     @staticmethod
-    def _build_tools_xml(tools: List[Dict[str, Any]]) -> str:
-        """Build Hermes-style <tools> XML block from tool definitions."""
+    def _build_tools_block(tools: List[Dict[str, Any]]) -> str:
+        """Build Qwen-style <tools> block with one tool definition per line.
+
+        Matches Qwen 2.5's chat template: each tool is a single-line JSON
+        object inside <tools></tools> tags, not pretty-printed.
+        """
         clean_tools: List[Dict[str, Any]] = ToolBuilder.build(tools)
         if not clean_tools:
             return "<tools>\n</tools>"
-        tool_json: str = json.dumps(clean_tools, indent=2)
-        return f"<tools>\n{tool_json}\n</tools>"
+        lines: List[str] = [json.dumps(t, separators=(",", ":")) for t in clean_tools]
+        return "<tools>\n" + "\n".join(lines) + "\n</tools>"
 
     def build_system_prompt(
         self,
@@ -85,11 +88,11 @@ class HermesMediumUntrained(IJarvisPromptProvider):
         available_commands: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
-        Build system prompt using Hermes's native <tools> XML format.
+        Build system prompt using Qwen 2.5's native tool calling format.
 
-        Tools are presented as OpenAI-compatible JSON schemas inside <tools>
-        tags to leverage Hermes's function-calling fine-tuning, but responses
-        are required in Jarvis's JSON format for ToolCallParser compatibility.
+        Tools are presented as one-per-line JSON inside <tools> tags,
+        matching Qwen 2.5's chat template. The model is instructed to emit
+        calls using <tool_call> XML tags.
         """
         available_commands = available_commands or []
         node_context = node_context or {}
@@ -107,36 +110,39 @@ class HermesMediumUntrained(IJarvisPromptProvider):
             tools, available_commands, primary_examples_only=True
         )
 
-        # Build <tools> XML block for Hermes's fine-tuned format
-        tools_xml: str = HermesMediumUntrained._build_tools_xml(tools)
+        # Build <tools> block matching Qwen 2.5's chat template
+        tools_block: str = Qwen25MediumUntrained._build_tools_block(tools)
 
         system_prompt: str = f"""You are Jarvis, a function calling voice assistant.
 Context: room={room}, user={user}, style={voice_mode}
 
-You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions.
+You are a function calling AI model. You may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions. You MUST call a function for any request that matches an available tool — NEVER fabricate data, pretend to perform actions, or answer from memory for weather, sports, calendar, timers, searches, or any tool-covered domain.
 
-{tools_xml}
+You are provided with function signatures within <tools></tools> XML tags:
+{tools_block}
 
-Rules:
-- Call ONE tool at a time to fulfill requests.
-- Pick the tool that best matches intent; use get_command_utterance_examples if unsure.
-- Extract parameters from the user's words; only request validation if required params are truly missing/ambiguous.
-- For date parameters like resolved_datetimes, use natural words: "today", "tomorrow", "day_after_tomorrow", "this_weekend", "this_year". NEVER convert to ISO dates or timestamps.
-- Always populate required tool parameters from the user's request.
-- For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
 {{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}}}
 </tool_call>
+
+Rules:
+- Call ONE function at a time to fulfill requests.
+- Use the actual parameter names from the function schema above.
+- Pick the function that best matches intent; use get_command_utterance_examples if unsure.
+- Extract parameters from the user's words; only request clarification if required params are truly missing/ambiguous.
+- For date parameters like resolved_datetimes, use natural words: "today", "tomorrow", "day_after_tomorrow", "this_weekend", "this_year". NEVER convert to ISO dates or timestamps.
+- Always populate required function parameters from the user's request.
 {direct_answer_section}
 {agent_context_section}
-For final answers with no tool needed, respond with a brief spoken reply.
+Only respond with a brief spoken reply for general knowledge questions, greetings, or jokes that have NO matching tool.
 
 Tools:
 {tools_section}
 """
 
         logger.info(
-            "Built HermesMediumUntrained system prompt: %d chars, %d tools",
+            "Built Qwen25MediumUntrained system prompt: %d chars, %d tools",
             len(system_prompt),
             len(tools),
         )
@@ -147,28 +153,23 @@ Tools:
         return system_prompt
 
     def get_response_format(self) -> Optional[Dict[str, Any]]:
-        """Return text mode — Hermes outputs <tool_call> tags, not JSON."""
+        """Return text mode — Qwen 2.5 outputs <tool_call> tags, not JSON."""
         return {"type": "text"}
 
     def parse_response(self, raw_content: str) -> Optional[str]:
         """
-        Transform Hermes native output into Jarvis JSON format.
+        Transform Qwen 2.5 native output into Jarvis JSON format.
 
-        Hermes emits tool calls as <tool_call>{"name":"x","arguments":{...}}</tool_call>
-        and may include <scratch_pad> blocks for chain-of-thought. This method:
-        1. Strips <scratch_pad> blocks
-        2. Extracts ALL <tool_call> blocks and builds Jarvis JSON
-        3. Wraps plain text responses as Jarvis JSON messages
-        4. Returns None for content already in Jarvis JSON format (passthrough)
+        Qwen 2.5 emits tool calls as <tool_call>{"name":"x","arguments":{...}}</tool_call>.
+        This method:
+        1. Extracts ALL <tool_call> blocks and builds Jarvis JSON
+        2. Wraps plain text responses as Jarvis JSON messages
+        3. Returns None for content already in Jarvis JSON format (passthrough)
 
         Returns:
             Transformed Jarvis JSON string, or None if no transformation needed.
         """
-        cleaned: str = raw_content
-
-        # Strip <scratch_pad>...</scratch_pad> blocks
-        had_scratch_pad: bool = bool(_SCRATCH_PAD_RE.search(cleaned))
-        cleaned = _SCRATCH_PAD_RE.sub("", cleaned)
+        cleaned: str = raw_content.strip()
 
         # Extract ALL <tool_call>...</tool_call> blocks
         tool_call_matches = _TOOL_CALL_TAG_RE.findall(cleaned)
@@ -177,9 +178,16 @@ Tools:
             for match in tool_call_matches:
                 try:
                     call_obj = json.loads(match.strip())
-                    parsed_calls.append(call_obj)
                 except json.JSONDecodeError:
                     logger.warning("Failed to parse tool_call JSON: %s", match[:100])
+                    continue
+                # Normalize array parameters: wrap string values in a list
+                arguments = call_obj.get("arguments", {})
+                if isinstance(arguments, dict):
+                    for key in _ARRAY_PARAMS:
+                        if key in arguments and isinstance(arguments[key], str):
+                            arguments[key] = [arguments[key]]
+                parsed_calls.append(call_obj)
             if parsed_calls:
                 jarvis_json: Dict[str, Any] = {
                     "message": "",
@@ -187,23 +195,6 @@ Tools:
                     "error": None,
                 }
                 return json.dumps(jarvis_json)
-
-        # Content was modified (scratch_pad stripped) but no tool calls
-        cleaned = cleaned.strip()
-        if had_scratch_pad and cleaned:
-            # Check if remaining content is already valid Jarvis JSON
-            try:
-                parsed = json.loads(cleaned)
-                if isinstance(parsed, dict) and "tool_calls" in parsed:
-                    return cleaned
-            except json.JSONDecodeError:
-                pass
-            # Wrap plain text as Jarvis JSON message
-            return json.dumps({
-                "message": cleaned,
-                "tool_calls": [],
-                "error": None,
-            })
 
         # Check if content is already Jarvis JSON (passthrough)
         try:
@@ -213,15 +204,7 @@ Tools:
         except json.JSONDecodeError:
             pass
 
-        # Plain text response (no tags, not JSON) — wrap as Jarvis message
-        if cleaned and cleaned != raw_content.strip():
-            return json.dumps({
-                "message": cleaned,
-                "tool_calls": [],
-                "error": None,
-            })
-
-        # No JSON, no tags, unchanged — wrap plain text
+        # Plain text response — wrap as Jarvis message
         if cleaned and not cleaned.startswith("{"):
             return json.dumps({
                 "message": cleaned,
@@ -234,10 +217,9 @@ Tools:
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "provider_name": self.name,
-            "model_family": "hermes",
+            "model_family": "qwen",
             "size_tier": "medium",
             "training_tier": "untrained",
             "use_tool_classifier": self.use_tool_classifier,
             "supports_native_tools": self.supports_native_tools,
         }
-
