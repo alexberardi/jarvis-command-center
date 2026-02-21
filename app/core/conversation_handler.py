@@ -129,7 +129,17 @@ class ConversationHandler:
         logger.info(f"🔥 Warming up tool-based conversation {conversation_id[:8]}...")
 
         # Get server tools from registry
-        server_tools = tool_registry.get_tools_for_model(self.model.name)
+        # Text-based providers should only see client/command tools in the prompt.
+        # Server tools (get_command_utterance_examples, request_validation) confuse
+        # text-based models — they call them when unsure, triggering runaway loops.
+        use_text_path: bool = (
+            self.prompt_provider is not None
+            and not self.prompt_provider.supports_native_tools
+        )
+        if use_text_path:
+            server_tools = []
+        else:
+            server_tools = tool_registry.get_tools_for_model(self.model.name)
         server_tool_names = {get_tool_name(t) for t in server_tools if get_tool_name(t)}
 
         # Merge server and client tools
@@ -175,14 +185,38 @@ class ConversationHandler:
         )
 
         # Optional warmup inference (reduces first-response latency)
+        # For llama.cpp: warmup processes the system prompt and caches the
+        # KV state. The actual voice command then only needs to process the
+        # new user message, dramatically reducing inference time.
+        use_native_tools: bool = (
+            self.prompt_provider is not None
+            and self.prompt_provider.supports_native_tools
+        )
         if not skip_warmup_inference:
             try:
-                await self.llm_client.chat_completion(
-                    conversation_id=conversation_id,
-                    messages=messages,
-                    tools=all_tools,
-                    adapter_settings=adapter_settings,
-                )
+                if use_native_tools:
+                    # Native tools path: full warmup with tool definitions
+                    await self.llm_client.chat_completion(
+                        conversation_id=conversation_id,
+                        messages=messages,
+                        tools=all_tools,
+                        adapter_settings=adapter_settings,
+                    )
+                else:
+                    # Text-based path: send system prompt for KV caching
+                    # with max_tokens=1 to avoid generating useless output.
+                    # llama.cpp caches the prompt prefix; the voice command
+                    # inference then only processes the new user message.
+                    allows_caching: bool = await self.llm_client.allows_warmup_caching()
+                    if allows_caching:
+                        await self.llm_client.chat_completion(
+                            conversation_id=conversation_id,
+                            messages=messages,
+                            adapter_settings=adapter_settings,
+                            max_tokens=1,
+                        )
+                    else:
+                        logger.info(f"⏭️ Engine doesn't benefit from warmup ({conversation_id[:8]})")
                 logger.info(f"✅ Warmup inference complete for {conversation_id[:8]}...")
             except Exception as e:
                 logger.warning(f"⚠️ Warmup inference failed (non-fatal): {e}")
@@ -263,6 +297,13 @@ class ConversationHandler:
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Starting tool execution loop")
 
         # Execute tool loop
+        # Text-based providers should resolve in 1-2 iterations; cap at 3
+        # to avoid runaway loops that cause 30s+ timeouts.
+        use_native: bool = (
+            self.prompt_provider is not None
+            and self.prompt_provider.supports_native_tools
+        )
+        max_iters: int = 10 if use_native else 3
         with timing.measure("tool_execution_loop") if timing else nullcontext():
             engine = ToolExecutionEngine(self.llm_client, prompt_provider=self.prompt_provider)
             result = await engine.execute(
@@ -270,6 +311,7 @@ class ConversationHandler:
                 messages=messages,
                 tools=tools or [],
                 user_utterance=voice_command,
+                max_iterations=max_iters,
             )
 
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool execution loop completed")
@@ -325,12 +367,18 @@ class ConversationHandler:
                 break
 
         # Continue with tool execution loop
+        use_native_continue: bool = (
+            self.prompt_provider is not None
+            and self.prompt_provider.supports_native_tools
+        )
+        max_iters_continue: int = 10 if use_native_continue else 3
         engine = ToolExecutionEngine(self.llm_client, prompt_provider=self.prompt_provider)
         result = await engine.execute(
             conversation_id=conversation_id,
             messages=messages,
             tools=tools or [],
             user_utterance=last_user_utterance,
+            max_iterations=max_iters_continue,
         )
 
         # Update cache

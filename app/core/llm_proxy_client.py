@@ -58,7 +58,8 @@ class LLMProxyClient:
         tool_choice: Optional[Any] = None,
         response_format: Optional[Dict[str, Any]] = None,
         include_date_context: bool = True,
-        adapter_settings: Optional[Dict[str, Any]] = None
+        adapter_settings: Optional[Dict[str, Any]] = None,
+        max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Make a chat completion request.
 
@@ -67,6 +68,8 @@ class LLMProxyClient:
             tool_choice: Optional tool choice ("auto", "none", or specific tool).
             adapter_settings: Optional dict with adapter configuration.
                 Expected keys: hash (str), scale (float, default 1.0), enabled (bool, default True)
+            max_tokens: Optional max tokens for completion. When set, overrides
+                the LLM proxy's server-side default.
         """
         import time
         start_time = time.time()
@@ -89,6 +92,8 @@ class LLMProxyClient:
         payload["include_date_context"] = include_date_context
         if adapter_settings is not None:
             payload["adapter_settings"] = adapter_settings
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         
         logger.debug(f"Making chat completion request to {url}")
         logger.info(f"🐛 DEBUG: LLM proxy client starting request at {start_time}")
