@@ -125,7 +125,7 @@ Rules:
 - Use the actual parameter names from the function schema above — NOT "param".
 - Pick the function that best matches intent; use get_command_utterance_examples if unsure.
 - Extract parameters from the user's words; only request clarification if required params are truly missing/ambiguous.
-- Relative dates are resolved automatically; use natural terms in date parameters.
+- For date parameters like resolved_datetimes, use natural words: "today", "tomorrow", "day_after_tomorrow", "this_weekend", "this_year". NEVER convert to ISO dates or timestamps.
 - Always populate required function parameters from the user's request.
 {direct_answer_section}
 {agent_context_section}
