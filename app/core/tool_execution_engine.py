@@ -435,7 +435,8 @@ class ToolExecutionEngine:
                             tools=native_tools,
                             tool_choice="auto",
                             include_date_context=True,
-                            adapter_settings=adapter_settings
+                            adapter_settings=adapter_settings,
+                            max_tokens=256,
                         )
                     else:
                         # Text-based path: tools in system prompt, JSON response format
@@ -450,7 +451,8 @@ class ToolExecutionEngine:
                             conversation_id=conversation_id,
                             response_format=response_format,
                             include_date_context=True,
-                            adapter_settings=adapter_settings
+                            adapter_settings=adapter_settings,
+                            max_tokens=256,
                         )
                 logger.debug(f"LLM call took {(_time.time()-_llm_start)*1000:.0f}ms")
             except Exception as e:
