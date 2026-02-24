@@ -23,12 +23,6 @@ from app.core.prompt_providers.shared.context_builders import (
     build_agent_context_section,
     build_direct_answer_section,
 )
-from app.core.prompt_providers.shared.core_rules import (
-    ANTI_HALLUCINATION_MANDATE,
-    build_fallback_line,
-    build_identity_header,
-    build_rules_block,
-)
 from app.core.prompt_providers.shared.tool_formatters import format_tools_for_prompt
 from app.core.tool_builder import ToolBuilder
 
@@ -66,12 +60,22 @@ class Gemma2MediumUntrained(IJarvisPromptProvider):
     @property
     def supports_native_tools(self) -> bool:
         # Text-based <tool_call> format — Gemma 2 has no fine-tuned
-        # function-calling format like Hermes or Llama 3.1.
+        # function-calling format. chatml-function-calling causes extreme
+        # latency (30s+ timeouts), so we use text-based tool calling.
         return False
 
     def build_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Build OpenAI-format tool definitions using ToolBuilder."""
         return ToolBuilder.build(tools)
+
+    @staticmethod
+    def _build_tools_xml(tools: List[Dict[str, Any]]) -> str:
+        """Build <tools> XML block from tool definitions."""
+        clean_tools: List[Dict[str, Any]] = ToolBuilder.build(tools)
+        if not clean_tools:
+            return "<tools>\n</tools>"
+        tool_json: str = json.dumps(clean_tools, indent=2)
+        return f"<tools>\n{tool_json}\n</tools>"
 
     def build_system_prompt(
         self,
@@ -83,9 +87,10 @@ class Gemma2MediumUntrained(IJarvisPromptProvider):
         """
         Build system prompt for Gemma 2 9B Instruct.
 
-        Tools are presented as pretty-printed JSON schemas (no native tool
-        format wrapper). The model is instructed to emit calls using
-        <tool_call> XML tags.
+        Mirrors the Hermes prompt structure which achieves 91%+ accuracy:
+        tools in <tools> XML tags, concise inline rules, <tool_call> output
+        format. Gemma 2 has no function-calling fine-tuning, so the prompt
+        includes a concrete example to demonstrate the expected format.
         """
         available_commands = available_commands or []
         node_context = node_context or {}
@@ -103,35 +108,36 @@ class Gemma2MediumUntrained(IJarvisPromptProvider):
             tools, available_commands, primary_examples_only=True
         )
 
-        # Build pretty-printed JSON schemas for tools (no native wrapper)
-        clean_tools: List[Dict[str, Any]] = ToolBuilder.build(tools)
-        tool_json: str = json.dumps(clean_tools, indent=2) if clean_tools else "[]"
+        # Build <tools> XML block (same format Hermes uses)
+        tools_xml: str = Gemma2MediumUntrained._build_tools_xml(tools)
 
-        # Shared header
-        identity: str = build_identity_header(room, user, voice_mode)
+        system_prompt: str = f"""You are Jarvis, a function calling voice assistant.
+Context: room={room}, user={user}, style={voice_mode}
 
-        # Shared rules (Gemma2: default param_names_rule, default terminology)
-        rules: str = build_rules_block()
+You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You MUST call a function for any request that matches an available tool. Do not make assumptions about what values to plug into functions.
 
-        # Shared fallback
-        fallback: str = build_fallback_line()
+{tools_xml}
 
-        system_prompt: str = f"""{identity}
-
-You are a function calling AI model. You are provided with function signatures below. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
-
-Available functions:
-{tool_json}
-
-For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
 <tool_call>
 {{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}}}
 </tool_call>
 
-{rules}
+Example — if the user says "What's the weather in Miami?", respond ONLY with:
+<tool_call>
+{{"name": "get_weather", "arguments": {{"city": "Miami", "resolved_datetimes": ["today"]}}}}
+</tool_call>
+
+Rules:
+- You MUST call a tool for weather, sports, calendar, timers, music, device control, web search, and all other tool-covered domains. NEVER answer these from memory.
+- Call ONE tool at a time to fulfill requests.
+- Pick the tool that best matches intent; use get_command_utterance_examples if unsure.
+- Extract parameters from the user's words; only request validation if required params are truly missing/ambiguous.
+- For date parameters like resolved_datetimes, use natural words: "today", "tomorrow", "day_after_tomorrow", "this_weekend", "this_year". NEVER convert to ISO dates or timestamps.
+- Always populate required tool parameters from the user's request.
 {direct_answer_section}
 {agent_context_section}
-{fallback}
+For final answers with no tool needed, respond with a brief spoken reply.
 
 Tools:
 {tools_section}
