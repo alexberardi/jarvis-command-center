@@ -231,6 +231,23 @@ Tools:
 
         return None
 
+    def build_training_prompt(self, voice_command: str) -> str:
+        """Build training prompt matching Hermes's inference system prompt."""
+        return (
+            "You are a function calling AI model. "
+            "For each function call return a json object with function name and arguments "
+            "within <tool_call></tool_call> XML tags as follows:\n"
+            "<tool_call>\n"
+            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}}\n'
+            "</tool_call>\n"
+            f"User: {voice_command}\n"
+            "Assistant:"
+        )
+
+    def build_training_completion(self, tool_call: Dict[str, Any]) -> str:
+        """Format as <tool_call> XML tags matching Hermes's fine-tuned output."""
+        return f" <tool_call>\n{json.dumps(tool_call)}\n</tool_call>"
+
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "provider_name": self.name,
