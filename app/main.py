@@ -517,7 +517,7 @@ async def train_adapter(
             logger.warning("⚠️ Failed to write adapter training JSONL: %s", exc)
             return None
 
-    def _build_dataset(commands):
+    def _build_dataset(commands, provider=None):
         dataset_commands = []
         for cmd in commands:
             examples = cmd.examples or []
@@ -525,15 +525,18 @@ async def train_adapter(
                 continue
             formatted_examples = []
             for ex in examples:
-                formatted_examples.append(
-                    {
-                        "voice_command": ex.voice_command,
-                        "expected_tool_call": {
-                            "name": cmd.command_name,
-                            "arguments": ex.expected_parameters,
-                        },
-                    }
-                )
+                tool_call = {
+                    "name": cmd.command_name,
+                    "arguments": ex.expected_parameters,
+                }
+                example_dict = {
+                    "voice_command": ex.voice_command,
+                    "expected_tool_call": tool_call,
+                }
+                if provider is not None:
+                    example_dict["formatted_completion"] = provider.build_training_completion(tool_call)
+                    example_dict["formatted_prompt"] = provider.build_training_prompt(ex.voice_command)
+                formatted_examples.append(example_dict)
             dataset_commands.append(
                 {
                     "command_name": cmd.command_name,
@@ -542,12 +545,20 @@ async def train_adapter(
             )
         return {"commands": dataset_commands}
 
-    dataset_payload = _build_dataset(request.available_commands)
+    # Resolve the active prompt provider to format training data correctly
+    from app.core.prompt_provider_factory import PromptProviderFactory
+    provider = PromptProviderFactory.create_provider()
+
+    dataset_payload = _build_dataset(request.available_commands, provider=provider)
     dataset_ref = {"format": "inline-json", "data": dataset_payload}
     if request.dataset_hash:
         dataset_hash = request.dataset_hash
     else:
-        payload_bytes = json.dumps(dataset_ref, sort_keys=True).encode("utf-8")
+        hash_input = {
+            "base_model_id": request.base_model_id,
+            "dataset": dataset_ref,
+        }
+        payload_bytes = json.dumps(hash_input, sort_keys=True).encode("utf-8")
         dataset_hash = hashlib.sha256(payload_bytes).hexdigest()
 
     job_id = str(uuid4())
@@ -571,12 +582,14 @@ async def train_adapter(
         "ttl_seconds": 86400,
         "metadata": {
             "node_id": node_context_provider.node.node_id,
+            "provider_name": provider.name if provider else "",
         },
         "request": {
             "node_id": node_context_provider.node.node_id,
             "base_model_id": request.base_model_id,
             "dataset_ref": dataset_ref,
             "dataset_hash": dataset_hash,
+            "provider_name": provider.name if provider else "",
             "params": request.params.model_dump(exclude_none=True) if request.params else None,
         },
         "callback": callback,

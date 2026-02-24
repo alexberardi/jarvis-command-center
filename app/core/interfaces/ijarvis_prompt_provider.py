@@ -10,6 +10,7 @@ continue working via duck-typing on _build_system_prompt. New providers implemen
 this interface directly for cleaner separation.
 """
 
+import json
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -125,6 +126,30 @@ class IJarvisPromptProvider(ABC):
             OpenAI-format tool definitions ready for the API.
         """
         return tools
+
+    def build_training_completion(self, tool_call: Dict[str, Any]) -> str:
+        """Format a tool call as this model expects to output it during inference.
+
+        Default: raw Jarvis JSON (backward compatible).
+        Override in providers that use native formats (XML tags, function tags, etc.)
+        """
+        return " " + json.dumps({
+            "message": "",
+            "tool_calls": [tool_call],
+            "error": None,
+        })
+
+    def build_training_prompt(self, voice_command: str) -> str:
+        """Build the training prompt for a voice command.
+
+        Default: minimal tool router prompt.
+        Override if the model needs specific formatting cues.
+        """
+        return (
+            "You are a tool router. Return the appropriate tool call.\n"
+            f"User: {voice_command}\n"
+            "Assistant:"
+        )
 
     def get_capabilities(self) -> Dict[str, Any]:
         """

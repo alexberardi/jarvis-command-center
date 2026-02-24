@@ -50,6 +50,21 @@ def build_direct_answer_section(
     return section
 
 
+def _format_device_line(dev: Dict[str, Any]) -> str:
+    """Format a device as a context line with area as the primary identifier.
+
+    Shows: "Area — Name: entity_id (currently state)" so the LLM sees the
+    area first, avoiding mix-ups between devices with identical names.
+    """
+    entity_id = dev.get("entity_id", "")
+    dev_name = dev.get("name", "")
+    state = dev.get("state", "unknown")
+    area = dev.get("area", "")
+    if area:
+        return f"- {area} — {dev_name}: {entity_id} (currently {state})"
+    return f"- {dev_name}: {entity_id} (currently {state})"
+
+
 def build_agent_context_section(node_context: Dict[str, Any]) -> str:
     """
     Build agent context section (e.g., Home Assistant devices) from node context.
@@ -73,6 +88,18 @@ def build_agent_context_section(node_context: Dict[str, Any]) -> str:
 
     section = ""
 
+    # Floor → area groupings (e.g., "Downstairs" → ["Living Room", "Kitchen"])
+    floors = ha_data.get("floors", {})
+    if floors:
+        section += "\nFloor Layout (use to resolve 'upstairs'/'downstairs'/etc.):\n"
+        for floor_name, areas in floors.items():
+            section += f"- {floor_name}: {', '.join(areas)}\n"
+        section += (
+            "When user references a floor (e.g., 'turn off lights downstairs'), "
+            "make a SEPARATE control_device call for EACH device in EVERY area "
+            "on that floor. Do NOT pick just one device.\n"
+        )
+
     # Light controls (room groups)
     light_controls = ha_data.get("light_controls", {})
     if light_controls:
@@ -93,25 +120,52 @@ def build_agent_context_section(node_context: Dict[str, Any]) -> str:
             else set()
         )
         individual_lights = [
-            l for l in lights if l.get("entity_id") not in room_group_ids
+            l for l in lights
+            if l.get("entity_id") not in room_group_ids
+            and l.get("state") != "unavailable"
         ]
         if individual_lights:
             section += "\nAvailable Individual Lights:\n"
-            for dev in individual_lights[:15]:
-                entity_id = dev.get("entity_id", "")
-                dev_name = dev.get("name", "")
-                state = dev.get("state", "unknown")
-                section += f"- {dev_name}: {entity_id} (currently {state})\n"
+            for dev in individual_lights[:20]:
+                section += _format_device_line(dev) + "\n"
 
         # Switches
-        switches = device_controls.get("switch", [])
+        switches = [
+            s for s in device_controls.get("switch", [])
+            if s.get("state") != "unavailable"
+        ]
         if switches:
             section += "\nAvailable Switches (HA devices - use control_device/get_device_status):\n"
             for dev in switches[:10]:
-                entity_id = dev.get("entity_id", "")
-                dev_name = dev.get("name", "")
-                state = dev.get("state", "unknown")
-                section += f"- {dev_name}: {entity_id} (currently {state})\n"
+                section += _format_device_line(dev) + "\n"
+
+        # Locks (use lock/unlock actions, NOT turn_on/turn_off)
+        locks = device_controls.get("lock", [])
+        if locks:
+            section += "\nAvailable Locks (use lock/unlock actions):\n"
+            for dev in locks[:10]:
+                section += _format_device_line(dev) + "\n"
+
+        # Covers (use open_cover/close_cover actions)
+        covers = device_controls.get("cover", [])
+        if covers:
+            section += "\nAvailable Covers (use open_cover/close_cover actions):\n"
+            for dev in covers[:10]:
+                section += _format_device_line(dev) + "\n"
+
+        # Climate
+        climate = device_controls.get("climate", [])
+        if climate:
+            section += "\nAvailable Climate Controls:\n"
+            for dev in climate[:10]:
+                section += _format_device_line(dev) + "\n"
+
+        # Fans
+        fans = device_controls.get("fan", [])
+        if fans:
+            section += "\nAvailable Fans:\n"
+            for dev in fans[:10]:
+                section += _format_device_line(dev) + "\n"
 
         # Scenes
         scenes = device_controls.get("scene", [])

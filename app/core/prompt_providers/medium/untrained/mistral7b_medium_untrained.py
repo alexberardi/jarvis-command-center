@@ -23,6 +23,12 @@ from app.core.prompt_providers.shared.context_builders import (
     build_agent_context_section,
     build_direct_answer_section,
 )
+from app.core.prompt_providers.shared.core_rules import (
+    ANTI_HALLUCINATION_MANDATE,
+    build_fallback_line,
+    build_identity_header,
+    build_rules_block,
+)
 from app.core.prompt_providers.shared.tool_formatters import format_tools_for_prompt
 from app.core.tool_builder import ToolBuilder
 
@@ -117,26 +123,30 @@ class Mistral7bMediumUntrained(IJarvisPromptProvider):
         # Build [AVAILABLE_TOOLS] block matching Mistral's format
         available_tools: str = Mistral7bMediumUntrained._build_available_tools(tools)
 
-        system_prompt: str = f"""You are Jarvis, a function calling voice assistant.
-Context: room={room}, user={user}, style={voice_mode}
+        # Shared header
+        identity: str = build_identity_header(room, user, voice_mode)
 
-You are a function calling AI model. You are provided with function definitions below. Don't make assumptions about what values to plug into functions. You MUST call a function for any request that matches an available tool — NEVER fabricate data, pretend to perform actions, or answer from memory for weather, sports, calendar, timers, searches, or any tool-covered domain.
+        # Shared rules (Mistral: custom param_names_rule referencing "definitions")
+        rules: str = build_rules_block(
+            param_names_rule="Use the actual parameter names from the function definitions above.",
+        )
+
+        # Shared fallback
+        fallback: str = build_fallback_line()
+
+        system_prompt: str = f"""{identity}
+
+You are a function calling AI model. You are provided with function definitions below. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
 
 {available_tools}
 
 To call a function, respond with [TOOL_CALLS] followed by a JSON array:
 [TOOL_CALLS] [{{"name": "function_name", "arguments": {{"param": "value"}}}}]
 
-Rules:
-- Call ONE function at a time to fulfill requests.
-- Use the actual parameter names from the function definitions above.
-- Pick the function that best matches intent; use get_command_utterance_examples if unsure.
-- Extract parameters from the user's words; only request clarification if required params are truly missing/ambiguous.
-- For date parameters like resolved_datetimes, use natural words: "today", "tomorrow", "day_after_tomorrow", "this_weekend", "this_year". NEVER convert to ISO dates or timestamps.
-- Always populate required function parameters from the user's request.
+{rules}
 {direct_answer_section}
 {agent_context_section}
-Only respond with a brief spoken reply for general knowledge questions, greetings, or jokes that have NO matching tool.
+{fallback}
 
 Tools:
 {tools_section}
@@ -245,6 +255,20 @@ Tools:
             })
 
         return None
+
+    def build_training_prompt(self, voice_command: str) -> str:
+        """Build training prompt matching Mistral v0.3's inference system prompt."""
+        return (
+            "You are a function calling AI model. "
+            "To call a function, respond with [TOOL_CALLS] followed by a JSON array:\n"
+            '[TOOL_CALLS] [{"name": "function_name", "arguments": {"param": "value"}}]\n'
+            f"User: {voice_command}\n"
+            "Assistant:"
+        )
+
+    def build_training_completion(self, tool_call: Dict[str, Any]) -> str:
+        """Format as [TOOL_CALLS] [...] matching Mistral v0.3's output."""
+        return f" [TOOL_CALLS] [{json.dumps(tool_call)}]"
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {

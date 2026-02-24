@@ -1,13 +1,13 @@
 """
-Llama31MediumUntrained - Prompt provider for Meta Llama 3.1 8B Instruct.
+Gemma2MediumUntrained - Prompt provider for Google Gemma 2 9B Instruct.
 
-Optimized for Llama 3.1 8B Instruct (Q4_K_M GGUF) with text-based tool calling.
+Optimized for Gemma 2 9B Instruct (Q4_K_M GGUF) with text-based tool calling.
 
 Key features:
-- Tools presented as JSON schemas with <function=name>{args}</function> call format
-- Leverages Llama 3.1's fine-tuned function-calling format
-- parse_response transforms <function=name>{args}</function> tags into Jarvis JSON
-- supports_native_tools=False (text-based): model outputs function tags, not
+- Tools presented as pretty-printed JSON schemas (no native tool format)
+- Model instructed to emit <tool_call>{"name": ..., "arguments": ...}</tool_call>
+- parse_response transforms <tool_call> XML tags into Jarvis JSON
+- supports_native_tools=False (text-based): model outputs tool_call tags, not
   structured tool_calls via llama-cpp-python's tools parameter
 - build_tools() ready for native path via ToolBuilder
 """
@@ -34,28 +34,22 @@ from app.core.tool_builder import ToolBuilder
 
 logger = logging.getLogger("uvicorn")
 
-# Pattern for Llama 3.1 native function call format: <function=name>{...}</function>
-# Also matches variant without '=' sign: <function>name{...}</function>
-# Also matches malformed closing tag: <function=name>{...}<function> (missing slash)
-_FUNCTION_CALL_RE = re.compile(
-    r"<function[=>](\w+)>(.*?)</?\s*function>", re.DOTALL
-)
-# Fallback: model emits <function=name>{...} without closing </function> tag
-_FUNCTION_CALL_UNCLOSED_RE = re.compile(
-    r"<function[=>](\w+)>(\{.*)", re.DOTALL
+# Pattern for <tool_call>{"name":...,"arguments":...}</tool_call> output
+_TOOL_CALL_TAG_RE = re.compile(
+    r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL
 )
 
 # Parameters that are always arrays — normalize string values to single-element lists
 _ARRAY_PARAMS = frozenset({"resolved_datetimes"})
 
 
-class Llama31MediumUntrained(IJarvisPromptProvider):
+class Gemma2MediumUntrained(IJarvisPromptProvider):
     """
-    Prompt provider for Meta Llama 3.1 8B Instruct (untrained).
+    Prompt provider for Google Gemma 2 9B Instruct (untrained).
 
     Strategy:
-    - Tools as JSON schemas with <function=name>{args}</function> call format
-    - Matches Llama 3.1's fine-tuned function-calling training
+    - Tools as pretty-printed JSON schemas (Gemma 2 has no fine-tuned tool format)
+    - Model instructed to emit <tool_call> tags for function calls
     - Agent context (HA devices) included for device awareness
     - Primary examples only to save context window
     - fastText classifier enabled for routing hints
@@ -63,7 +57,7 @@ class Llama31MediumUntrained(IJarvisPromptProvider):
 
     @property
     def name(self) -> str:
-        return "Llama31MediumUntrained"
+        return "Gemma2MediumUntrained"
 
     @property
     def use_tool_classifier(self) -> bool:
@@ -71,8 +65,8 @@ class Llama31MediumUntrained(IJarvisPromptProvider):
 
     @property
     def supports_native_tools(self) -> bool:
-        # Text-based <function=...> format is more reliable than
-        # structured tool_calls via llama-cpp-python for this model.
+        # Text-based <tool_call> format — Gemma 2 has no fine-tuned
+        # function-calling format like Hermes or Llama 3.1.
         return False
 
     def build_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -87,11 +81,11 @@ class Llama31MediumUntrained(IJarvisPromptProvider):
         available_commands: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
-        Build system prompt using Llama 3.1's native <function=...> format.
+        Build system prompt for Gemma 2 9B Instruct.
 
-        Tools are presented as JSON schemas and the model is instructed to
-        emit calls using <function=name>{"param": "value"}</function> tags,
-        matching Llama 3.1's function-calling fine-tuning.
+        Tools are presented as pretty-printed JSON schemas (no native tool
+        format wrapper). The model is instructed to emit calls using
+        <tool_call> XML tags.
         """
         available_commands = available_commands or []
         node_context = node_context or {}
@@ -109,17 +103,15 @@ class Llama31MediumUntrained(IJarvisPromptProvider):
             tools, available_commands, primary_examples_only=True
         )
 
-        # Build JSON schemas for tools
+        # Build pretty-printed JSON schemas for tools (no native wrapper)
         clean_tools: List[Dict[str, Any]] = ToolBuilder.build(tools)
         tool_json: str = json.dumps(clean_tools, indent=2) if clean_tools else "[]"
 
         # Shared header
         identity: str = build_identity_header(room, user, voice_mode)
 
-        # Shared rules (Llama31: custom param_names_rule with NOT "param")
-        rules: str = build_rules_block(
-            param_names_rule='Use the actual parameter names from the function schema above \u2014 NOT "param".',
-        )
+        # Shared rules (Gemma2: default param_names_rule, default terminology)
+        rules: str = build_rules_block()
 
         # Shared fallback
         fallback: str = build_fallback_line()
@@ -128,13 +120,13 @@ class Llama31MediumUntrained(IJarvisPromptProvider):
 
 You are a function calling AI model. You are provided with function signatures below. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
 
-To call a function, respond with:
-<function=function_name>{{"arg_name": "value"}}</function>
-
-For example, to get weather: <function=get_weather>{{"city": "Miami"}}</function>
-
 Available functions:
 {tool_json}
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}}}
+</tool_call>
 
 {rules}
 {direct_answer_section}
@@ -146,7 +138,7 @@ Tools:
 """
 
         logger.info(
-            "Built Llama31MediumUntrained system prompt: %d chars, %d tools",
+            "Built Gemma2MediumUntrained system prompt: %d chars, %d tools",
             len(system_prompt),
             len(tools),
         )
@@ -157,16 +149,17 @@ Tools:
         return system_prompt
 
     def get_response_format(self) -> Optional[Dict[str, Any]]:
-        """Return text mode — Llama 3.1 outputs <function=...> tags, not JSON."""
+        """Return text mode — Gemma 2 outputs <tool_call> tags, not JSON."""
         return {"type": "text"}
 
     def parse_response(self, raw_content: str) -> Optional[str]:
         """
-        Transform Llama 3.1 native output into Jarvis JSON format.
+        Transform Gemma 2 output into Jarvis JSON format.
 
-        Llama 3.1 emits tool calls as <function=name>{"arg":"val"}</function>.
+        Gemma 2 is instructed to emit tool calls as
+        <tool_call>{"name":"x","arguments":{...}}</tool_call>.
         This method:
-        1. Extracts ALL <function=name>{...}</function> blocks and builds Jarvis JSON
+        1. Extracts ALL <tool_call> blocks and builds Jarvis JSON
         2. Wraps plain text responses as Jarvis JSON messages
         3. Returns None for content already in Jarvis JSON format (passthrough)
 
@@ -175,48 +168,23 @@ Tools:
         """
         cleaned: str = raw_content.strip()
 
-        # Extract ALL <function=name>{...}</function> blocks
-        function_matches = _FUNCTION_CALL_RE.findall(cleaned)
-
-        # Fallback: try unclosed <function=name>{...} (no </function> tag)
-        if not function_matches:
-            unclosed_match = _FUNCTION_CALL_UNCLOSED_RE.search(cleaned)
-            if unclosed_match:
-                function_matches = [unclosed_match.groups()]
-
-        if function_matches:
+        # Extract ALL <tool_call>...</tool_call> blocks
+        tool_call_matches = _TOOL_CALL_TAG_RE.findall(cleaned)
+        if tool_call_matches:
             parsed_calls: list[Dict[str, Any]] = []
-            for func_name, args_str in function_matches:
+            for match in tool_call_matches:
                 try:
-                    cleaned_args = args_str.strip().rstrip(";\"'")
-                    arguments = json.loads(cleaned_args)
+                    call_obj = json.loads(match.strip())
                 except json.JSONDecodeError:
-                    logger.warning(
-                        "Failed to parse function args for %s: %s",
-                        func_name,
-                        args_str[:100],
-                    )
+                    logger.warning("Failed to parse tool_call JSON: %s", match[:100])
                     continue
-                # Unwrap {"param": {...}} nesting — the model sometimes wraps
-                # real arguments inside a literal "param" key from the format
-                # example. Unwrap only when "param" is the sole key and its
-                # value is a dict (the actual arguments).
-                if (
-                    isinstance(arguments, dict)
-                    and len(arguments) == 1
-                    and "param" in arguments
-                    and isinstance(arguments["param"], dict)
-                ):
-                    arguments = arguments["param"]
                 # Normalize array parameters: wrap string values in a list
+                arguments = call_obj.get("arguments", {})
                 if isinstance(arguments, dict):
                     for key in _ARRAY_PARAMS:
                         if key in arguments and isinstance(arguments[key], str):
                             arguments[key] = [arguments[key]]
-                parsed_calls.append({
-                    "name": func_name,
-                    "arguments": arguments,
-                })
+                parsed_calls.append(call_obj)
             if parsed_calls:
                 jarvis_json: Dict[str, Any] = {
                     "message": "",
@@ -244,25 +212,26 @@ Tools:
         return None
 
     def build_training_prompt(self, voice_command: str) -> str:
-        """Build training prompt matching Llama 3.1's inference system prompt."""
+        """Build training prompt matching Gemma 2's inference system prompt."""
         return (
             "You are a function calling AI model. "
-            "To call a function, respond with:\n"
-            '<function=function_name>{"arg_name": "value"}</function>\n'
+            "For each function call, return a json object with function name and arguments "
+            "within <tool_call></tool_call> XML tags:\n"
+            "<tool_call>\n"
+            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}}\n'
+            "</tool_call>\n"
             f"User: {voice_command}\n"
             "Assistant:"
         )
 
     def build_training_completion(self, tool_call: Dict[str, Any]) -> str:
-        """Format as <function=name>{args}</function> matching Llama 3.1's output."""
-        name: str = tool_call.get("name", "")
-        args: dict = tool_call.get("arguments", {})
-        return f" <function={name}>{json.dumps(args)}</function>"
+        """Format as <tool_call> XML tags matching Gemma 2's instructed output."""
+        return f" <tool_call>\n{json.dumps(tool_call)}\n</tool_call>"
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "provider_name": self.name,
-            "model_family": "llama",
+            "model_family": "gemma",
             "size_tier": "medium",
             "training_tier": "untrained",
             "use_tool_classifier": self.use_tool_classifier,

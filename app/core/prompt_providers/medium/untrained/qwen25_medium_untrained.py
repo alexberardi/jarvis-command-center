@@ -23,6 +23,12 @@ from app.core.prompt_providers.shared.context_builders import (
     build_agent_context_section,
     build_direct_answer_section,
 )
+from app.core.prompt_providers.shared.core_rules import (
+    ANTI_HALLUCINATION_MANDATE,
+    build_fallback_line,
+    build_identity_header,
+    build_rules_block,
+)
 from app.core.prompt_providers.shared.tool_formatters import format_tools_for_prompt
 from app.core.tool_builder import ToolBuilder
 
@@ -113,10 +119,18 @@ class Qwen25MediumUntrained(IJarvisPromptProvider):
         # Build <tools> block matching Qwen 2.5's chat template
         tools_block: str = Qwen25MediumUntrained._build_tools_block(tools)
 
-        system_prompt: str = f"""You are Jarvis, a function calling voice assistant.
-Context: room={room}, user={user}, style={voice_mode}
+        # Shared header
+        identity: str = build_identity_header(room, user, voice_mode)
 
-You are a function calling AI model. You may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions. You MUST call a function for any request that matches an available tool — NEVER fabricate data, pretend to perform actions, or answer from memory for weather, sports, calendar, timers, searches, or any tool-covered domain.
+        # Shared rules (Qwen25: default param_names_rule, default terminology)
+        rules: str = build_rules_block()
+
+        # Shared fallback
+        fallback: str = build_fallback_line()
+
+        system_prompt: str = f"""{identity}
+
+You are a function calling AI model. You may call one or more functions to assist with the user query. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
 
 You are provided with function signatures within <tools></tools> XML tags:
 {tools_block}
@@ -126,16 +140,10 @@ For each function call, return a json object with function name and arguments wi
 {{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}}}
 </tool_call>
 
-Rules:
-- Call ONE function at a time to fulfill requests.
-- Use the actual parameter names from the function schema above.
-- Pick the function that best matches intent; use get_command_utterance_examples if unsure.
-- Extract parameters from the user's words; only request clarification if required params are truly missing/ambiguous.
-- For date parameters like resolved_datetimes, use natural words: "today", "tomorrow", "day_after_tomorrow", "this_weekend", "this_year". NEVER convert to ISO dates or timestamps.
-- Always populate required function parameters from the user's request.
+{rules}
 {direct_answer_section}
 {agent_context_section}
-Only respond with a brief spoken reply for general knowledge questions, greetings, or jokes that have NO matching tool.
+{fallback}
 
 Tools:
 {tools_section}
@@ -213,6 +221,23 @@ Tools:
             })
 
         return None
+
+    def build_training_prompt(self, voice_command: str) -> str:
+        """Build training prompt matching Qwen 2.5's inference system prompt."""
+        return (
+            "You are a function calling AI model. "
+            "For each function call, return a json object with function name and arguments "
+            "within <tool_call></tool_call> XML tags:\n"
+            "<tool_call>\n"
+            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}}\n'
+            "</tool_call>\n"
+            f"User: {voice_command}\n"
+            "Assistant:"
+        )
+
+    def build_training_completion(self, tool_call: Dict[str, Any]) -> str:
+        """Format as <tool_call> XML tags matching Qwen 2.5's output."""
+        return f" <tool_call>\n{json.dumps(tool_call)}\n</tool_call>"
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
