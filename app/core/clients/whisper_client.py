@@ -100,3 +100,87 @@ class WhisperClient:
             )
             response.raise_for_status()
             return response.json()
+
+    async def enroll_voice_profile(
+        self,
+        user_id: int,
+        audio: bytes,
+        filename: str,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Upload a voice sample for speaker enrollment.
+
+        Args:
+            user_id: The user to enroll
+            audio: WAV audio bytes
+            filename: Original filename
+            timeout: Request timeout in seconds
+
+        Returns:
+            Enrollment result dict
+        """
+        url = f"{self.base_url.rstrip('/')}/voice-profiles/enroll"
+        params = {
+            "user_id": str(user_id),
+            "household_id": self.household_id,
+        }
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                url,
+                files={"file": (filename, audio)},
+                params=params,
+                headers=self._build_headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def delete_voice_profile(
+        self,
+        user_id: int,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """Delete a voice profile.
+
+        Args:
+            user_id: The user whose profile to delete
+            timeout: Request timeout in seconds
+
+        Returns:
+            Deletion result dict
+        """
+        url = f"{self.base_url.rstrip('/')}/voice-profiles/{user_id}"
+        params = {"household_id": self.household_id}
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.delete(
+                url,
+                params=params,
+                headers=self._build_headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def list_voice_profiles(
+        self,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """List voice profiles for the household.
+
+        Args:
+            timeout: Request timeout in seconds
+
+        Returns:
+            Dict with profiles list
+        """
+        url = f"{self.base_url.rstrip('/')}/voice-profiles"
+        params = {"household_id": self.household_id}
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                url,
+                params=params,
+                headers=self._build_headers(),
+            )
+            response.raise_for_status()
+            return response.json()

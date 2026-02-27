@@ -259,6 +259,10 @@ app.include_router(node_commands.router, prefix="/api/v0", tags=["node-commands"
 # Include test commands router (app-to-app auth)
 app.include_router(test_commands.router, prefix="/api/v0", tags=["testing"])
 
+# Include memory CRUD router
+from app.api import memories
+app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
+
 # Settings router is included in startup_event after service_config is initialized
 
 
@@ -289,10 +293,11 @@ async def start_conversation(
             "node_id": node_context_provider.node.node_id,
             "user": node_context_provider.node.user,
             "voice_mode": node_context_provider.node.voice_mode,
-            "adapter_hash": node_context_provider.node.adapter_hash
+            "adapter_hash": node_context_provider.node.adapter_hash,
+            "household_id": node_context_provider.household_id,
         }
 
-        # Extract timezone from client context for date calculations
+        # Extract timezone and speaker identity from client context
         client_timezone = None
         if request.node_context:
             client_timezone = request.node_context.get("timezone")
@@ -300,6 +305,24 @@ async def start_conversation(
             if "agents" in request.node_context:
                 node_context["agents"] = request.node_context["agents"]
                 logger.info(f"📦 Received agent context: {list(request.node_context['agents'].keys())}")
+
+            # Extract speaker identity from voice recognition
+            speaker_user_id = request.node_context.get("speaker_user_id")
+            if speaker_user_id is not None:
+                node_context["speaker_user_id"] = speaker_user_id
+                # Resolve speaker_user_id to display name
+                try:
+                    from app.core import service_config
+                    from app.core.utils.speaker_resolver import resolve_speaker_name
+                    auth_url = service_config.get_auth_url()
+                    speaker_name = await resolve_speaker_name(auth_url, speaker_user_id)
+                    if speaker_name:
+                        node_context["speaker_name"] = speaker_name
+                        logger.info(f"🎤 Speaker identified: {speaker_name} (user_id={speaker_user_id})")
+                    else:
+                        logger.info(f"🎤 Speaker user_id={speaker_user_id} (name not resolved)")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to resolve speaker name: {e}")
 
         client_tools = request.client_tools or []
         logger.info(f"🔧 Starting tool-based conversation with {len(client_tools)} client tools (skip_warmup={request.skip_warmup_inference})")
@@ -536,6 +559,7 @@ async def train_adapter(
                 if provider is not None:
                     example_dict["formatted_completion"] = provider.build_training_completion(tool_call)
                     example_dict["formatted_prompt"] = provider.build_training_prompt(ex.voice_command)
+                    example_dict["formatted_system_prompt"] = provider.build_training_system_prompt()
                 formatted_examples.append(example_dict)
             dataset_commands.append(
                 {

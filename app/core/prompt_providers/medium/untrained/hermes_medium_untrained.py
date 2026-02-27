@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.prompt_providers.shared.context_builders import (
-    build_agent_context_section,
+    build_agent_context_summary,
     build_direct_answer_section,
 )
 from app.core.prompt_providers.shared.tool_formatters import format_tools_for_prompt
@@ -95,12 +95,13 @@ class HermesMediumUntrained(IJarvisPromptProvider):
         node_context = node_context or {}
 
         room: str = node_context.get("room", "unknown")
-        user: str = node_context.get("user", "default")
+        user: str = node_context.get("speaker_name") or node_context.get("user", "default")
         voice_mode: str = node_context.get("voice_mode", "brief")
+        user_memories: str = node_context.get("user_memories", "")
 
         # Shared sections
         direct_answer_section: str = build_direct_answer_section(available_commands)
-        agent_context_section: str = build_agent_context_section(node_context)
+        agent_context_section: str = build_agent_context_summary(node_context)
 
         # Tool descriptions with primary examples only (for intent guidance)
         tools_section: str = format_tools_for_prompt(
@@ -110,8 +111,14 @@ class HermesMediumUntrained(IJarvisPromptProvider):
         # Build <tools> XML block for Hermes's fine-tuned format
         tools_xml: str = HermesMediumUntrained._build_tools_xml(tools)
 
+        # Build memory block
+        memory_block: str = ""
+        if user_memories:
+            memory_block = f"\nAbout {user}:\n{user_memories}\n"
+
         system_prompt: str = f"""You are Jarvis, a function calling voice assistant.
 Context: room={room}, user={user}, style={voice_mode}
+{memory_block}
 
 You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions.
 

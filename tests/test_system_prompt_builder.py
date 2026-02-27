@@ -137,6 +137,99 @@ class TestBuildToolSystemMessage:
         assert len(result) > 0
         assert "Jarvis" in result
 
+    def test_speaker_name_used_when_present(self):
+        from app.core.system_prompt_builder import build_tool_system_message
+
+        node_context = {
+            "room": "kitchen",
+            "user": "default",
+            "voice_mode": "brief",
+            "speaker_name": "Alice",
+        }
+        tools = []
+
+        with patch.dict(os.environ, {"JARVIS_PROMPT_STYLE": "compact"}):
+            result = build_tool_system_message(node_context, None, tools)
+
+        assert "Alice" in result
+        assert "speaker=Alice" in result
+
+    def test_speaker_name_used_in_full_prompt(self):
+        from app.core.system_prompt_builder import build_tool_system_message
+
+        node_context = {
+            "room": "living room",
+            "user": "default",
+            "voice_mode": "detailed",
+            "speaker_name": "Bob",
+        }
+        tools = []
+
+        with patch.dict(os.environ, {"JARVIS_PROMPT_STYLE": "full"}):
+            result = build_tool_system_message(node_context, None, tools)
+
+        assert "Bob" in result
+        assert "User: Bob" in result
+
+    def test_falls_back_to_user_when_no_speaker(self):
+        from app.core.system_prompt_builder import build_tool_system_message
+
+        node_context = {"room": "office", "user": "john", "voice_mode": "brief"}
+        tools = []
+
+        with patch.dict(os.environ, {"JARVIS_PROMPT_STYLE": "compact"}):
+            result = build_tool_system_message(node_context, None, tools)
+
+        assert "speaker=john" in result
+
+    def test_includes_user_memories_compact(self):
+        from app.core.system_prompt_builder import build_tool_system_message
+
+        node_context = {
+            "room": "kitchen",
+            "user": "default",
+            "voice_mode": "brief",
+            "speaker_name": "Alice",
+            "user_memories": "- likes coffee black\n- vegetarian",
+        }
+        tools = []
+
+        with patch.dict(os.environ, {"JARVIS_PROMPT_STYLE": "compact"}):
+            result = build_tool_system_message(node_context, None, tools)
+
+        assert "About Alice:" in result
+        assert "likes coffee black" in result
+        assert "vegetarian" in result
+
+    def test_includes_user_memories_full(self):
+        from app.core.system_prompt_builder import build_tool_system_message
+
+        node_context = {
+            "room": "kitchen",
+            "user": "default",
+            "voice_mode": "detailed",
+            "speaker_name": "Bob",
+            "user_memories": "- prefers metric units",
+        }
+        tools = []
+
+        with patch.dict(os.environ, {"JARVIS_PROMPT_STYLE": "full"}):
+            result = build_tool_system_message(node_context, None, tools)
+
+        assert "About Bob:" in result
+        assert "prefers metric units" in result
+
+    def test_omits_memory_block_when_no_memories(self):
+        from app.core.system_prompt_builder import build_tool_system_message
+
+        node_context = {"room": "office", "user": "test", "voice_mode": "brief"}
+        tools = []
+
+        with patch.dict(os.environ, {"JARVIS_PROMPT_STYLE": "compact"}):
+            result = build_tool_system_message(node_context, None, tools)
+
+        assert "About" not in result
+
     def test_available_commands_flags(self):
         from app.core.system_prompt_builder import build_tool_system_message
 

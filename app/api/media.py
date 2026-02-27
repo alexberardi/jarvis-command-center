@@ -91,6 +91,50 @@ async def whisper_transcribe(
     return await client.transcribe(audio_bytes, filename, **params)
 
 
+@router.post("/whisper/voice-profiles/enroll")
+async def whisper_enroll_voice_profile(
+    user_id: int,
+    file: UploadFile = File(...),
+    node_context: NodeContextProvider = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Enroll a voice profile for speaker identification.
+
+    Proxies the request to the Whisper service with app-to-app auth.
+    """
+    client = WhisperClient(
+        household_id=node_context.household_id,
+        node_id=node_context.node.node_id,
+    )
+    audio_bytes = await file.read()
+    filename = file.filename or "enrollment.wav"
+    return await client.enroll_voice_profile(user_id, audio_bytes, filename)
+
+
+@router.delete("/whisper/voice-profiles/{user_id}")
+async def whisper_delete_voice_profile(
+    user_id: int,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Delete a voice profile."""
+    client = WhisperClient(
+        household_id=node_context.household_id,
+        node_id=node_context.node.node_id,
+    )
+    return await client.delete_voice_profile(user_id)
+
+
+@router.get("/whisper/voice-profiles")
+async def whisper_list_voice_profiles(
+    node_context: NodeContextProvider = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List voice profiles for the node's household."""
+    client = WhisperClient(
+        household_id=node_context.household_id,
+        node_id=node_context.node.node_id,
+    )
+    return await client.list_voice_profiles()
+
+
 @router.post("/tts/generate-wake-response")
 async def tts_generate_wake_response(
     node_context: NodeContextProvider = Depends(verify_api_key),
