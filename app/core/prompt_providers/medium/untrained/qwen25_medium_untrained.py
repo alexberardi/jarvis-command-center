@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.prompt_providers.shared.context_builders import (
-    build_agent_context_section,
+    build_agent_context_summary,
     build_direct_answer_section,
 )
 from app.core.prompt_providers.shared.core_rules import (
@@ -104,12 +104,13 @@ class Qwen25MediumUntrained(IJarvisPromptProvider):
         node_context = node_context or {}
 
         room: str = node_context.get("room", "unknown")
-        user: str = node_context.get("user", "default")
+        user: str = node_context.get("speaker_name") or node_context.get("user", "default")
         voice_mode: str = node_context.get("voice_mode", "brief")
+        user_memories: str = node_context.get("user_memories", "")
 
         # Shared sections
         direct_answer_section: str = build_direct_answer_section(available_commands)
-        agent_context_section: str = build_agent_context_section(node_context)
+        agent_context_section: str = build_agent_context_summary(node_context)
 
         # Tool descriptions with primary examples only (for intent guidance)
         tools_section: str = format_tools_for_prompt(
@@ -119,8 +120,8 @@ class Qwen25MediumUntrained(IJarvisPromptProvider):
         # Build <tools> block matching Qwen 2.5's chat template
         tools_block: str = Qwen25MediumUntrained._build_tools_block(tools)
 
-        # Shared header
-        identity: str = build_identity_header(room, user, voice_mode)
+        # Shared header (includes user memories if present)
+        identity: str = build_identity_header(room, user, voice_mode, user_memories)
 
         # Shared rules (Qwen25: default param_names_rule, default terminology)
         rules: str = build_rules_block()
@@ -221,19 +222,6 @@ Tools:
             })
 
         return None
-
-    def build_training_prompt(self, voice_command: str) -> str:
-        """Build training prompt matching Qwen 2.5's inference system prompt."""
-        return (
-            "You are a function calling AI model. "
-            "For each function call, return a json object with function name and arguments "
-            "within <tool_call></tool_call> XML tags:\n"
-            "<tool_call>\n"
-            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}}\n'
-            "</tool_call>\n"
-            f"User: {voice_command}\n"
-            "Assistant:"
-        )
 
     def build_training_completion(self, tool_call: Dict[str, Any]) -> str:
         """Format as <tool_call> XML tags matching Qwen 2.5's output."""

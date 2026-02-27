@@ -95,17 +95,23 @@ def build_tool_system_message(
     reason_suffix_block = '\n  "reason": "<optional>"' if include_reason else ""
 
     room = node_context.get("room", "unknown")
-    user = node_context.get("user", "default")
+    speaker_name = node_context.get("speaker_name") or node_context.get("user", "default")
     voice_mode = node_context.get("voice_mode", "brief")
+    user_memories = node_context.get("user_memories", "")
+
+    # Build memory block if memories exist
+    memory_block = ""
+    if user_memories:
+        memory_block = f"\nAbout {speaker_name}:\n{user_memories}\n"
 
     if prompt_style == "full":
         system_msg = f"""You are Jarvis, a voice-controlled assistant that operates BY CALLING TOOLS.
 
 Node Context:
 - Room: {room}
-- User: {user}
+- User: {speaker_name}
 - Voice Mode: {voice_mode}
-
+{memory_block}
 YOUR PRIMARY ROLE: You are a tool router and parameter extractor.
 - Analyze the user's request
 - Determine which available tool(s) to call
@@ -158,8 +164,8 @@ Key Guidelines:
     else:
         system_msg = f"""You are Jarvis. Always call tools; respond with VALID JSON only.
 
-Context: room={room}, user={user}, style={voice_mode}
-
+Context: room={room}, speaker={speaker_name}, style={voice_mode}
+{memory_block}
 Rules:
 - Call ONE tool at a time.
 - Relative dates are resolved automatically; use natural terms like 'tomorrow' or 'next_week' in date parameters.

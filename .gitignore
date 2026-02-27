@@ -89,6 +89,7 @@ temp_*.py
 temp/tool_classifier.bin
 temp/tool_router_extra_training.jsonl
 temp/tool_router_training.jsonl
+temp/test_results*.json
 
 # Logs
 logs/

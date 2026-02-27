@@ -68,18 +68,30 @@ FALLBACK_BRIEF_REPLY_HERMES: str = (
 # ---------------------------------------------------------------------------
 
 
-def build_identity_header(room: str, user: str, voice_mode: str) -> str:
-    """Return the two-line identity + context header used by all providers.
+def build_identity_header(
+    room: str,
+    user: str,
+    voice_mode: str,
+    user_memories: str = "",
+) -> str:
+    """Return the identity + context header used by all providers.
 
     Example output::
 
         You are Jarvis, a function calling voice assistant.
         Context: room=kitchen, user=alex, style=brief
+
+        About alex:
+        - Name: Alex
+        - Likes coffee black
     """
-    return (
+    header = (
         "You are Jarvis, a function calling voice assistant.\n"
         f"Context: room={room}, user={user}, style={voice_mode}"
     )
+    if user_memories:
+        header += f"\n\nAbout {user}:\n{user_memories}"
+    return header
 
 
 def build_rules_block(
