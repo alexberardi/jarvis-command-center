@@ -22,12 +22,25 @@ app/
 ├── main.py              # FastAPI app, startup/shutdown
 ├── chat.py              # Voice command processing
 ├── admin.py             # Node CRUD
+├── api/
+│   ├── media.py         # TTS/Whisper proxy endpoints
+│   ├── memories.py      # User memory CRUD API
+│   └── ...
 ├── core/
-│   ├── model_service.py # LLM integration, tool processing (large file)
-│   └── conversation_cache.py  # Conversation state
+│   ├── model_service.py         # LLM integration, tool processing
+│   ├── conversation_cache.py    # Conversation state
+│   ├── conversation_handler.py  # Warmup, memory loading
+│   ├── system_prompt_builder.py # Prompt construction (speaker + memories)
+│   ├── utils/
+│   │   └── speaker_resolver.py  # user_id → display name (cached)
+│   └── tools/
+│       ├── remember_tool.py     # IServerTool: save user memories
+│       └── forget_tool.py       # IServerTool: remove user memories
+├── services/
+│   └── memory_service.py        # User memory CRUD + prompt formatting
 ├── context_providers/
-│   └── node_context_provider.py  # Node auth
-├── models.py            # SQLAlchemy models
+│   └── node_context_provider.py # Node auth
+├── models.py            # SQLAlchemy models (Node, UserMemory, etc.)
 └── request_models/      # Pydantic schemas
 ```
 
@@ -55,6 +68,20 @@ app/
 **Training:**
 - `POST /api/v0/tool-router/train` → Train tool router (fastText)
 - `POST /api/v0/adapters/train` → Queue adapter training
+
+**Memories (requires admin key or JWT):**
+- `GET /api/v0/memories?user_id=&household_id=` → List active memories
+- `POST /api/v0/memories?user_id=&household_id=` → Create memory (upserts on key)
+- `GET /api/v0/memories/{id}` → Get single memory
+- `PUT /api/v0/memories/{id}` → Update memory
+- `DELETE /api/v0/memories/{id}` → Soft-delete memory
+
+**Media Proxy (node auth):**
+- `POST /api/v0/media/whisper/transcribe` → Proxy to whisper
+- `POST /api/v0/media/tts/speak` → Proxy to TTS
+- `POST /api/v0/media/whisper/voice-profiles/enroll` → Enroll voice profile
+- `DELETE /api/v0/media/whisper/voice-profiles/{user_id}` → Delete voice profile
+- `GET /api/v0/media/whisper/voice-profiles` → List voice profiles
 
 **Health:**
 - `GET /health` → Health check
