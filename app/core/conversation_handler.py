@@ -128,6 +128,9 @@ class ConversationHandler:
         """
         logger.info(f"🔥 Warming up tool-based conversation {conversation_id[:8]}...")
 
+        # Check memory settings (used for both tool gating and memory loading)
+        _memory_enabled, _recall_enabled = self._get_memory_settings(node_context)
+
         # Get server tools from registry
         # Text-based providers should only see client/command tools in the prompt.
         # Server tools (get_command_utterance_examples, request_validation) confuse
@@ -138,6 +141,29 @@ class ConversationHandler:
         )
         if use_text_path:
             server_tools = []
+            # Whitelist safe server tools for the text-based path.
+            # Only tools that are simple CRUD / one-shot operations belong
+            # here.  Avoid tools that trigger follow-up LLM calls or loops
+            # (e.g. get_command_utterance_examples, request_validation).
+            _safe_tool_names: list[str] = []
+            if node_context and node_context.get("agents", {}).get("home_assistant"):
+                _safe_tool_names.append("get_ha_entities")
+            # Only include tools that require speaker identification when
+            # a speaker has actually been identified for this conversation.
+            _has_speaker = bool(
+                node_context and node_context.get("speaker_user_id")
+            )
+
+            # Gate memory tools on settings
+            if _has_speaker and _memory_enabled:
+                _safe_tool_names.extend(["remember", "forget"])
+                if _recall_enabled:
+                    _safe_tool_names.append("recall")
+
+            for tool_name in _safe_tool_names:
+                tool = tool_registry.get_tool(tool_name)
+                if tool:
+                    server_tools.append(tool.to_openai_format())
         else:
             server_tools = tool_registry.get_tools_for_model(self.model.name)
         server_tool_names = {get_tool_name(t) for t in server_tools if get_tool_name(t)}
@@ -166,6 +192,48 @@ class ConversationHandler:
         available_command_flags = build_available_command_flags(
             [cmd for cmd in command_examples if cmd.get("command_name")]
         )
+
+        # Load user memories for identified speaker (only if memory feature is enabled)
+        speaker_user_id = node_context.get("speaker_user_id") if node_context else None
+        household_id = node_context.get("household_id") if node_context else None
+        if speaker_user_id and household_id and _memory_enabled:
+            try:
+                from app.db import get_session_local
+                from app.services.memory_service import MemoryService
+
+                # Get pinned_max_chars from settings
+                pinned_max_chars = 500
+                try:
+                    from app.services.settings_service import get_settings_service
+                    settings = get_settings_service()
+                    val = settings.get("memory.pinned_max_chars")
+                    if val is not None:
+                        pinned_max_chars = int(val)
+                except Exception:
+                    pass
+
+                SessionLocal = get_session_local()
+                db = SessionLocal()
+                try:
+                    svc = MemoryService(db)
+                    memories_text = svc.get_memories_for_prompt(
+                        speaker_user_id, household_id, max_chars=pinned_max_chars
+                    )
+                    if memories_text:
+                        node_context["user_memories"] = memories_text
+                        logger.info(f"📝 Loaded {len(memories_text)} chars of user memories for speaker {speaker_user_id}")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load user memories: {e}")
+
+        # Fetch date keys for prompt providers that need them
+        try:
+            date_keys = await self.llm_client.get_date_keys()
+            if date_keys:
+                node_context["date_keys"] = date_keys
+        except Exception as e:
+            logger.warning("Failed to fetch date keys for prompt: %s", e)
 
         # Build system prompt (new provider first, then legacy model)
         system_prompt = self._get_system_prompt(
@@ -542,6 +610,40 @@ class ConversationHandler:
                 node_context, timezone, tools, available_command_flags
             )
         return "You are a helpful voice assistant."
+
+    @staticmethod
+    def _get_memory_settings(node_context: Dict[str, Any] | None) -> tuple[bool, bool]:
+        """Check memory settings for the current context.
+
+        Returns:
+            Tuple of (memory_enabled, recall_enabled)
+        """
+        try:
+            from app.services.settings_service import get_settings_service
+
+            settings = get_settings_service()
+            household_id = node_context.get("household_id") if node_context else None
+            user_id = node_context.get("speaker_user_id") if node_context else None
+
+            kwargs: Dict[str, Any] = {}
+            if household_id:
+                kwargs["household_id"] = str(household_id)
+
+            memory_enabled = settings.get("memory.enabled", **kwargs)
+            recall_enabled = settings.get("memory.recall_enabled", **kwargs)
+
+            # Settings returns the raw value — may be string "true"/"false" or bool
+            def to_bool(val: Any) -> bool:
+                if isinstance(val, bool):
+                    return val
+                if isinstance(val, str):
+                    return val.lower() in ("true", "1", "yes")
+                return bool(val)
+
+            return to_bool(memory_enabled), to_bool(recall_enabled)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to check memory settings, defaulting to enabled: {e}")
+            return True, True
 
     def _rebuild_system_prompt(
         self,

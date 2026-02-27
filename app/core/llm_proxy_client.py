@@ -243,6 +243,59 @@ class LLMProxyClient:
                 "description": "Failed to fetch engine info, assuming caching is available"
             }
 
+    async def get_date_keys(self) -> list[str]:
+        """Fetch available date key vocabulary from llm-proxy."""
+        url = self._build_url("/v1/adapters/date-keys")
+        try:
+            result = await get(url=url, headers=self._build_headers())
+            keys: list[str] = result.get("static_keys", [])
+            logger.info("Fetched %d date keys from llm-proxy", len(keys))
+            return keys
+        except Exception as e:
+            logger.warning("Failed to fetch date keys: %s", e)
+            return []
+
+    async def create_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for the given texts via the LLM proxy (async).
+
+        Args:
+            texts: List of text strings to embed.
+
+        Returns:
+            List of embedding vectors, sorted by index.
+
+        Raises:
+            Exception: If the embedding request fails.
+        """
+        url = self._build_url("/v1/embeddings")
+        payload = {"input": texts}
+        result = await post(url=url, json_data=payload, headers=self._build_headers())
+
+        # Parse OpenAI-format response and sort by index
+        data = result.get("data", [])
+        data.sort(key=lambda d: d["index"])
+        return [d["embedding"] for d in data]
+
+    def create_embeddings_sync(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for the given texts via the LLM proxy (sync).
+
+        Safe to call from synchronous tool code running inside FastAPI's
+        event loop (where ``asyncio.new_event_loop()`` would fail).
+
+        Args:
+            texts: List of text strings to embed.
+
+        Returns:
+            List of embedding vectors, sorted by index.
+        """
+        url = self._build_url("/v1/embeddings")
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(url, json={"input": texts}, headers=self._build_headers())
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            data.sort(key=lambda d: d["index"])
+            return [d["embedding"] for d in data]
+
     async def allows_warmup_caching(self) -> bool:
         """
         Check if the LLM engine benefits from warmup messages (prefix caching).

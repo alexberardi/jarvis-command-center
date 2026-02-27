@@ -56,7 +56,7 @@ class TestSettingsDefinitions:
         """Test that categories are descriptive."""
         categories = set(d.category for d in SETTINGS_DEFINITIONS)
         expected_categories = {"llm", "tool_classifier", "tool_router", "transcription",
-                              "prompt", "model", "conversation", "admin"}
+                              "prompt", "model", "conversation", "admin", "memory"}
         assert categories == expected_categories
 
 

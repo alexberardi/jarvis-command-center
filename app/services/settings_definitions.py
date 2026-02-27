@@ -111,6 +111,43 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         env_fallback="JARVIS_CONVERSATION_CACHE_TTL",
     ),
 
+    # Memory settings
+    SettingDefinition(
+        key="memory.enabled",
+        category="memory",
+        value_type="bool",
+        default=True,
+        description="Master toggle for remember/forget/recall tools",
+    ),
+    SettingDefinition(
+        key="memory.recall_enabled",
+        category="memory",
+        value_type="bool",
+        default=True,
+        description="Enable semantic search via the recall tool",
+    ),
+    SettingDefinition(
+        key="memory.pinned_max_chars",
+        category="memory",
+        value_type="int",
+        default=500,
+        description="Maximum characters for pinned memories in the system prompt",
+    ),
+    SettingDefinition(
+        key="memory.recall_similarity_threshold",
+        category="memory",
+        value_type="float",
+        default=0.3,
+        description="Minimum cosine similarity for recall results (0-1)",
+    ),
+    SettingDefinition(
+        key="memory.recall_max_results",
+        category="memory",
+        value_type="int",
+        default=5,
+        description="Maximum number of recall results returned",
+    ),
+
     # Admin settings
     SettingDefinition(
         key="admin.api_key",
