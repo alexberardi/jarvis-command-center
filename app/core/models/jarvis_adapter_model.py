@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.core.models.jarvis_tool_model import JarvisToolModel
+from app.core.prompt_providers.shared.context_builders import build_agent_context_summary
 from app.core.tool_call_parser import tool_call_parser
 
 logger = logging.getLogger("uvicorn")
@@ -140,7 +141,7 @@ class JarvisAdapterModel(JarvisToolModel):
             primary_examples_only=True
         )
 
-        agent_context_section = self._build_agent_context_section(node_context)
+        agent_context_section = build_agent_context_summary(node_context)
 
         system_prompt = f"""You are Jarvis, a voice assistant that uses tools.
 Context: room={room}, user={user}, style={voice_mode}
