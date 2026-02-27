@@ -1,5 +1,6 @@
 from uuid import uuid4
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, Column, String, DateTime, Integer, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime, timedelta
@@ -245,6 +246,29 @@ class AuthSession(Base):
 
     # Relationships
     node = relationship("Node", backref="auth_sessions")
+
+
+class UserMemory(Base):
+    """Persistent user memory for voice-identified personalization.
+
+    Stores facts, preferences, and notes about users so Jarvis can
+    personalize responses across conversations.
+    """
+    __tablename__ = 'user_memories'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False)
+    household_id = Column(String(255), nullable=False)
+    category = Column(String(100), nullable=False, default='general')  # preference, fact, note
+    key = Column(String(255), nullable=True)  # optional structured key for upsert
+    content = Column(Text, nullable=False)
+    source = Column(String(50), nullable=False, default='voice')  # voice, ui, system
+    is_active = Column(Boolean, nullable=False, default=True)
+    is_pinned = Column(Boolean, nullable=False, server_default='false')
+    embedding = Column(Vector(384), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
 
 
 class ProvisioningToken(Base):

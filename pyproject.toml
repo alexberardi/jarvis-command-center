@@ -21,6 +21,7 @@ dependencies = [
     "debugpy",
     "rapidfuzz",
     "psycopg2-binary",
+    "pgvector>=0.3.0",
     "pytz",
     "fasttext",
     "numpy<2",
