@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.core.models.jarvis_adapter_model import JarvisAdapterModel
+from app.core.prompt_providers.shared.context_builders import build_agent_context_summary
 
 logger = logging.getLogger("uvicorn")
 
@@ -56,7 +57,7 @@ class JarvisTrainedAdapterModel(JarvisAdapterModel):
         voice_mode = node_context.get("voice_mode", "brief")
 
         # Reuse parent's HA context builder
-        agent_context_section = self._build_agent_context_section(node_context)
+        agent_context_section = build_agent_context_summary(node_context)
 
         # Tool names only — adapter already knows schemas
         tool_names = [t.get("name", "") for t in tools if t.get("name")]

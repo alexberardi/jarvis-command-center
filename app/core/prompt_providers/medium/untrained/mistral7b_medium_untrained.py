@@ -4,11 +4,11 @@ Mistral7bMediumUntrained - Prompt provider for Mistral 7B Instruct v0.3.
 Optimized for Mistral 7B Instruct v0.3 (Q4_K_M GGUF) with text-based tool calling.
 
 Key features:
-- Tools presented using Mistral's [AVAILABLE_TOOLS] format
-- Model emits [TOOL_CALLS] with JSON array of function calls
-- parse_response transforms [TOOL_CALLS] output into Jarvis JSON
-- supports_native_tools=False (text-based): model outputs tool call tokens,
-  not structured tool_calls via llama-cpp-python's tools parameter
+- Uses chatml chat_format (mistral-instruct drops system messages)
+- Tools presented in <tools> XML tags with <tool_call> output format
+- parse_response handles both <tool_call> XML tags and Mistral's native
+  [TOOL_CALLS] format for robustness
+- supports_native_tools=False (text-based): model outputs tool call tags
 - build_tools() ready for native path via ToolBuilder
 """
 
@@ -20,27 +20,25 @@ from typing import Any, Dict, List, Optional
 
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.prompt_providers.shared.context_builders import (
-    build_agent_context_section,
+    build_agent_context_summary,
     build_direct_answer_section,
-)
-from app.core.prompt_providers.shared.core_rules import (
-    ANTI_HALLUCINATION_MANDATE,
-    build_fallback_line,
-    build_identity_header,
-    build_rules_block,
 )
 from app.core.prompt_providers.shared.tool_formatters import format_tools_for_prompt
 from app.core.tool_builder import ToolBuilder
 
 logger = logging.getLogger("uvicorn")
 
-# Pattern for Mistral's native tool call format: [TOOL_CALLS] [{...}]
-# The model emits a JSON array after the [TOOL_CALLS] token.
+# Primary: <tool_call>{"name":...,"arguments":...}</tool_call> output
+_TOOL_CALL_TAG_RE = re.compile(
+    r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL
+)
+
+# Fallback: Mistral's native [TOOL_CALLS] [{...}] format
 _TOOL_CALLS_RE = re.compile(
     r"\[TOOL_CALLS\]\s*(\[.*\])", re.DOTALL
 )
 
-# Fallback: model emits a single JSON object (not array) after [TOOL_CALLS]
+# Fallback: single JSON object after [TOOL_CALLS]
 _TOOL_CALLS_SINGLE_RE = re.compile(
     r"\[TOOL_CALLS\]\s*(\{.*\})", re.DOTALL
 )
@@ -54,8 +52,9 @@ class Mistral7bMediumUntrained(IJarvisPromptProvider):
     Prompt provider for Mistral 7B Instruct v0.3 (untrained).
 
     Strategy:
-    - Tools in [AVAILABLE_TOOLS] format (Mistral's fine-tuned token format)
-    - Model emits [TOOL_CALLS] with JSON array of calls
+    - chatml chat_format (mistral-instruct drops system messages)
+    - Tools in <tools> XML tags, same structure as Hermes/Gemma providers
+    - Concrete example to demonstrate expected <tool_call> output
     - Agent context (HA devices) included for device awareness
     - Primary examples only to save context window
     - fastText classifier enabled for routing hints
@@ -71,7 +70,8 @@ class Mistral7bMediumUntrained(IJarvisPromptProvider):
 
     @property
     def supports_native_tools(self) -> bool:
-        # Text-based [TOOL_CALLS] format matches Mistral's fine-tuning.
+        # Text-based <tool_call> format. mistral-instruct chat format
+        # drops system messages, so we use chatml instead.
         return False
 
     def build_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -79,17 +79,13 @@ class Mistral7bMediumUntrained(IJarvisPromptProvider):
         return ToolBuilder.build(tools)
 
     @staticmethod
-    def _build_available_tools(tools: List[Dict[str, Any]]) -> str:
-        """Build Mistral-style [AVAILABLE_TOOLS] block.
-
-        Matches Mistral v0.3's chat template: tools as a JSON array between
-        [AVAILABLE_TOOLS] and [/AVAILABLE_TOOLS] tokens.
-        """
+    def _build_tools_xml(tools: List[Dict[str, Any]]) -> str:
+        """Build <tools> XML block from tool definitions."""
         clean_tools: List[Dict[str, Any]] = ToolBuilder.build(tools)
         if not clean_tools:
-            return "[AVAILABLE_TOOLS] [] [/AVAILABLE_TOOLS]"
-        tools_json: str = json.dumps(clean_tools, separators=(",", ":"))
-        return f"[AVAILABLE_TOOLS] {tools_json} [/AVAILABLE_TOOLS]"
+            return "<tools>\n</tools>"
+        tool_json: str = json.dumps(clean_tools, indent=2)
+        return f"<tools>\n{tool_json}\n</tools>"
 
     def build_system_prompt(
         self,
@@ -99,10 +95,12 @@ class Mistral7bMediumUntrained(IJarvisPromptProvider):
         available_commands: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
-        Build system prompt using Mistral's native tool calling format.
+        Build system prompt for Mistral 7B Instruct v0.3.
 
-        Tools are presented in [AVAILABLE_TOOLS] blocks matching Mistral v0.3's
-        fine-tuned function calling tokens.
+        Mirrors the Hermes/Gemma prompt structure which achieves 91%+ accuracy:
+        tools in <tools> XML tags, concise inline rules, <tool_call> output
+        format. Requires chatml chat_format since mistral-instruct drops
+        system messages.
         """
         available_commands = available_commands or []
         node_context = node_context or {}
@@ -113,40 +111,43 @@ class Mistral7bMediumUntrained(IJarvisPromptProvider):
 
         # Shared sections
         direct_answer_section: str = build_direct_answer_section(available_commands)
-        agent_context_section: str = build_agent_context_section(node_context)
+        agent_context_section: str = build_agent_context_summary(node_context)
 
         # Tool descriptions with primary examples only (for intent guidance)
         tools_section: str = format_tools_for_prompt(
             tools, available_commands, primary_examples_only=True
         )
 
-        # Build [AVAILABLE_TOOLS] block matching Mistral's format
-        available_tools: str = Mistral7bMediumUntrained._build_available_tools(tools)
+        # Build <tools> XML block (same format as Hermes/Gemma)
+        tools_xml: str = Mistral7bMediumUntrained._build_tools_xml(tools)
 
-        # Shared header
-        identity: str = build_identity_header(room, user, voice_mode)
+        system_prompt: str = f"""You are Jarvis, a function calling voice assistant.
+Context: room={room}, user={user}, style={voice_mode}
 
-        # Shared rules (Mistral: custom param_names_rule referencing "definitions")
-        rules: str = build_rules_block(
-            param_names_rule="Use the actual parameter names from the function definitions above.",
-        )
+You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You MUST call a function for any request that matches an available tool. Do not make assumptions about what values to plug into functions.
 
-        # Shared fallback
-        fallback: str = build_fallback_line()
+{tools_xml}
 
-        system_prompt: str = f"""{identity}
+For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
+<tool_call>
+{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}}}
+</tool_call>
 
-You are a function calling AI model. You are provided with function definitions below. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
+Example — if the user says "What's the weather in Miami?", respond ONLY with:
+<tool_call>
+{{"name": "get_weather", "arguments": {{"city": "Miami", "resolved_datetimes": ["today"]}}}}
+</tool_call>
 
-{available_tools}
-
-To call a function, respond with [TOOL_CALLS] followed by a JSON array:
-[TOOL_CALLS] [{{"name": "function_name", "arguments": {{"param": "value"}}}}]
-
-{rules}
+Rules:
+- You MUST call a tool for weather, sports, calendar, timers, music, device control, web search, and all other tool-covered domains. NEVER answer these from memory.
+- Call ONE tool at a time to fulfill requests.
+- Pick the tool that best matches intent; use get_command_utterance_examples if unsure.
+- Extract parameters from the user's words; only request validation if required params are truly missing/ambiguous.
+- For date parameters like resolved_datetimes, use natural words: "today", "tomorrow", "day_after_tomorrow", "this_weekend", "this_year". NEVER convert to ISO dates or timestamps.
+- Always populate required tool parameters from the user's request.
 {direct_answer_section}
 {agent_context_section}
-{fallback}
+For final answers with no tool needed, respond with a brief spoken reply.
 
 Tools:
 {tools_section}
@@ -164,38 +165,56 @@ Tools:
         return system_prompt
 
     def get_response_format(self) -> Optional[Dict[str, Any]]:
-        """Return text mode — Mistral outputs [TOOL_CALLS] tokens, not JSON."""
+        """Return text mode — Mistral outputs <tool_call> tags, not JSON."""
         return {"type": "text"}
 
     def parse_response(self, raw_content: str) -> Optional[str]:
         """
-        Transform Mistral native output into Jarvis JSON format.
+        Transform Mistral output into Jarvis JSON format.
 
-        Mistral v0.3 emits tool calls as:
-            [TOOL_CALLS] [{"name": "fn", "arguments": {...}, "id": "abc123def"}]
-
-        This method:
-        1. Extracts [TOOL_CALLS] JSON array and builds Jarvis JSON
-        2. Wraps plain text responses as Jarvis JSON messages
-        3. Returns None for content already in Jarvis JSON format (passthrough)
+        Handles two formats for robustness:
+        1. Primary: <tool_call>{"name":"x","arguments":{...}}</tool_call>
+        2. Fallback: [TOOL_CALLS] [{"name":"x","arguments":{...}}] (native Mistral)
 
         Returns:
             Transformed Jarvis JSON string, or None if no transformation needed.
         """
         cleaned: str = raw_content.strip()
 
-        # Try to extract [TOOL_CALLS] [...] (JSON array)
+        # Primary: extract ALL <tool_call>...</tool_call> blocks
+        tool_call_matches = _TOOL_CALL_TAG_RE.findall(cleaned)
+        if tool_call_matches:
+            parsed_calls: list[Dict[str, Any]] = []
+            for match in tool_call_matches:
+                try:
+                    call_obj = json.loads(match.strip())
+                except json.JSONDecodeError:
+                    logger.warning("Failed to parse tool_call JSON: %s", match[:100])
+                    continue
+                arguments = call_obj.get("arguments", {})
+                if isinstance(arguments, dict):
+                    for key in _ARRAY_PARAMS:
+                        if key in arguments and isinstance(arguments[key], str):
+                            arguments[key] = [arguments[key]]
+                parsed_calls.append(call_obj)
+            if parsed_calls:
+                return json.dumps({
+                    "message": "",
+                    "tool_calls": parsed_calls,
+                    "error": None,
+                })
+
+        # Fallback: [TOOL_CALLS] [...] (JSON array)
         match = _TOOL_CALLS_RE.search(cleaned)
         if match:
             try:
                 calls_array = json.loads(match.group(1))
                 if isinstance(calls_array, list):
-                    parsed_calls: list[Dict[str, Any]] = []
+                    parsed_calls = []
                     for call in calls_array:
                         if not isinstance(call, dict) or "name" not in call:
                             continue
                         arguments = call.get("arguments", {})
-                        # Normalize array parameters
                         if isinstance(arguments, dict):
                             for key in _ARRAY_PARAMS:
                                 if key in arguments and isinstance(arguments[key], str):
@@ -256,19 +275,9 @@ Tools:
 
         return None
 
-    def build_training_prompt(self, voice_command: str) -> str:
-        """Build training prompt matching Mistral v0.3's inference system prompt."""
-        return (
-            "You are a function calling AI model. "
-            "To call a function, respond with [TOOL_CALLS] followed by a JSON array:\n"
-            '[TOOL_CALLS] [{"name": "function_name", "arguments": {"param": "value"}}]\n'
-            f"User: {voice_command}\n"
-            "Assistant:"
-        )
-
     def build_training_completion(self, tool_call: Dict[str, Any]) -> str:
-        """Format as [TOOL_CALLS] [...] matching Mistral v0.3's output."""
-        return f" [TOOL_CALLS] [{json.dumps(tool_call)}]"
+        """Format as <tool_call> XML tags matching inference output format."""
+        return f" <tool_call>\n{json.dumps(tool_call)}\n</tool_call>"
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {

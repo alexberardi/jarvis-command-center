@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.prompt_providers.shared.context_builders import (
-    build_agent_context_section,
+    build_agent_context_summary,
     build_direct_answer_section,
 )
 from app.core.prompt_providers.shared.tool_formatters import format_tools_for_prompt
@@ -101,7 +101,7 @@ class Gemma2MediumUntrained(IJarvisPromptProvider):
 
         # Shared sections
         direct_answer_section: str = build_direct_answer_section(available_commands)
-        agent_context_section: str = build_agent_context_section(node_context)
+        agent_context_section: str = build_agent_context_summary(node_context)
 
         # Tool descriptions with primary examples only (for intent guidance)
         tools_section: str = format_tools_for_prompt(
@@ -216,19 +216,6 @@ Tools:
             })
 
         return None
-
-    def build_training_prompt(self, voice_command: str) -> str:
-        """Build training prompt matching Gemma 2's inference system prompt."""
-        return (
-            "You are a function calling AI model. "
-            "For each function call, return a json object with function name and arguments "
-            "within <tool_call></tool_call> XML tags:\n"
-            "<tool_call>\n"
-            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}}\n'
-            "</tool_call>\n"
-            f"User: {voice_command}\n"
-            "Assistant:"
-        )
 
     def build_training_completion(self, tool_call: Dict[str, Any]) -> str:
         """Format as <tool_call> XML tags matching Gemma 2's instructed output."""

@@ -139,14 +139,37 @@ class IJarvisPromptProvider(ABC):
             "error": None,
         })
 
-    def build_training_prompt(self, voice_command: str) -> str:
-        """Build the training prompt for a voice command.
+    def build_training_system_prompt(self) -> str:
+        """Return the system message used for training examples.
 
-        Default: minimal tool router prompt.
+        This is used with the tokenizer's chat template to build properly
+        formatted training data (system/user/assistant messages with correct
+        special tokens). The training script wraps this as the system message,
+        the voice command as the user message, and build_training_completion()
+        output as the assistant message.
+
+        Default: minimal tool router system prompt.
         Override if the model needs specific formatting cues.
         """
         return (
-            "You are a tool router. Return the appropriate tool call.\n"
+            "You are a function calling AI model. "
+            "For each function call return a json object with function name and arguments "
+            "within <tool_call></tool_call> XML tags as follows:\n"
+            "<tool_call>\n"
+            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}}\n'
+            "</tool_call>"
+        )
+
+    def build_training_prompt(self, voice_command: str) -> str:
+        """Build the training prompt for a voice command.
+
+        DEPRECATED: Use build_training_system_prompt() + voice_command with
+        the tokenizer's chat template instead. Kept for backward compatibility
+        with training scripts that don't support chat templates.
+        """
+        system = self.build_training_system_prompt()
+        return (
+            f"{system}\n"
             f"User: {voice_command}\n"
             "Assistant:"
         )

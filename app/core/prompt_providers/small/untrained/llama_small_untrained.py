@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional
 
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.prompt_providers.shared.context_builders import (
-    build_agent_context_section,
     build_direct_answer_section,
 )
 from app.core.prompt_providers.shared.tool_formatters import format_tools_for_prompt

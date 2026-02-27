@@ -65,6 +65,84 @@ def _format_device_line(dev: Dict[str, Any]) -> str:
     return f"- {dev_name}: {entity_id} (currently {state})"
 
 
+def build_agent_context_summary(node_context: Dict[str, Any]) -> str:
+    """
+    Build a compact summary of HA capabilities (~50 tokens) for the system prompt.
+
+    Instead of listing every device, this outputs device counts per domain
+    and the floor layout, then instructs the LLM to call get_ha_entities
+    to look up specific entity IDs on demand.
+
+    Args:
+        node_context: Node context dict, may contain an "agents" key with
+            Home Assistant device data.
+
+    Returns:
+        Compact summary string, or empty string if no agent data.
+    """
+    agents_data = node_context.get("agents", {})
+    if not agents_data:
+        return ""
+
+    ha_data = agents_data.get("home_assistant", {})
+    if not ha_data:
+        return ""
+
+    # Count devices per domain
+    light_controls: Dict[str, Any] = ha_data.get("light_controls", {})
+    device_controls: Dict[str, Any] = ha_data.get("device_controls", {})
+
+    # Lights: room groups + individual (deduplicated)
+    room_group_ids: set[str] = {
+        info.get("entity_id") for info in light_controls.values()
+    }
+    individual_lights: List[Any] = [
+        d for d in device_controls.get("light", [])
+        if d.get("entity_id") not in room_group_ids
+        and d.get("state") != "unavailable"
+    ]
+    light_count: int = len(light_controls) + len(individual_lights)
+
+    domain_counts: List[str] = []
+    if light_count:
+        domain_counts.append(f"{light_count} lights")
+
+    for domain_name, label in [
+        ("switch", "switches"),
+        ("lock", "locks"),
+        ("cover", "covers"),
+        ("climate", "climate"),
+        ("fan", "fans"),
+        ("scene", "scenes"),
+    ]:
+        items = [
+            d for d in device_controls.get(domain_name, [])
+            if d.get("state") != "unavailable"
+        ]
+        if items:
+            domain_counts.append(f"{len(items)} {label}")
+
+    if not domain_counts:
+        return ""
+
+    section = f"\nHome Assistant: {', '.join(domain_counts)}"
+
+    # Floor layout
+    floors: Dict[str, List[str]] = ha_data.get("floors", {})
+    if floors:
+        floor_parts: List[str] = [
+            f"{fname} ({', '.join(areas)})" for fname, areas in floors.items()
+        ]
+        section += f"\nFloors: {', '.join(floor_parts)}"
+
+    section += (
+        "\nDo NOT guess entity IDs. You MUST call get_ha_entities(domain, area) first "
+        "to look up the correct entity_id, then call control_device or get_device_status.\n"
+    )
+
+    return section
+
+
 def build_agent_context_section(node_context: Dict[str, Any]) -> str:
     """
     Build agent context section (e.g., Home Assistant devices) from node context.

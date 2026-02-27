@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.prompt_providers.shared.context_builders import (
-    build_agent_context_section,
+    build_agent_context_summary,
     build_direct_answer_section,
 )
 from app.core.prompt_providers.shared.core_rules import (
@@ -102,7 +102,7 @@ class Llama31MediumUntrained(IJarvisPromptProvider):
 
         # Shared sections
         direct_answer_section: str = build_direct_answer_section(available_commands)
-        agent_context_section: str = build_agent_context_section(node_context)
+        agent_context_section: str = build_agent_context_summary(node_context)
 
         # Tool descriptions with primary examples only (for intent guidance)
         tools_section: str = format_tools_for_prompt(
@@ -243,14 +243,12 @@ Tools:
 
         return None
 
-    def build_training_prompt(self, voice_command: str) -> str:
-        """Build training prompt matching Llama 3.1's inference system prompt."""
+    def build_training_system_prompt(self) -> str:
+        """System message for training — matches Llama 3.1's <function=name> format."""
         return (
             "You are a function calling AI model. "
             "To call a function, respond with:\n"
-            '<function=function_name>{"arg_name": "value"}</function>\n'
-            f"User: {voice_command}\n"
-            "Assistant:"
+            '<function=function_name>{"arg_name": "value"}</function>'
         )
 
     def build_training_completion(self, tool_call: Dict[str, Any]) -> str:
