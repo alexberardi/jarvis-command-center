@@ -31,7 +31,9 @@ class GetHAEntitiesTool(IServerTool):
     def description(self) -> str:
         return (
             "Look up Home Assistant devices by domain and optionally by area or floor. "
-            "Call this BEFORE control_device or get_device_status to find entity IDs."
+            "Call this BEFORE control_device or get_device_status to find entity IDs. "
+            "Example: user says 'turn on kitchen lights' → call get_ha_entities(domain='light', area='Kitchen') → "
+            "get entity_id → call control_device(entity_id=..., action='turn_on')."
         )
 
     @property

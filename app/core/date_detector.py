@@ -265,22 +265,13 @@ def detect_and_resolve_relative_dates(
         else:
             logger.warning(f"   ✗ Could not resolve '{term}'")
     
-    # Build summary for prompt
-    if resolved_dates:
-        summary_lines = ["Detected Relative Dates:"]
-        for term, data in resolved_dates.items():
-            if "dates" in data:
-                # Multiple dates (weekend, week, etc.)
-                dates_list = [d.get("utc_start_of_day") or d.get("date") for d in data["dates"]]
-                summary_lines.append(f"  - '{term}': {dates_list}")
-            elif "utc_start_of_day" in data:
-                summary_lines.append(f"  - '{term}': {data['utc_start_of_day']}")
-            elif "datetime" in data:
-                summary_lines.append(f"  - '{term}': {data['datetime']}")
-            elif "date" in data:
-                summary_lines.append(f"  - '{term}': {data['date']}")
-        
-        summary = "\n".join(summary_lines)
+    # Build summary for prompt — output date KEYS, not ISO timestamps.
+    # The LLM should pass these keys in resolved_datetimes; the backend
+    # resolves them to actual dates after tool execution.
+    # Include ALL detected terms (even unresolved ones) so the LLM knows
+    # the key to use — resolution happens post-execution, not here.
+    if detected_terms:
+        summary = f"Date keys detected: {', '.join(detected_terms)}. Use these exact keys in resolved_datetimes."
     else:
         summary = None
     

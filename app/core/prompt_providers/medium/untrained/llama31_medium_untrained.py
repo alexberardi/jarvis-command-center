@@ -40,6 +40,10 @@ logger = logging.getLogger("uvicorn")
 _FUNCTION_CALL_RE = re.compile(
     r"<function[=>](\w+)>(.*?)</?\s*function>", re.DOTALL
 )
+# Variant: 3B model outputs <function=name {args}></function> (space, no > after name)
+_FUNCTION_CALL_SPACE_RE = re.compile(
+    r"<function[=>](\w+)\s+(\{.*?\})>(?:</?\s*function>)?", re.DOTALL
+)
 # Fallback: model emits <function=name>{...} without closing </function> tag
 _FUNCTION_CALL_UNCLOSED_RE = re.compile(
     r"<function[=>](\w+)>(\{.*)", re.DOTALL
@@ -178,6 +182,10 @@ Tools:
         # Extract ALL <function=name>{...}</function> blocks
         function_matches = _FUNCTION_CALL_RE.findall(cleaned)
 
+        # Fallback: try <function=name {args}> variant (space between name and args)
+        if not function_matches:
+            function_matches = _FUNCTION_CALL_SPACE_RE.findall(cleaned)
+
         # Fallback: try unclosed <function=name>{...} (no </function> tag)
         if not function_matches:
             unclosed_match = _FUNCTION_CALL_UNCLOSED_RE.search(cleaned)
@@ -188,7 +196,7 @@ Tools:
             parsed_calls: list[Dict[str, Any]] = []
             for func_name, args_str in function_matches:
                 try:
-                    cleaned_args = args_str.strip().rstrip(";\"'")
+                    cleaned_args = args_str.strip().rstrip(">;\"'")
                     arguments = json.loads(cleaned_args)
                 except json.JSONDecodeError:
                     logger.warning(

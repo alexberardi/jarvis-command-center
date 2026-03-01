@@ -136,8 +136,7 @@ def build_agent_context_summary(node_context: Dict[str, Any]) -> str:
         section += f"\nFloors: {', '.join(floor_parts)}"
 
     section += (
-        "\nDo NOT guess entity IDs. You MUST call get_ha_entities(domain, area) first "
-        "to look up the correct entity_id, then call control_device or get_device_status.\n"
+        "\nCall control_device to control devices. Call get_device_status to check device state.\n"
     )
 
     return section

@@ -8,6 +8,7 @@ context headers (household_id, node_id) to downstream services.
 from typing import Any
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.deps import verify_api_key
@@ -46,6 +47,32 @@ async def tts_speak(
     )
     audio = await client.speak(request.text)
     return Response(content=audio, media_type="audio/wav")
+
+
+@router.post("/tts/speak/stream")
+async def tts_speak_stream(
+    request: TTSSpeakRequest,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+) -> StreamingResponse:
+    """Stream raw PCM audio from TTS service.
+
+    Proxies to the TTS service's /speak/stream endpoint with app-to-app auth.
+    Returns raw PCM audio with format metadata in headers.
+    """
+    client = TTSClient(
+        household_id=node_context.household_id,
+        node_id=node_context.node.node_id,
+    )
+    audio_iter, audio_meta = await client.speak_stream(request.text)
+    return StreamingResponse(
+        audio_iter,
+        media_type="audio/raw",
+        headers={
+            "X-Audio-Sample-Rate": audio_meta["sample_rate"],
+            "X-Audio-Channels": audio_meta["channels"],
+            "X-Audio-Sample-Width": audio_meta["sample_width"],
+        },
+    )
 
 
 @router.post("/whisper/transcribe")

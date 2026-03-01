@@ -18,6 +18,11 @@ class GetCommandExamplesTool(IServerTool):
     """Tool for retrieving example utterances for commands."""
     
     @property
+    def enabled(self) -> bool:
+        """Disabled: compact tool descriptions make this unnecessary."""
+        return False
+
+    @property
     def name(self) -> str:
         return "get_command_utterance_examples"
     

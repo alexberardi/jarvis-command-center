@@ -228,8 +228,10 @@ class WarmupService:
 
             cmd_name = cmd_dict.get("command_name")
             if cmd_name in examples_map:
-                # Merge examples into existing entry
+                # Merge examples and parameters into existing entry
                 examples_map[cmd_name]["examples"].extend(cmd_dict.get("examples", []))
+                if "parameters" in cmd_dict:
+                    examples_map[cmd_name]["parameters"] = cmd_dict["parameters"]
             else:
                 result.append(cmd_dict)
 
