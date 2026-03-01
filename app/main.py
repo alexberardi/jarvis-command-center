@@ -2,13 +2,14 @@ import time
 import logging
 import os
 import json
+import urllib.parse
 from pathlib import Path
 import hashlib
 from uuid import uuid4
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Depends, Request, APIRouter, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from app.context_providers.node_context_provider import NodeContextProvider
 from app.request_models.voice_command_request import VoiceCommandRequest
@@ -457,6 +458,126 @@ async def handle_voice(
             validation_request=None,
             assistant_message=None
         )
+
+
+@v0_router.post("/voice/command/stream")
+async def handle_voice_stream(
+    request: VoiceCommandRequest,
+    node_context_provider: NodeContextProvider = Depends(verify_api_key),
+    model_service: ModelService = Depends(get_model_service),
+):
+    """Unified streaming voice command endpoint.
+
+    Runs the full tool-calling pipeline (same as /voice/command) and then
+    routes based on the result:
+
+    - **200 audio/raw**: Conversational response — streamed PCM audio with
+      format metadata in X-Audio-* headers.
+    - **202 application/json**: Tool calls, validation, error, or empty
+      response — JSON body matching VoiceCommandResponse shape.
+    """
+    timing = latency_logger.start_request(request.conversation_id, "voice_command_stream")
+    timing.checkpoint("auth_complete")
+    start_time = time.time()
+
+    logger.info(
+        f"Unified stream command from node: {node_context_provider.node.node_id}"
+    )
+    logger.info(f"Command: '{request.voice_command}'")
+
+    tools = conversation_cache.get_tools(request.conversation_id)
+    if tools is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Conversation not initialized for tool-based flow",
+        )
+
+    try:
+        # Run the full blocking pipeline (tool filtering, routing, server tools)
+        with timing.measure("process_voice_command_with_tools"):
+            result = await model_service.process_voice_command_with_tools(
+                voice_command=request.voice_command,
+                conversation_id=request.conversation_id,
+            )
+
+        stop_reason = result.get("stop_reason", "complete")
+        assistant_message = result.get("assistant_message")
+
+        # Conversational response with text → stream as audio
+        # Use strip() to avoid treating whitespace-only as "has text"
+        if stop_reason == "complete" and assistant_message and assistant_message.strip():
+            from app.core.streaming_handler import stream_text_as_audio
+            from app.core.clients.tts_client import TTSClient
+
+            tts_client = TTSClient(
+                household_id=node_context_provider.household_id,
+                node_id=node_context_provider.node.node_id,
+            )
+
+            # Get audio format for response headers
+            try:
+                audio_fmt = await tts_client.get_audio_format()
+            except Exception:
+                audio_fmt = {"sample_rate": "16000", "channels": "1", "sample_width": "2"}
+
+            duration = time.time() - start_time
+            logger.info(f"✅ Streaming audio response in {duration:.2f}s")
+            latency_logger.end_request(request.conversation_id)
+
+            # Include the text in a header so the node can display it
+            # (e.g., keyboard_listener prints it instead of "(streamed audio)")
+            encoded_text = urllib.parse.quote(assistant_message, safe="")
+
+            return StreamingResponse(
+                stream_text_as_audio(assistant_message, tts_client),
+                status_code=200,
+                media_type="audio/raw",
+                headers={
+                    "X-Audio-Sample-Rate": audio_fmt["sample_rate"],
+                    "X-Audio-Channels": audio_fmt["channels"],
+                    "X-Audio-Sample-Width": audio_fmt["sample_width"],
+                    "X-Assistant-Message": encoded_text,
+                },
+            )
+
+        # Tool calls, validation, error, or empty → return as JSON
+        stop_reason_enum = StopReason.COMPLETE
+        try:
+            stop_reason_enum = StopReason(stop_reason)
+        except ValueError:
+            logger.warning("⚠️ Unknown stop_reason=%r; defaulting to 'complete'", stop_reason)
+
+        body = VoiceCommandResponse(
+            commands=[],
+            request_information=RequestInformation(
+                voice_command=request.voice_command,
+                conversation_id=request.conversation_id,
+            ),
+            stop_reason=stop_reason_enum,
+            assistant_message=assistant_message,
+            tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
+            validation_request=(
+                ValidationRequest(**result["validation_request"])
+                if result.get("validation_request") else None
+            ),
+        )
+
+        duration = time.time() - start_time
+        logger.info(
+            f"✅ Returning 202 JSON (stop_reason={stop_reason}) in {duration:.2f}s"
+        )
+        latency_logger.end_request(request.conversation_id)
+
+        return JSONResponse(
+            status_code=202,
+            content=body.model_dump(mode="json"),
+        )
+
+    except Exception as e:
+        latency_logger.end_request(request.conversation_id)
+        duration = time.time() - start_time
+        logger.error(f"❌ Unified stream failed after {duration:.2f}s: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process command: {str(e)}")
 
 
 @v0_router.post("/tool-router/train")

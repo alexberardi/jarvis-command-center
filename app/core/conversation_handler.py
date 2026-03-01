@@ -146,8 +146,6 @@ class ConversationHandler:
             # here.  Avoid tools that trigger follow-up LLM calls or loops
             # (e.g. get_command_utterance_examples, request_validation).
             _safe_tool_names: list[str] = []
-            if node_context and node_context.get("agents", {}).get("home_assistant"):
-                _safe_tool_names.append("get_ha_entities")
             # Only include tools that require speaker identification when
             # a speaker has actually been identified for this conversation.
             _has_speaker = bool(

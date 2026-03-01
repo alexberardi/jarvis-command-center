@@ -135,7 +135,8 @@ def validate_value(value: Any, base_type: str, is_array: bool) -> bool:
 
 def find_invalid_params(
     tool_calls: List[Dict[str, Any]],
-    param_types: Dict[str, Dict[str, str]]
+    param_types: Dict[str, Dict[str, str]],
+    param_enums: Optional[Dict[str, Dict[str, List[str]]]] = None,
 ) -> List[str]:
     """
     Find invalid parameters in tool calls.
@@ -143,18 +144,19 @@ def find_invalid_params(
     Args:
         tool_calls: List of tool calls with function.name and function.arguments
         param_types: Mapping of tool_name -> {param_name: param_type}
+        param_enums: Optional mapping of tool_name -> {param_name: [allowed_values]}
 
     Returns:
         List of invalid parameter descriptions (e.g., "tool.param expected type")
     """
     invalid: List[str] = []
 
-    if not param_types:
+    if not param_types and not param_enums:
         return invalid
 
     for call in tool_calls:
         tool_name = call.get("function", {}).get("name")
-        if not tool_name or tool_name not in param_types:
+        if not tool_name:
             continue
 
         args_raw = call.get("function", {}).get("arguments", "{}")
@@ -166,15 +168,28 @@ def find_invalid_params(
         if not isinstance(args_obj, dict):
             continue
 
-        for param_name, param_type in param_types[tool_name].items():
-            if param_name not in args_obj:
-                continue
+        # Type validation
+        if param_types and tool_name in param_types:
+            for param_name, param_type in param_types[tool_name].items():
+                if param_name not in args_obj:
+                    continue
 
-            base_type, is_array = normalize_param_type(param_type)
-            if not base_type:
-                continue
+                base_type, is_array = normalize_param_type(param_type)
+                if not base_type:
+                    continue
 
-            if not validate_value(args_obj.get(param_name), base_type, is_array):
-                invalid.append(f"{tool_name}.{param_name} expected {param_type}")
+                if not validate_value(args_obj.get(param_name), base_type, is_array):
+                    invalid.append(f"{tool_name}.{param_name} expected {param_type}")
+
+        # Enum validation
+        if param_enums and tool_name in param_enums:
+            for param_name, allowed in param_enums[tool_name].items():
+                value = args_obj.get(param_name)
+                if value is None:
+                    continue
+                if str(value) not in allowed:
+                    invalid.append(
+                        f"{tool_name}.{param_name} must be one of: {', '.join(allowed)}"
+                    )
 
     return invalid

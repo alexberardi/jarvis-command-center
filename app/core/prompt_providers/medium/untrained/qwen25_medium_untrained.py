@@ -129,12 +129,14 @@ class Qwen25MediumUntrained(IJarvisPromptProvider):
         # Shared fallback
         fallback: str = build_fallback_line()
 
+        # Prompt is structured so stable content comes FIRST and tool-dependent
+        # content comes LAST.  llama.cpp caches the KV state by prefix — the
+        # longer the shared prefix between requests, the more tokens are reused.
+        # When the tool router prunes tools for a high-confidence match, only
+        # the suffix changes while the stable prefix (~700 tokens) stays cached.
         system_prompt: str = f"""{identity}
 
 You are a function calling AI model. You may call one or more functions to assist with the user query. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
-
-You are provided with function signatures within <tools></tools> XML tags:
-{tools_block}
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
@@ -142,10 +144,12 @@ For each function call, return a json object with function name and arguments wi
 </tool_call>
 
 {rules}
-{direct_answer_section}
 {agent_context_section}
 {fallback}
 
+You are provided with function signatures within <tools></tools> XML tags:
+{tools_block}
+{direct_answer_section}
 Tools:
 {tools_section}
 """
