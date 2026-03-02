@@ -55,7 +55,11 @@ class Qwen25Compressed(Qwen25MediumUntrained):
 
     @staticmethod
     def _build_compact_tools_section(tools: List[Dict[str, Any]]) -> str:
-        """Build compact Tools: listing with name + first-sentence description."""
+        """Build compact Tools: listing with name + first-sentence description.
+
+        Includes antipatterns (NOT-this → use-that hints) when present on a
+        tool, so the model sees disambiguation cues in the text prompt.
+        """
         if not tools:
             return "No tools available."
 
@@ -65,6 +69,14 @@ class Qwen25Compressed(Qwen25MediumUntrained):
             name: str = func.get("name", "unknown")
             desc: str = _first_sentence(func.get("description", ""))
             lines.append(f"- {name}: {desc}")
+
+            # Render antipatterns as compact NOT lines
+            antipatterns: list[Dict[str, str]] = tool.get("antipatterns", [])
+            for ap in antipatterns:
+                ap_cmd: str = ap.get("command_name", "")
+                ap_desc: str = ap.get("description", "")
+                if ap_cmd and ap_desc:
+                    lines.append(f"  NOT {name} → use {ap_cmd}: {ap_desc}")
 
         return "\n".join(lines)
 

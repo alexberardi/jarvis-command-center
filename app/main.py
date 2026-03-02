@@ -652,6 +652,8 @@ async def train_adapter(
                             "command_name": cmd_name,
                             "voice_command": ex.get("voice_command"),
                             "expected_tool_call": ex.get("expected_tool_call"),
+                            "formatted_completion": ex.get("formatted_completion"),
+                            "formatted_system_prompt": ex.get("formatted_system_prompt"),
                         }
                         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
@@ -702,6 +704,7 @@ async def train_adapter(
         hash_input = {
             "base_model_id": request.base_model_id,
             "dataset": dataset_ref,
+            "params": request.params.model_dump(exclude_none=True) if request.params else None,
         }
         payload_bytes = json.dumps(hash_input, sort_keys=True).encode("utf-8")
         dataset_hash = hashlib.sha256(payload_bytes).hexdigest()

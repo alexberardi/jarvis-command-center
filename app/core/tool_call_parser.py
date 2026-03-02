@@ -351,9 +351,19 @@ class ToolCallParser:
                 
                 param_list.append(param_str)
 
-            # Build tool string: description + parameters only
+            # Build antipattern lines (NOT-this → use-that hints)
+            antipattern_lines: List[str] = []
+            for ap in tool.get("antipatterns", []):
+                ap_cmd: str = ap.get("command_name", "")
+                ap_desc: str = ap.get("description", "")
+                if ap_cmd and ap_desc:
+                    antipattern_lines.append(f"  NOT {name} → use {ap_cmd}: {ap_desc}")
+
+            # Build tool string: description + parameters + antipatterns
             sections = [f"\nTool: {name}", f"Description: {description}"]
             sections.append(f"Parameters:\n{chr(10).join(param_list) if param_list else '  None'}")
+            if antipattern_lines:
+                sections.append("\n".join(antipattern_lines))
             tool_str = "\n".join(sections) + "\n"
             tool_descriptions.append(tool_str)
 
@@ -448,14 +458,25 @@ class ToolCallParser:
                 if example_lines:
                     example_str = "\nExamples:\n" + "\n".join(example_lines)
             
+            # Build antipattern lines
+            antipattern_str = ""
+            antipattern_lines: List[str] = []
+            for ap in tool.get("antipatterns", []):
+                ap_cmd: str = ap.get("command_name", "")
+                ap_desc: str = ap.get("description", "")
+                if ap_cmd and ap_desc:
+                    antipattern_lines.append(f"  NOT {name} → use {ap_cmd}: {ap_desc}")
+            if antipattern_lines:
+                antipattern_str = "\n" + "\n".join(antipattern_lines)
+
             tool_str = f"""
 Tool: {name}
 Description: {description}
 Parameters:
-{chr(10).join(param_list) if param_list else "  None"}{example_str}
+{chr(10).join(param_list) if param_list else "  None"}{example_str}{antipattern_str}
 """
             tool_descriptions.append(tool_str)
-        
+
         return "\n".join(tool_descriptions)
 
 
