@@ -209,11 +209,20 @@ Tools:
                 }
                 return json.dumps(jarvis_json)
 
-        # Check if content is already Jarvis JSON (passthrough)
+        # Check if content is already Jarvis JSON (passthrough) or a bare tool call
         try:
             parsed = json.loads(cleaned)
-            if isinstance(parsed, dict) and "tool_calls" in parsed:
-                return None
+            if isinstance(parsed, dict):
+                if "tool_calls" in parsed:
+                    return None  # Already Jarvis JSON
+                # Bare tool call: {"name": "...", "arguments": {...}}
+                if "name" in parsed and "arguments" in parsed:
+                    jarvis_json = {
+                        "message": "",
+                        "tool_calls": [parsed],
+                        "error": None,
+                    }
+                    return json.dumps(jarvis_json)
         except json.JSONDecodeError:
             pass
 
@@ -226,6 +235,32 @@ Tools:
             })
 
         return None
+
+    def build_training_system_prompt(self) -> str:
+        """Training system prompt matching Qwen 2.5 inference structure.
+
+        Includes the same structural cues (identity, rules, format instructions)
+        the model sees at inference. Omits dynamic parts (tools block, agent
+        context) that vary per request. This ensures the adapter learns
+        attention patterns compatible with the full inference prompt.
+        """
+        rules: str = build_rules_block()
+        fallback: str = build_fallback_line()
+        return (
+            "You are Jarvis, a function calling voice assistant.\n"
+            "Context: room=unknown, user=default, style=brief\n\n"
+            "You are a function calling AI model. You may call one or more "
+            "functions to assist with the user query. Always include all "
+            "required parameters — use sensible defaults from context when "
+            f"the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}\n\n"
+            "For each function call, return a json object with function name "
+            "and arguments within <tool_call></tool_call> XML tags:\n"
+            "<tool_call>\n"
+            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}}\n'
+            "</tool_call>\n\n"
+            f"{rules}\n"
+            f"{fallback}"
+        )
 
     def build_training_completion(self, tool_call: Dict[str, Any]) -> str:
         """Format as <tool_call> XML tags matching Qwen 2.5's output."""

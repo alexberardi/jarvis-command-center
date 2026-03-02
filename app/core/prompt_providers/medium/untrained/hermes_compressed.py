@@ -64,6 +64,13 @@ class HermesCompressed(HermesMediumUntrained):
             desc: str = _first_sentence(func.get("description", ""))
             lines.append(f"- {name}: {desc}")
 
+            # Render antipatterns as compact NOT lines
+            for ap in tool.get("antipatterns", []):
+                ap_cmd: str = ap.get("command_name", "")
+                ap_desc: str = ap.get("description", "")
+                if ap_cmd and ap_desc:
+                    lines.append(f"  NOT {name} → use {ap_cmd}: {ap_desc}")
+
         return "\n".join(lines)
 
     def build_system_prompt(

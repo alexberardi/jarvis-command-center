@@ -9,6 +9,7 @@ class AdapterTrainingParams(BaseModel):
     epochs: Optional[int] = None
     batch_size: Optional[int] = None
     max_seq_len: Optional[int] = None
+    learning_rate: Optional[float] = None
     hf_base_model_id: Optional[str] = None
 
 
