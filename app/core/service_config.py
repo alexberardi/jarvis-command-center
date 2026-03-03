@@ -29,7 +29,7 @@ _ENV_VAR_FALLBACKS: dict[str, str] = {
     "jarvis-auth": "JARVIS_AUTH_BASE_URL",
     "jarvis-llm-proxy-api": "JARVIS_LLM_PROXY_API_URL",
     "jarvis-logs": "JARVIS_LOGS_URL",
-    "jarvis-whisper": "JARVIS_WHISPER_URL",
+    "jarvis-whisper-api": "JARVIS_WHISPER_URL",
     "jarvis-tts": "JARVIS_TTS_URL",
     "jarvis-mqtt-broker": "JARVIS_MQTT_BROKER_URL",
 }
@@ -162,7 +162,7 @@ def get_logs_url() -> str:
 
 def get_whisper_url() -> str:
     """Get whisper service URL."""
-    return _get_url("jarvis-whisper")
+    return _get_url("jarvis-whisper-api")
 
 
 def get_tts_url() -> str:
