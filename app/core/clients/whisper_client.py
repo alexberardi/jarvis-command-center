@@ -12,8 +12,19 @@ import httpx
 from jarvis_auth_client.headers import get_app_headers, build_context_headers
 from app.services.settings_service import get_settings_service
 
-# Default Whisper URL if not configured in settings
-DEFAULT_WHISPER_URL = "http://localhost:7706"
+# Last-resort fallback (only used when settings AND service discovery fail)
+_FALLBACK_WHISPER_URL = "http://localhost:7706"
+
+
+def _get_whisper_url_from_discovery() -> str | None:
+    """Get Whisper URL via service discovery (handles Docker URL rewriting)."""
+    try:
+        from app.core import service_config
+        if service_config.is_initialized():
+            return service_config.get_whisper_url()
+    except (ImportError, AttributeError, ValueError):
+        pass
+    return None
 
 
 class WhisperClient:
@@ -39,14 +50,19 @@ class WhisperClient:
         self.user_id = user_id
         self.household_member_ids = household_member_ids or []
 
-        # Get URL from settings with cascade lookup (Node > Household > Default)
+        # URL resolution priority (same pattern as TTS client):
+        # 1. Per-household/node setting (whisper.url)
+        # 2. Service discovery (handles Docker URL rewriting)
+        # 3. Hardcoded fallback
         settings = get_settings_service()
         url = settings.get(
             "whisper.url",
             household_id=household_id,
             node_id=node_id,
         )
-        self.base_url = url if url else DEFAULT_WHISPER_URL
+        if not url:
+            url = _get_whisper_url_from_discovery()
+        self.base_url = url if url else _FALLBACK_WHISPER_URL
 
     def _build_headers(self) -> dict[str, str]:
         """Build headers including app auth and context.
