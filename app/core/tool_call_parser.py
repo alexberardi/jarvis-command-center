@@ -6,11 +6,13 @@ native tool calling support (e.g., local Llama models via vLLM/llama.cpp).
 """
 
 import json
-import os
-import uuid
 import logging
+import os
 import re
-from typing import Dict, Any, List, Tuple, Optional
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
+from app.services.settings_service import get_settings_service
 
 logger = logging.getLogger("uvicorn")
 
@@ -390,7 +392,7 @@ class ToolCallParser:
             return "No tools available."
         
         # Determine how many examples to include per command
-        small_mode = os.getenv("JARVIS_SMALL_MODEL_MODE", "").strip().lower() in {"1", "true", "yes"}
+        small_mode = get_settings_service().get_bool("model.small_model_mode", True)
         max_examples_env = os.getenv("JARVIS_EXAMPLES_PER_COMMAND", "").strip().lower()
         if not max_examples_env:
             max_examples = 0 if small_mode else 1

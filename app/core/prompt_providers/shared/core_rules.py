@@ -32,6 +32,14 @@ RULE_EXTRACT_PARAMS: str = (
     "if required params are truly missing/ambiguous."
 )
 
+RULE_STT_AWARENESS: str = (
+    "User input comes from speech-to-text and may contain transcription errors. "
+    "Interpret homophones and near-misses charitably "
+    '(e.g., "watts" → "what\'s", "won" → "one", "whether" → "weather"). '
+    "Proper nouns like team names, cities, and people are often misspelled — "
+    'infer the intended name (e.g., "Ankeys" → "Yankees", "Albukirky" → "Albuquerque").'
+)
+
 RULE_DATE_PARAMS: str = (
     'For date parameters like resolved_datetimes, you MUST use ONLY these '
     'natural date keys as string values: "today", "tomorrow", '
@@ -127,6 +135,7 @@ def build_rules_block(
     rules.append(_sub(RULE_BEST_MATCH_INTENT))
     rules.append(_sub(RULE_DATE_PARAMS))
     rules.append(_sub(RULE_EXTRACT_PARAMS))
+    rules.append(_sub(RULE_STT_AWARENESS))
 
     if extra_rules:
         for rule in extra_rules:

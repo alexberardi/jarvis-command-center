@@ -7,6 +7,7 @@ class CommandParameter(BaseModel):
     required: bool = True  # Default to required for backward compatibility
     description: Optional[str] = None
     enum_values: Optional[List[str]] = None  # Enum values for this parameter
+    refinable: bool = False  # If True, param is stripped from Stage 1 and resolved via refinement
 
 class CommandExample(BaseModel):
     voice_command: str

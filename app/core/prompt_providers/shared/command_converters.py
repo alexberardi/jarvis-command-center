@@ -98,6 +98,9 @@ def convert_commands_to_tools(
                 else:
                     properties[param.name]["enum"] = param.enum_values
 
+            if param.refinable:
+                properties[param.name]["_refinable"] = True
+
             is_forced = (
                 cmd.command_name in _FORCE_REQUIRED_COMMANDS
                 and param.name in _FORCE_REQUIRED_PARAMS
@@ -119,6 +122,8 @@ def convert_commands_to_tools(
             "allow_direct_answer": cmd.allow_direct_answer,
             "keywords": cmd.keywords,
         }
+        if cmd.examples:
+            tool["examples"] = [ex.model_dump() for ex in cmd.examples]
         if cmd.antipatterns:
             tool["antipatterns"] = [ap.model_dump() for ap in cmd.antipatterns]
 

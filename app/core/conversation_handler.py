@@ -9,10 +9,13 @@ separation of concerns.
 import json
 import logging
 import os
+import re
+import uuid
 from contextlib import nullcontext
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from app.core.conversation_cache import conversation_cache
+from app.services.settings_service import get_settings_service
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.interfaces.imodel_interface import IModelInterface
 from app.core.llm_proxy_client import LLMProxyClient
@@ -26,7 +29,6 @@ from app.core.tool_routing import (
 from app.core.utils.latency_logger import latency_logger
 from app.core.voice_command_helpers import (
     get_tool_name,
-    filter_available_commands,
     build_available_command_flags,
     apply_tool_routing,
     prune_tools_by_router_decision,
@@ -145,7 +147,7 @@ class ConversationHandler:
             # Only tools that are simple CRUD / one-shot operations belong
             # here.  Avoid tools that trigger follow-up LLM calls or loops
             # (e.g. get_command_utterance_examples, request_validation).
-            _safe_tool_names: list[str] = []
+            _safe_tool_names: list[str] = ["answer_question"]
             # Only include tools that require speaker identification when
             # a speaker has actually been identified for this conversation.
             _has_speaker = bool(
@@ -250,6 +252,11 @@ class ConversationHandler:
             node_context=node_context,
         )
 
+        # If prompt provider mandates tool calls, store the flag so the
+        # tool execution engine can enforce it (retry on finish_reason=stop).
+        if self.prompt_provider is not None and getattr(self.prompt_provider, 'force_tool_calls', False):
+            conversation_cache.set_force_tool_calls(conversation_id, True)
+
         # Optional warmup inference (reduces first-response latency)
         # For llama.cpp: warmup processes the system prompt and caches the
         # KV state. The actual voice command then only needs to process the
@@ -319,8 +326,6 @@ class ConversationHandler:
             messages = conversation_cache.get_messages(conversation_id)
             tools = conversation_cache.get_tools(conversation_id)
             available_commands = conversation_cache.get_available_commands(conversation_id) or []
-            node_context = conversation_cache.get_node_context(conversation_id) or {}
-            timezone = conversation_cache.get_timezone(conversation_id)
 
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Cache lookups done")
 
@@ -331,9 +336,8 @@ class ConversationHandler:
         server_tool_names = get_server_tool_names(tools)
 
         # Apply keyword-based tool filtering (if enabled)
-        tools, messages = self._apply_tool_filtering(
-            voice_command, tools, available_commands, messages,
-            node_context, timezone, server_tool_names
+        tools = self._apply_tool_filtering(
+            voice_command, tools, available_commands
         )
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool filtering done")
 
@@ -345,9 +349,8 @@ class ConversationHandler:
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool routing done (router took {(time.time()-_router_t0)*1000:.0f}ms)")
 
         # Apply high-confidence tool pruning
-        tools, messages = self._apply_high_confidence_pruning(
-            tools, router_decision, available_commands, messages,
-            node_context, timezone, server_tool_names
+        tools = self._apply_high_confidence_pruning(
+            tools, router_decision, server_tool_names
         )
 
         # Add router hint if decision was used
@@ -358,8 +361,13 @@ class ConversationHandler:
                 "content": f"Router hint: likely tool is '{hint_tool}'. Use it if it matches intent; otherwise choose the best tool."
             })
 
-        # Add user message
-        messages.append({"role": "user", "content": voice_command})
+        # Add user message (with optional provider suffix, e.g. /nothink for Qwen3)
+        suffix: str = (
+            self.prompt_provider.user_message_suffix
+            if self.prompt_provider else ""
+        )
+        user_content: str = f"{voice_command}\n{suffix}" if suffix else voice_command
+        messages.append({"role": "user", "content": user_content})
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Starting tool execution loop")
 
         # Execute tool loop
@@ -381,6 +389,21 @@ class ConversationHandler:
             )
 
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool execution loop completed")
+
+        # Text-based models: server tools completed but the model can't
+        # process role="tool" messages.  Format results with a clean call.
+        if result.get("stop_reason") == "server_tool_complete":
+            server_results = result.get("server_tool_results", [])
+            tool_results_for_format = [
+                {
+                    "tool_call_id": r.get("tool_call_id", ""),
+                    "output": r.get("content", ""),
+                }
+                for r in server_results
+            ]
+            result = await self._format_tool_result_text_mode(
+                conversation_id, messages, tool_results_for_format
+            )
 
         # Update cache and return
         conversation_cache.update_messages(conversation_id, messages)
@@ -413,7 +436,7 @@ class ConversationHandler:
         if not messages:
             raise ValueError(f"Conversation {conversation_id} not found or expired")
 
-        # Add tool result messages
+        # Add tool result messages to conversation history
         for result in tool_results:
             output = result["output"]
             if not isinstance(output, str):
@@ -425,64 +448,237 @@ class ConversationHandler:
                 "content": output,
             })
 
-        # Extract last user utterance for potential LLM fallback
-        last_user_utterance = None
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                last_user_utterance = msg.get("content")
-                break
-
-        # Continue with tool execution loop
         use_native_continue: bool = (
             self.prompt_provider is not None
             and self.prompt_provider.supports_native_tools
         )
-        max_iters_continue: int = 10 if use_native_continue else 3
-        engine = ToolExecutionEngine(self.llm_client, prompt_provider=self.prompt_provider)
-        result = await engine.execute(
-            conversation_id=conversation_id,
-            messages=messages,
-            tools=tools or [],
-            user_utterance=last_user_utterance,
-            max_iterations=max_iters_continue,
-        )
+
+        if use_native_continue:
+            # Native tool calling: model understands role="tool" messages
+            last_user_utterance: Optional[str] = None
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    last_user_utterance = msg.get("content")
+                    break
+
+            engine = ToolExecutionEngine(self.llm_client, prompt_provider=self.prompt_provider)
+            result = await engine.execute(
+                conversation_id=conversation_id,
+                messages=messages,
+                tools=tools or [],
+                user_utterance=last_user_utterance,
+                max_iterations=10,
+            )
+        else:
+            # Text-based tool calling: local models loop on tool calls because
+            # role="tool" messages are dropped/ignored by the chat template.
+            # Bypass the tool loop with a single formatting LLM call.
+            result = await self._format_tool_result_text_mode(
+                conversation_id, messages, tool_results
+            )
 
         # Update cache
         conversation_cache.update_messages(conversation_id, messages)
 
         return result
 
+    async def _format_tool_result_text_mode(
+        self,
+        conversation_id: str,
+        messages: List[Dict[str, Any]],
+        tool_results: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Format tool results for text-based models via a single LLM call.
+
+        Text-based models (supports_native_tools=False) can't process role="tool"
+        messages — the chat template either drops them or the model re-calls tools
+        endlessly.  Instead, make ONE LLM call with a tool-free prompt that presents
+        the results as plain context.
+        """
+        # Find the user's original question
+        user_utterance: str = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                user_utterance = msg.get("content", "")
+                break
+
+        # Collect tool result outputs
+        result_parts: List[str] = []
+        for tr in tool_results:
+            output = tr["output"]
+            if not isinstance(output, str):
+                output = json.dumps(output)
+            result_parts.append(output)
+
+        tool_context: str = "\n".join(result_parts)
+
+        # Detect delegation tools (e.g., answer_question) that just echo the
+        # query back.  For these, the model should answer from its own knowledge
+        # rather than trying to format a tool result.
+        is_knowledge_query: bool = self._is_knowledge_delegation(tool_context)
+
+        # Build a formatting prompt.
+        # Qwen always emits <tool_call> tags, so for knowledge queries we
+        # work WITH that behavior: define a "respond" tool so the model
+        # puts the answer in the tool arguments.
+        if is_knowledge_query:
+            # Knowledge delegation: the model called answer_question but
+            # can't answer from its own knowledge (model limitation).
+            # Make a best-effort formatting call; downstream parsing will
+            # extract whatever the model produces.
+            formatting_messages: List[Dict[str, Any]] = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Jarvis, a voice assistant. "
+                        "Answer the user's question from your own knowledge. "
+                        "Be brief and conversational."
+                    ),
+                },
+                {"role": "user", "content": user_utterance},
+            ]
+        else:
+            formatting_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Jarvis, a voice assistant. "
+                        "Answer the user based on the information below. "
+                        "Be brief and conversational."
+                    ),
+                },
+                {"role": "user", "content": user_utterance},
+                {"role": "system", "content": f"Information:\n{tool_context}"},
+            ]
+
+        # Use a fresh conversation_id so the MLX backend does NOT reuse the
+        # cached KV state (which contains the original system prompt + tools).
+        format_conv_id: str = f"fmt-{uuid.uuid4().hex[:12]}"
+
+        response = await self.llm_client.chat_completion(
+            messages=formatting_messages,
+            conversation_id=format_conv_id,
+            include_date_context=True,
+            max_tokens=256,
+        )
+
+        raw_content: str = response["choices"][0]["message"].get("content", "")
+
+        # Let prompt provider parse (handles <tool_call> tag extraction)
+        assistant_message: str = raw_content
+        if self.prompt_provider is not None:
+            transformed = self.prompt_provider.parse_response(raw_content)
+            if transformed is not None:
+                try:
+                    parsed = json.loads(transformed)
+                    # Standard response format: {"message": "...", "tool_calls": [...]}
+                    msg = parsed.get("message", "")
+                    if msg:
+                        assistant_message = msg
+                    # Tool call format: look for answer in arguments
+                    elif "arguments" in parsed:
+                        args = parsed.get("arguments", {})
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except json.JSONDecodeError:
+                                args = {}
+                        if isinstance(args, dict):
+                            for key in ("message", "answer", "response"):
+                                if key in args and isinstance(args[key], str):
+                                    assistant_message = args[key]
+                                    break
+                except json.JSONDecodeError:
+                    pass
+
+        # Strip any residual <tool_call> tags the model may have emitted
+        assistant_message = re.sub(r"</?tool_call>", "", assistant_message).strip()
+
+        # If the model still produced garbled output, extract from tool results
+        if not assistant_message or assistant_message.startswith("{"):
+            assistant_message = self._extract_from_tool_results(tool_context)
+
+        logger.info(
+            "Text-mode tool result formatted: %d chars (from %d tool results)",
+            len(assistant_message),
+            len(tool_results),
+        )
+
+        # Add the formatted response to conversation history
+        messages.append({"role": "assistant", "content": assistant_message})
+
+        return {
+            "stop_reason": "complete",
+            "assistant_message": assistant_message,
+        }
+
+    @staticmethod
+    def _is_knowledge_delegation(tool_context: str) -> bool:
+        """Detect delegation tools that echo the query instead of providing data.
+
+        Server-side ``answer_question`` returns ``{"query": "..."}``.
+        Client-side legacy returns ``{"context": {"query": "..."}}``.
+        The model should answer these from its own knowledge rather than trying
+        to format a nearly-empty tool result.
+        """
+        try:
+            parsed = json.loads(tool_context)
+            if isinstance(parsed, dict):
+                # Direct format: {"query": "..."} (server-side tool)
+                keys = set(parsed.keys())
+                if keys == {"query"} or keys == {"question"}:
+                    return True
+                # Wrapped format: {"context": {"query": "..."}} (legacy client)
+                ctx = parsed.get("context", {})
+                if isinstance(ctx, dict):
+                    ctx_keys = set(ctx.keys())
+                    return ctx_keys == {"query"} or ctx_keys == {"question"}
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return False
+
+    @staticmethod
+    def _extract_from_tool_results(tool_context: str) -> str:
+        """Extract human-readable content from raw tool result JSON."""
+        try:
+            parsed = json.loads(tool_context)
+            if isinstance(parsed, dict):
+                ctx = parsed.get("context", parsed)
+                if isinstance(ctx, dict):
+                    # Direct result value (e.g., calculator "result": 62)
+                    for key in ("result", "answer", "response", "message"):
+                        if key in ctx:
+                            return str(ctx[key])
+                    # Fall back to key-value summary
+                    parts = [f"{k}: {v}" for k, v in ctx.items()
+                             if v is not None and k not in ("success", "error")]
+                    if parts:
+                        return ", ".join(parts)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return tool_context
+
     def _apply_tool_filtering(
         self,
         voice_command: str,
         tools: Optional[List[Dict[str, Any]]],
         available_commands: List[Dict[str, Any]],
-        messages: List[Dict[str, Any]],
-        node_context: Dict[str, Any],
-        timezone: Optional[str],
-        server_tool_names: Set[str],
-    ) -> Tuple[Optional[List[Dict[str, Any]]], List[Dict[str, Any]]]:
+    ) -> Optional[List[Dict[str, Any]]]:
         """
-        Apply keyword-based tool filtering and rebuild system prompt if needed.
+        Apply keyword-based tool filtering.
 
-        Returns:
-            Tuple of (filtered_tools, updated_messages)
+        Returns filtered tools but does NOT rebuild the system prompt,
+        preserving the warmup KV cache.
         """
         if not tools:
-            return tools, messages
+            return tools
 
         filtered_tools = filter_tools_for_utterance(voice_command, tools, available_commands)
-        if filtered_tools is tools:
-            return tools, messages
+        if filtered_tools is not tools:
+            filtered_names = [get_tool_name(t) for t in filtered_tools if get_tool_name(t)]
+            logger.info("🧹 Filtered tools to %d (KV cache preserved): %s", len(filtered_tools), filtered_names)
 
-        # Tools were filtered - rebuild system prompt if we have context
-        if node_context and messages and messages[0].get("role") == "system":
-            filtered_commands = filter_available_commands(filtered_tools, available_commands, server_tool_names)
-            command_flags = build_available_command_flags(filtered_commands)
-            messages = self._rebuild_system_prompt(messages, node_context, timezone, filtered_tools, command_flags)
-            logger.info("🧹 Rebuilt system prompt with filtered tools")
-
-        return filtered_tools, messages
+        return filtered_tools
 
     def _apply_tool_routing_with_cache(
         self,
@@ -538,23 +734,19 @@ class ConversationHandler:
         self,
         tools: Optional[List[Dict[str, Any]]],
         router_decision: Optional[Dict[str, Any]],
-        available_commands: List[Dict[str, Any]],
-        messages: List[Dict[str, Any]],
-        node_context: Dict[str, Any],
-        timezone: Optional[str],
         server_tool_names: Set[str],
-    ) -> Tuple[Optional[List[Dict[str, Any]]], List[Dict[str, Any]]]:
+    ) -> Optional[List[Dict[str, Any]]]:
         """
         Prune tools based on high-confidence router decision.
 
-        Returns:
-            Tuple of (pruned_tools, updated_messages)
+        Returns pruned tools but does NOT rebuild the system prompt,
+        preserving the warmup KV cache.
         """
         if not router_decision or not tools:
-            return tools, messages
+            return tools
 
         # Determine pruning confidence threshold
-        small_mode = os.getenv("JARVIS_SMALL_MODEL_MODE", "").strip().lower() in {"1", "true", "yes"}
+        small_mode = get_settings_service().get_bool("model.small_model_mode", True)
         try:
             default_conf = 0.8 if small_mode else 0.85
             prune_conf = float(os.getenv("JARVIS_TOOL_ROUTER_FILTER_MIN_CONFIDENCE", str(default_conf)))
@@ -568,18 +760,14 @@ class ConversationHandler:
             prune_confidence=prune_conf,
         )
 
-        # If tools were actually pruned, rebuild system prompt
-        if len(pruned_tools) < len(tools) and node_context and messages and messages[0].get("role") == "system":
+        if len(pruned_tools) < len(tools):
             predicted_tool = router_decision.get("tool_name")
-            filtered_commands = [
-                cmd for cmd in available_commands
-                if cmd.get("command_name") == predicted_tool
-            ]
-            command_flags = build_available_command_flags(filtered_commands)
-            messages = self._rebuild_system_prompt(messages, node_context, timezone, pruned_tools, command_flags)
-            logger.info("🧹 Rebuilt system prompt with high-confidence tool pruning")
+            logger.info(
+                "🧹 Pruned tools to %d (predicted=%s, KV cache preserved)",
+                len(pruned_tools), predicted_tool,
+            )
 
-        return pruned_tools, messages
+        return pruned_tools
 
     def _get_system_prompt(
         self,
@@ -643,27 +831,4 @@ class ConversationHandler:
             logger.warning(f"⚠️ Failed to check memory settings, defaulting to enabled: {e}")
             return True, True
 
-    def _rebuild_system_prompt(
-        self,
-        messages: List[Dict[str, Any]],
-        node_context: Dict[str, Any],
-        timezone: Optional[str],
-        tools: List[Dict[str, Any]],
-        available_command_flags: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        Rebuild the system prompt with updated tools and command flags.
 
-        Returns:
-            Updated messages list with new system prompt
-        """
-        if self.prompt_provider is None and not hasattr(self.model, "_build_system_prompt"):
-            return messages
-
-        messages[0] = {
-            "role": "system",
-            "content": self._get_system_prompt(
-                node_context, timezone, tools, available_command_flags
-            ),
-        }
-        return messages

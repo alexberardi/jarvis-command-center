@@ -1,13 +1,10 @@
 """
-Qwen25Compressed - Token-optimized prompt provider for Qwen 2.5 3B/7B.
+Qwen25_7B_Compressed - Token-optimized prompt provider for Qwen 2.5 7B Instruct.
 
-DEPRECATED for 7B use — use Qwen25_7B_Compressed instead (fewer rules,
-Direct Answer section, KV-cache-optimized layout). This class is kept as the
-base for Qwen25_3B_Compressed and Qwen25LargeUntrained.
-
-Minimizes system prompt tokens to reduce prefill latency while maintaining
-command parsing accuracy. The <tools> JSON block carries all schema info;
-redundant sections are removed or compressed.
+Leaner than the parent Qwen25MediumUntrained — strips param descriptions,
+drops redundant rules, uses Stage 2 refinement for complex enums.
+Compared to the 3B Qwen25Compressed, includes Direct Answer section
+and drops the aggressive tool mandate (7B can follow nuanced guidance).
 
 Inherits parse_response, build_tools, and all other behavior from the parent.
 """
@@ -23,33 +20,42 @@ from app.core.prompt_providers.medium.untrained.qwen25_medium_untrained import (
 from app.core.tool_builder import ToolBuilder
 from app.core.prompt_providers.shared.context_builders import (
     build_agent_context_summary,
+    build_direct_answer_section,
 )
 from app.core.prompt_providers.shared.core_rules import (
     ANTI_HALLUCINATION_MANDATE,
     RULE_BEST_MATCH_INTENT,
-    RULE_EXTRACT_PARAMS,
     RULE_ONE_AT_A_TIME,
     RULE_POPULATE_REQUIRED,
     RULE_STT_AWARENESS,
-    RULE_USE_ACTUAL_PARAM_NAMES,
     build_identity_header,
 )
 
 logger = logging.getLogger("uvicorn")
 
 
-class Qwen25Compressed(Qwen25MediumUntrained):
+class Qwen25_7B_Compressed(Qwen25MediumUntrained):
     """
-    Token-optimized prompt provider for Qwen 2.5 3B/7B Instruct.
+    Token-optimized prompt provider for Qwen 2.5 7B Instruct.
 
-    The <tools> JSON block carries all tool names, descriptions, and parameter
-    schemas. No redundant Tools: listing or antipatterns section is needed —
-    routing hints are embedded directly in tool descriptions (positive framing).
+    Leaner than the parent Qwen25MediumUntrained — strips param descriptions,
+    drops redundant rules, uses Stage 2 refinement for complex enums.
+    Compared to the 3B Qwen25Compressed, includes Direct Answer section
+    and drops the aggressive tool mandate (7B can follow nuanced guidance).
     """
 
     @property
     def name(self) -> str:
-        return "Qwen25Compressed"
+        return "Qwen25_7B_Compressed"
+
+    @property
+    def force_tool_calls(self) -> bool:
+        """Signal that every request must produce a tool call.
+
+        The tool execution engine checks this flag and retries when
+        the model returns finish_reason='stop' without calling a tool.
+        """
+        return True
 
     @staticmethod
     def _build_compressed_tools_block(tools: List[Dict[str, Any]]) -> str:
@@ -57,8 +63,9 @@ class Qwen25Compressed(Qwen25MediumUntrained):
 
         Same Qwen-style one-per-line JSON format, but without "description"
         on individual parameter properties and without "format":"date-time"
-        keys that conflict with datekey instructions. Full tool descriptions
-        are preserved (they carry routing hints).
+        keys that conflict with datekey instructions. Refinable params are
+        excluded (resolved in Stage 2). Full tool descriptions are preserved
+        (they carry routing hints).
         """
         clean_tools: List[Dict[str, Any]] = ToolBuilder.build(
             tools,
@@ -72,12 +79,13 @@ class Qwen25Compressed(Qwen25MediumUntrained):
         return "<tools>\n" + "\n".join(lines) + "\n</tools>"
 
     @staticmethod
-    def _build_rules_block_no_date_params() -> str:
-        """Build Rules: block excluding RULE_DATE_PARAMS.
+    def _build_rules_block() -> str:
+        """Build minimal Rules: block for 7B.
 
-        The DT_KEYS section already covers date parameter instructions with
-        more keys and the critical 'must pass today' instruction, so
-        RULE_DATE_PARAMS is redundant here.
+        Drops RULE_USE_ACTUAL_PARAM_NAMES, RULE_EXTRACT_PARAMS, and
+        RULE_DATE_PARAMS — 7B naturally uses schema param names, extracts
+        params from context, and the DT_KEYS section covers date handling
+        more specifically.
         """
         terminology: str = "function"
 
@@ -87,9 +95,7 @@ class Qwen25Compressed(Qwen25MediumUntrained):
         rules: list[str] = [
             _sub(RULE_POPULATE_REQUIRED),
             _sub(RULE_ONE_AT_A_TIME),
-            _sub(RULE_USE_ACTUAL_PARAM_NAMES),
             _sub(RULE_BEST_MATCH_INTENT),
-            _sub(RULE_EXTRACT_PARAMS),
             _sub(RULE_STT_AWARENESS),
         ]
 
@@ -116,18 +122,11 @@ class Qwen25Compressed(Qwen25MediumUntrained):
 
         # Shared builders
         identity: str = build_identity_header(room, user, voice_mode, user_memories)
-        rules: str = self._build_rules_block_no_date_params()
+        rules: str = self._build_rules_block()
+        direct_answer_section: str = build_direct_answer_section(available_commands)
         agent_context_section: str = build_agent_context_summary(node_context)
 
-        # Strict tool mandate — the 3B model ignores nuanced "only X can be direct"
-        # instructions, so we enforce unconditionally and let the server-side
-        # force_tool_calls guard handle retries.
-        tool_mandate: str = (
-            "You MUST call a tool for EVERY request. "
-            "NEVER answer directly — always pick the best matching function."
-        )
-
-        # Compressed <tools> block — param descriptions + format hints stripped
+        # Compressed <tools> block — last for KV cache optimization
         tools_block: str = self._build_compressed_tools_block(tools)
 
         # Build DT_KEYS line from llm-proxy date keys
@@ -141,12 +140,10 @@ class Qwen25Compressed(Qwen25MediumUntrained):
                 "If the user omits a date, pass [\"today\"].\n"
             )
 
+        # Stable content first, variable <tools> block last for KV cache
         system_prompt: str = f"""{identity}
 
 You are a function calling AI model. You may call one or more functions to assist with the user query. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
-
-You are provided with function signatures within <tools></tools> XML tags:
-{tools_block}
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
@@ -155,12 +152,14 @@ For each function call, return a json object with function name and arguments wi
 
 {rules}
 {dt_keys_line}
-{tool_mandate}
+{direct_answer_section}
 {agent_context_section}
+You are provided with function signatures within <tools></tools> XML tags:
+{tools_block}
 """
 
         logger.info(
-            "Built Qwen25Compressed system prompt: %d chars, %d tools",
+            "Built Qwen25_7B_Compressed system prompt: %d chars, %d tools",
             len(system_prompt),
             len(tools),
         )
@@ -169,15 +168,6 @@ For each function call, return a json object with function name and arguments wi
             logger.info("System prompt (full):\n%s", system_prompt)
 
         return system_prompt
-
-    @property
-    def force_tool_calls(self) -> bool:
-        """Signal that every request must produce a tool call.
-
-        The tool execution engine checks this flag and retries when
-        the model returns finish_reason='stop' without calling a tool.
-        """
-        return True
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {

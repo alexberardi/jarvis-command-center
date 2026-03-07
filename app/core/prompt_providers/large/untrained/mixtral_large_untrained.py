@@ -1,15 +1,13 @@
 """
-Qwen25Compressed - Token-optimized prompt provider for Qwen 2.5 3B/7B.
+MixtralLargeUntrained - Prompt provider for Mixtral 8x7B Instruct v0.1.
 
-DEPRECATED for 7B use — use Qwen25_7B_Compressed instead (fewer rules,
-Direct Answer section, KV-cache-optimized layout). This class is kept as the
-base for Qwen25_3B_Compressed and Qwen25LargeUntrained.
+Large MoE model (~47B params). Compressed prompt — the model's capacity
+means less instruction is needed. Follows the same lean pattern as the
+Qwen 7B compressed provider which achieves 95%+ accuracy.
 
-Minimizes system prompt tokens to reduce prefill latency while maintaining
-command parsing accuracy. The <tools> JSON block carries all schema info;
-redundant sections are removed or compressed.
-
-Inherits parse_response, build_tools, and all other behavior from the parent.
+Inherits parse_response (handles both <tool_call> XML tags and Mistral's
+native [TOOL_CALLS] format), build_tools, get_response_format, and
+build_training_completion from Mistral7bMediumUntrained.
 """
 
 import json
@@ -17,12 +15,12 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from app.core.prompt_providers.medium.untrained.qwen25_medium_untrained import (
-    Qwen25MediumUntrained,
+from app.core.prompt_providers.medium.untrained.mistral7b_medium_untrained import (
+    Mistral7bMediumUntrained,
 )
-from app.core.tool_builder import ToolBuilder
 from app.core.prompt_providers.shared.context_builders import (
     build_agent_context_summary,
+    build_direct_answer_section,
 )
 from app.core.prompt_providers.shared.core_rules import (
     ANTI_HALLUCINATION_MANDATE,
@@ -31,38 +29,40 @@ from app.core.prompt_providers.shared.core_rules import (
     RULE_ONE_AT_A_TIME,
     RULE_POPULATE_REQUIRED,
     RULE_STT_AWARENESS,
-    RULE_USE_ACTUAL_PARAM_NAMES,
     build_identity_header,
 )
+from app.core.tool_builder import ToolBuilder
 
 logger = logging.getLogger("uvicorn")
 
 
-class Qwen25Compressed(Qwen25MediumUntrained):
+class MixtralLargeUntrained(Mistral7bMediumUntrained):
     """
-    Token-optimized prompt provider for Qwen 2.5 3B/7B Instruct.
+    Prompt provider for Mixtral 8x7B Instruct v0.1 (untrained).
 
-    The <tools> JSON block carries all tool names, descriptions, and parameter
-    schemas. No redundant Tools: listing or antipatterns section is needed —
-    routing hints are embedded directly in tool descriptions (positive framing).
+    Compressed prompt — stripped param descriptions, one-per-line tool JSON,
+    minimal rules. The larger model follows instructions with less guidance.
     """
 
     @property
     def name(self) -> str:
-        return "Qwen25Compressed"
+        return "MixtralLargeUntrained"
+
+    @property
+    def force_tool_calls(self) -> bool:
+        """Re-prompt when the model returns a direct answer instead of a tool call."""
+        return True
 
     @staticmethod
     def _build_compressed_tools_block(tools: List[Dict[str, Any]]) -> str:
-        """Build <tools> block with param descriptions and format hints stripped.
+        """Compact <tools> block — one tool per line, with param descriptions.
 
-        Same Qwen-style one-per-line JSON format, but without "description"
-        on individual parameter properties and without "format":"date-time"
-        keys that conflict with datekey instructions. Full tool descriptions
-        are preserved (they carry routing hints).
+        Keeps param descriptions (Mixtral needs them for extraction) but strips
+        format hints and excludes refinable params. Compact JSON separators.
         """
         clean_tools: List[Dict[str, Any]] = ToolBuilder.build(
             tools,
-            include_param_descriptions=False,
+            include_param_descriptions=True,
             include_format_hints=False,
             exclude_refinable=True,
         )
@@ -70,33 +70,6 @@ class Qwen25Compressed(Qwen25MediumUntrained):
             return "<tools>\n</tools>"
         lines: List[str] = [json.dumps(t, separators=(",", ":")) for t in clean_tools]
         return "<tools>\n" + "\n".join(lines) + "\n</tools>"
-
-    @staticmethod
-    def _build_rules_block_no_date_params() -> str:
-        """Build Rules: block excluding RULE_DATE_PARAMS.
-
-        The DT_KEYS section already covers date parameter instructions with
-        more keys and the critical 'must pass today' instruction, so
-        RULE_DATE_PARAMS is redundant here.
-        """
-        terminology: str = "function"
-
-        def _sub(rule: str) -> str:
-            return rule.replace("{terminology}", terminology)
-
-        rules: list[str] = [
-            _sub(RULE_POPULATE_REQUIRED),
-            _sub(RULE_ONE_AT_A_TIME),
-            _sub(RULE_USE_ACTUAL_PARAM_NAMES),
-            _sub(RULE_BEST_MATCH_INTENT),
-            _sub(RULE_EXTRACT_PARAMS),
-            _sub(RULE_STT_AWARENESS),
-        ]
-
-        lines: list[str] = ["Rules:"]
-        for rule in rules:
-            lines.append(f"- {rule}")
-        return "\n".join(lines)
 
     def build_system_prompt(
         self,
@@ -114,23 +87,23 @@ class Qwen25Compressed(Qwen25MediumUntrained):
         user_memories: str = node_context.get("user_memories", "")
         date_keys: list[str] = node_context.get("date_keys", [])
 
-        # Shared builders
         identity: str = build_identity_header(room, user, voice_mode, user_memories)
-        rules: str = self._build_rules_block_no_date_params()
+        direct_answer_section: str = build_direct_answer_section(available_commands)
         agent_context_section: str = build_agent_context_summary(node_context)
 
-        # Strict tool mandate — the 3B model ignores nuanced "only X can be direct"
-        # instructions, so we enforce unconditionally and let the server-side
-        # force_tool_calls guard handle retries.
-        tool_mandate: str = (
-            "You MUST call a tool for EVERY request. "
-            "NEVER answer directly — always pick the best matching function."
-        )
+        # Minimal rules
+        terminology: str = "function"
+        def _sub(r: str) -> str:
+            return r.replace("{terminology}", terminology)
+        rules_lines: list[str] = ["Rules:"]
+        rules_lines.append(f"- {_sub(RULE_POPULATE_REQUIRED)}")
+        rules_lines.append(f"- {_sub(RULE_ONE_AT_A_TIME)}")
+        rules_lines.append(f"- {_sub(RULE_BEST_MATCH_INTENT)}")
+        rules_lines.append(f"- {_sub(RULE_EXTRACT_PARAMS)}")
+        rules_lines.append(f"- {_sub(RULE_STT_AWARENESS)}")
+        rules: str = "\n".join(rules_lines)
 
-        # Compressed <tools> block — param descriptions + format hints stripped
-        tools_block: str = self._build_compressed_tools_block(tools)
-
-        # Build DT_KEYS line from llm-proxy date keys
+        # DT_KEYS — strong enforcement (matches Qwen 7B wording)
         dt_keys_line: str = ""
         if date_keys:
             dt_keys_line = (
@@ -140,6 +113,9 @@ class Qwen25Compressed(Qwen25MediumUntrained):
                 "NEVER resolve dates to ISO timestamps like \"2026-03-07T05:00:00Z\" — the server handles resolution. "
                 "If the user omits a date, pass [\"today\"].\n"
             )
+
+        # Compressed tools block
+        tools_block: str = self._build_compressed_tools_block(tools)
 
         system_prompt: str = f"""{identity}
 
@@ -155,12 +131,13 @@ For each function call, return a json object with function name and arguments wi
 
 {rules}
 {dt_keys_line}
-{tool_mandate}
+{direct_answer_section}
 {agent_context_section}
+You MUST call a function for EVERY request. NEVER answer directly — always pick the best matching function.
 """
 
         logger.info(
-            "Built Qwen25Compressed system prompt: %d chars, %d tools",
+            "Built MixtralLargeUntrained system prompt: %d chars, %d tools",
             len(system_prompt),
             len(tools),
         )
@@ -170,20 +147,11 @@ For each function call, return a json object with function name and arguments wi
 
         return system_prompt
 
-    @property
-    def force_tool_calls(self) -> bool:
-        """Signal that every request must produce a tool call.
-
-        The tool execution engine checks this flag and retries when
-        the model returns finish_reason='stop' without calling a tool.
-        """
-        return True
-
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "provider_name": self.name,
-            "model_family": "qwen",
-            "size_tier": "medium",
+            "model_family": "mistral",
+            "size_tier": "large",
             "training_tier": "untrained",
             "use_tool_classifier": self.use_tool_classifier,
             "supports_native_tools": self.supports_native_tools,

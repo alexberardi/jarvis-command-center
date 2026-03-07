@@ -98,6 +98,15 @@ class IJarvisPromptProvider(ABC):
         return None
 
     @property
+    def user_message_suffix(self) -> str:
+        """Optional suffix appended to every user message.
+
+        Override in providers that need control tokens in the user turn
+        (e.g., Qwen3 ``/nothink`` to disable chain-of-thought).
+        """
+        return ""
+
+    @property
     def supports_native_tools(self) -> bool:
         """
         Whether to pass tools natively to the LLM proxy.
