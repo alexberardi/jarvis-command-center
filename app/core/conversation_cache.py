@@ -270,6 +270,31 @@ class ConversationCache:
                 'ttl_seconds': self.ttl_seconds
             }
     
+    def set_force_tool_calls(self, conversation_id: str, force: bool) -> None:
+        """Store whether tool calls should be unconditionally enforced."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                logger.warning(f"❌ Cannot set force_tool_calls for non-existent conversation {conversation_id[:8]}...")
+                return
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                return
+            entry['force_tool_calls'] = force
+
+    def get_force_tool_calls(self, conversation_id: str) -> bool:
+        """Check whether tool calls should be unconditionally enforced."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                return False
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                return False
+            return entry.get('force_tool_calls', False)
+
     def has_conversation(self, conversation_id: str) -> bool:
         """Check if a conversation exists in the cache and is not expired."""
         with self.lock:

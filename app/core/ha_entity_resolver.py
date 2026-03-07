@@ -71,7 +71,6 @@ _DOMAIN_ACTIONS: Dict[str, List[str]] = {
     "fan": ["turn_on", "turn_off", "toggle"],
     "scene": ["turn_on"],
     "script": ["turn_on"],
-    "media_player": ["turn_on", "turn_off", "media_play", "media_pause"],
     "vacuum": ["start", "stop", "return_to_base"],
 }
 

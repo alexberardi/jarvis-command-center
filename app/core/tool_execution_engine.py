@@ -14,6 +14,7 @@ from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 from app.core.conversation_cache import conversation_cache
+from app.services.settings_service import get_settings_service
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.tool_builder import ToolBuilder
 from app.core.tool_executor import tool_executor
@@ -46,6 +47,7 @@ from app.core.ha_entity_resolver import (
     normalize_ha_action,
     get_ha_tool_redirect,
 )
+from app.core.param_refinement import refine_params
 from app.core.tools.resolve_relative_date_tool import ResolveRelativeDateTool
 
 try:
@@ -300,7 +302,7 @@ class ToolExecutionEngine:
         timezone_str = conversation_cache.get_timezone(conversation_id)
 
         # Environment helpers
-        small_mode = os.getenv("JARVIS_SMALL_MODEL_MODE", "").strip().lower() in {"1", "true", "yes"}
+        small_mode = get_settings_service().get_bool("model.small_model_mode", True)
 
         def _env_int(name: str, default_value: int) -> int:
             raw = os.getenv(name)
@@ -339,11 +341,12 @@ class ToolExecutionEngine:
                     must_call.add(tool_name)
             return sorted(must_call)
 
-        def _must_call_retry_already_added() -> bool:
+        def _must_call_retry_count() -> int:
             retry_tag = "[MUST_CALL_RETRY]"
-            return any(
-                msg.get("role") == "system" and retry_tag in msg.get("content", "")
+            return sum(
+                1
                 for msg in messages
+                if msg.get("role") == "system" and retry_tag in msg.get("content", "")
             )
 
         def _invalid_param_retry_count() -> int:
@@ -353,6 +356,93 @@ class ToolExecutionEngine:
                 for msg in messages
                 if msg.get("role") == "system" and retry_tag in msg.get("content", "")
             )
+
+        def _iso_date_retry_count() -> int:
+            retry_tag = "[ISO_DATE_RETRY]"
+            return sum(
+                1
+                for msg in messages
+                if msg.get("role") == "system" and retry_tag in msg.get("content", "")
+            )
+
+        def _try_fix_iso_dates(tool_calls_to_check: List[Dict[str, Any]]) -> str:
+            """Check for ISO dates in resolved_datetimes; fix or flag them.
+
+            Returns "clean" (no ISO dates found), "fixed" (converted to keys),
+            or "bad" (ISO dates don't match any known key).
+            """
+            # 1. Collect all ISO dates from all tool calls
+            iso_entries: List[tuple[int, List[str]]] = []
+            for i, call in enumerate(tool_calls_to_check):
+                args_raw = call.get("function", {}).get("arguments", "{}")
+                try:
+                    args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    continue
+                if not isinstance(args, dict):
+                    continue
+                datetimes = args.get("resolved_datetimes", [])
+                if isinstance(datetimes, str):
+                    datetimes = [datetimes]
+                if not isinstance(datetimes, list):
+                    continue
+                iso_dates = [d for d in datetimes if isinstance(d, str) and is_iso_datetime(d)]
+                if iso_dates:
+                    iso_entries.append((i, iso_dates))
+
+            if not iso_entries:
+                return "clean"
+
+            # 2. Build reverse map from date context
+            date_context = generate_date_context_object(timezone_str)
+            flat = flatten_date_context(date_context)
+            reverse_single: Dict[str, str] = {}   # "2026-03-04T..." → "today"
+            reverse_multi: Dict[tuple, str] = {}   # ("2026-03-07T...", "2026-03-08T...") → "this_weekend"
+            for key, value in flat.items():
+                if isinstance(value, list):
+                    str_vals = [v for v in value if isinstance(v, str)]
+                    if str_vals:
+                        reverse_multi[tuple(sorted(str_vals))] = key
+                        for v in str_vals:
+                            reverse_single.setdefault(v, key)
+                elif isinstance(value, str):
+                    reverse_single.setdefault(value, key)
+
+            # 3. Try to reverse-map each ISO date
+            all_fixed = True
+            for call_idx, iso_dates in iso_entries:
+                # Try multi-date match first (e.g., this_weekend)
+                multi_key = reverse_multi.get(tuple(sorted(iso_dates)))
+                if multi_key:
+                    _replace_datetimes(tool_calls_to_check[call_idx], [multi_key])
+                    continue
+                # Try individual lookups
+                keys: List[str] = []
+                matched = True
+                for iso in iso_dates:
+                    key = reverse_single.get(iso)
+                    if key:
+                        keys.append(key)
+                    else:
+                        matched = False
+                        break
+                if matched and keys:
+                    _replace_datetimes(tool_calls_to_check[call_idx], keys)
+                else:
+                    all_fixed = False
+
+            return "fixed" if all_fixed else "bad"
+
+        def _replace_datetimes(tool_call: Dict[str, Any], new_values: List[str]) -> None:
+            """Replace resolved_datetimes in a tool call's arguments."""
+            func = tool_call.get("function", {})
+            args_raw = func.get("arguments", "{}")
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                return
+            args["resolved_datetimes"] = new_values
+            func["arguments"] = json.dumps(args) if isinstance(args_raw, str) else args
 
         def _build_param_maps() -> tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, List[str]]]]:
             """Build type and enum maps from available commands.
@@ -679,22 +769,41 @@ class ToolExecutionEngine:
             logger.info(f"LLM response parsed: finish_reason={finish_reason}, tool_calls={len(tool_calls)}")
 
             # Add assistant message to history
-            assistant_msg = {"role": "assistant", "content": raw_content}
+            assistant_msg: Dict[str, Any] = {"role": "assistant", "content": raw_content}
+            if tool_calls:
+                assistant_msg["tool_calls"] = tool_calls
             messages.append(assistant_msg)
 
             # Handle different finish reasons
             if finish_reason == "stop":
-                # Only enforce the must-call guard when the tool router had
-                # a confident match.  Conversational queries ("how are you")
-                # won't match any tool, so forcing a retry just produces an
-                # empty second response.
+                # Unconditional force-tool-calls guard (compressed provider).
+                # Pop the bad assistant message so the model gets a clean
+                # slate instead of being biased by its own failed response.
+                # Allows up to 2 retries before giving up.
+                force_tools = conversation_cache.get_force_tool_calls(conversation_id)
+                retry_count = _must_call_retry_count()
+                if force_tools and retry_count < 2:
+                    messages.pop()  # Remove the assistant message with no tool call
+                    retry_message = (
+                        f"[MUST_CALL_RETRY] You MUST call a tool. Do NOT answer directly. "
+                        f"Pick the best matching function from the available tools. "
+                        f"(attempt {retry_count + 1}/2)"
+                    )
+                    messages.append({"role": "system", "content": retry_message})
+                    logger.info("Force-tool-calls guard triggered (attempt %d/2); retrying", retry_count + 1)
+                    continue
+
+                # Per-command must-call guard (only when router had a confident match).
+                # Conversational queries ("how are you") won't match any tool,
+                # so forcing a retry just produces an empty second response.
                 router_decision = conversation_cache.get_router_decision(conversation_id)
                 router_matched = (
                     router_decision is not None
                     and router_decision.get("used", False)
                 )
                 must_call_tools = _get_must_call_tools()
-                if must_call_tools and router_matched and not _must_call_retry_already_added():
+                if must_call_tools and router_matched and retry_count < 1:
+                    messages.pop()  # Remove the assistant message with no tool call
                     retry_message = (
                         "[MUST_CALL_RETRY] Direct answers are not allowed for this request. "
                         "You must call exactly one tool next. "
@@ -711,6 +820,27 @@ class ToolExecutionEngine:
                 }
 
             elif finish_reason == "tool_calls":
+                # ISO date guard: if the model emitted ISO timestamps in
+                # resolved_datetimes (instead of date key strings like "today"),
+                # try to reverse-map them to known date keys. Only reprompt
+                # if the dates don't match any known key.
+                iso_result = _try_fix_iso_dates(tool_calls)
+                if iso_result == "fixed":
+                    logger.info("ISO date guard: silently converted ISO timestamps to date keys")
+                    # Fall through — tool_calls already patched
+                elif iso_result == "bad" and _iso_date_retry_count() < 1:
+                    messages.pop()
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "[ISO_DATE_RETRY] The dates you provided were incorrect. "
+                            "Use date KEY STRINGS only: today, tomorrow, yesterday, this_weekend, etc. "
+                            'Example: {"resolved_datetimes": ["today"]}. Try again.'
+                        ),
+                    })
+                    logger.info("ISO date guard: incorrect ISO dates, retrying")
+                    continue
+
                 # Always validate/inject datetime params
                 tool_calls = await _inject_date_keys(tool_calls, date_keys, tools)
                 if date_keys:
@@ -778,6 +908,15 @@ class ToolExecutionEngine:
                     # Normalize HA tool names and actions before validation
                     client_calls = _normalize_ha_calls(client_calls)
 
+                    # Refine params for commands with refinable parameters
+                    # (only when compressed provider is active — gated on force_tools)
+                    force_tools = conversation_cache.get_force_tool_calls(conversation_id)
+                    if force_tools and user_utterance:
+                        all_tools = conversation_cache.get_tools(conversation_id) or []
+                        client_calls = await refine_params(
+                            client_calls, all_tools, user_utterance, self.llm_client
+                        )
+
                     invalid_params = _validate_client_tool_params(client_calls)
                     if invalid_params:
                         max_retries = _env_int("JARVIS_INVALID_PARAM_RETRY_MAX", 1 if small_mode else 2)
@@ -807,8 +946,22 @@ class ToolExecutionEngine:
                         "assistant_message": assistant_message
                     }
 
-                # Only server tools - already added to messages, continue loop
+                # Only server tools - already added to messages
                 if server_results:
+                    if not use_native_tools:
+                        # Text-based models can't process role="tool" messages:
+                        # the chat template drops tool_call metadata, causing
+                        # the LLM to re-call the same tool endlessly.  Return
+                        # results so the handler can format with a clean call.
+                        logger.info(
+                            "Server-only tools in text-based mode — returning for formatting"
+                        )
+                        _log_usage(iteration + 1, "server_tool_complete")
+                        return {
+                            "stop_reason": "server_tool_complete",
+                            "server_tool_results": server_results,
+                            "assistant_message": assistant_message,
+                        }
                     logger.info("Only server tools executed, continuing loop")
 
             else:
