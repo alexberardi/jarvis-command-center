@@ -82,7 +82,7 @@ Rules:
 - Always populate required tool parameters from the user's request.
 - For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
 <tool_call>
-{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}}}
+{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}, "failure_message": "<brief spoken response if this call fails>"}}
 </tool_call>
 {direct_answer_section}
 {agent_context_section}

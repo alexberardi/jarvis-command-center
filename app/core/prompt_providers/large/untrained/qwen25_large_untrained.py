@@ -111,7 +111,7 @@ You are provided with function signatures within <tools></tools> XML tags:
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
-{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}}}
+{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}, "failure_message": "<brief spoken response if this call fails>"}}
 </tool_call>
 
 IMPORTANT: resolved_datetimes accepts ONLY literal date keys: "today", "tomorrow", "yesterday", "this_weekend", "last_weekend", "next_week", "this_year", "day_after_tomorrow". ISO timestamps (e.g. 2026-02-28T00:00:00Z) are INVALID and will cause a parsing error.

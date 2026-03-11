@@ -193,7 +193,10 @@ class TestContinueConversation:
         from app.core.conversation_handler import ConversationHandler
 
         mock_model = MagicMock()
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.chat_completion.return_value = {
+            "choices": [{"message": {"content": "It's sunny and 72F."}}],
+        }
         handler = ConversationHandler(model=mock_model, llm_client=mock_client)
 
         messages = [
@@ -206,24 +209,16 @@ class TestContinueConversation:
             mock_cache.get_messages.return_value = messages
             mock_cache.get_tools.return_value = []
 
-            with patch("app.core.conversation_handler.ToolExecutionEngine") as MockEngine:
-                mock_engine = MagicMock()
-                mock_engine.execute = AsyncMock(return_value={
-                    "stop_reason": "complete",
-                    "assistant_message": "Done",
-                })
-                MockEngine.return_value = mock_engine
+            await handler.continue_conversation_with_tool_results(
+                conversation_id="test-conv",
+                tool_results=[{"tool_call_id": "call_123", "output": "Sunny, 72F"}],
+            )
 
-                await handler.continue_conversation_with_tool_results(
-                    conversation_id="test-conv",
-                    tool_results=[{"tool_call_id": "call_123", "output": "Sunny, 72F"}],
-                )
-
-                # Check that tool result message was added
-                assert any(
-                    msg.get("role") == "tool" and msg.get("tool_call_id") == "call_123"
-                    for msg in messages
-                )
+            # Check that tool result message was added
+            assert any(
+                msg.get("role") == "tool" and msg.get("tool_call_id") == "call_123"
+                for msg in messages
+            )
 
 
 class TestGetSystemPromptDispatch:

@@ -2,9 +2,11 @@ import os
 import sys
 import logging
 import time
+from dataclasses import dataclass
 
 import httpx
 from fastapi import Header, HTTPException, Depends
+from jose import ExpiredSignatureError, JWTError, jwt
 from sqlalchemy.orm import Session
 
 from app.context_providers.node_context_provider import NodeContextProvider
@@ -24,6 +26,8 @@ logger = logging.getLogger("uvicorn")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
 JARVIS_APP_ID = os.getenv("JARVIS_APP_ID", "command-center")
 JARVIS_APP_KEY = os.getenv("JARVIS_APP_KEY")
+JARVIS_AUTH_SECRET_KEY = os.getenv("JARVIS_AUTH_SECRET_KEY", "")
+JARVIS_AUTH_ALGORITHM = os.getenv("JARVIS_AUTH_ALGORITHM", "HS256")
 
 
 def _get_auth_base_url() -> str:
@@ -221,4 +225,93 @@ async def require_app_auth(
 
     # Auth succeeded
     return None
+
+
+# =============================================================================
+# User JWT Authentication (for mobile app)
+# =============================================================================
+
+
+@dataclass
+class AuthenticatedUser:
+    """User info extracted from a validated JWT."""
+    user_id: int
+    email: str | None = None
+
+
+def verify_user_jwt(authorization: str | None = Header(None)) -> AuthenticatedUser:
+    """Validate a Bearer JWT and return the user info.
+
+    Does NOT require superuser — any valid user token is accepted.
+    Use verify_household_role() afterwards to check permission level.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not JARVIS_AUTH_SECRET_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="JARVIS_AUTH_SECRET_KEY not configured",
+        )
+
+    token = authorization[7:]
+    try:
+        payload = jwt.decode(token, JARVIS_AUTH_SECRET_KEY, algorithms=[JARVIS_AUTH_ALGORITHM])
+    except ExpiredSignatureError as exc:
+        raise HTTPException(status_code=401, detail="Token has expired") from exc
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token: missing user ID")
+
+    return AuthenticatedUser(user_id=int(user_id), email=payload.get("email"))
+
+
+def verify_household_role(
+    user_id: int,
+    household_id: str,
+    required_role: str = "power_user",
+) -> None:
+    """Check that user has the required role in a household via jarvis-auth.
+
+    Raises HTTPException(403) if the user lacks permission.
+    """
+    if not JARVIS_APP_KEY:
+        logger.warning("JARVIS_APP_KEY not set — skipping household role check")
+        return
+
+    auth_url = _get_auth_base_url().rstrip("/")
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(
+                f"{auth_url}/internal/validate-household-access",
+                headers={
+                    "X-Jarvis-App-Id": JARVIS_APP_ID,
+                    "X-Jarvis-App-Key": JARVIS_APP_KEY,
+                },
+                json={
+                    "user_id": user_id,
+                    "household_id": household_id,
+                    "required_role": required_role,
+                },
+            )
+    except httpx.RequestError as exc:
+        logger.error("Failed to reach jarvis-auth for role check: %s", exc)
+        raise HTTPException(status_code=502, detail="Auth service unavailable") from exc
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail="Auth service error")
+
+    result = resp.json()
+    if not result.get("valid"):
+        raise HTTPException(
+            status_code=403,
+            detail=result.get("reason", "Insufficient permissions"),
+        )
 

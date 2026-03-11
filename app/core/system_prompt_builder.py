@@ -145,7 +145,7 @@ You MUST respond with valid JSON only. No comments, no explanations, no markdown
 When calling a tool (ONE at a time):
 {{
   "message": "Brief acknowledgment",
-  "tool_call": {{"name": "tool_name", "arguments": {{"param_name": "param_value"}}}}{reason_suffix_block}
+  "tool_call": {{"name": "tool_name", "arguments": {{"param_name": "param_value"}}, "failure_message": "brief spoken response if this fails"}}{reason_suffix_block}
 }}
 
 When you have the final answer:
@@ -173,7 +173,7 @@ Rules:
 {"- You may include an optional 'reason' field explaining tool/parameter choices." if include_reason else ""}
 
 Format:
-- Tool call: {{"message":"brief ack","tool_call":{{"name":"tool_name","arguments":{{...}}}}{reason_suffix_inline}}}
+- Tool call: {{"message":"brief ack","tool_call":{{"name":"tool_name","arguments":{{...}},"failure_message":"brief spoken response if this fails"}}{reason_suffix_inline}}}
 - Final: {{"message":"concise reply","tool_call":null{reason_suffix_inline}}}
 
 Tools:

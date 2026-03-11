@@ -245,7 +245,7 @@ class AuthSession(Base):
     completed_at = Column(DateTime, nullable=True)
 
     # Relationships
-    node = relationship("Node", backref="auth_sessions")
+    node = relationship("Node", backref="auth_sessions", passive_deletes=True)
 
 
 class UserMemory(Base):

@@ -150,7 +150,7 @@ You are provided with function signatures within <tools></tools> XML tags:
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
-{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}}}
+{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}, "failure_message": "<brief spoken response if this call fails>"}}
 </tool_call>
 
 {rules}

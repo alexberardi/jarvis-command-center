@@ -22,7 +22,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, require_app_auth
+from app.deps import get_db, require_app_auth, verify_api_key
 from app.models import AuthSession, Node
 from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext
 
@@ -94,9 +94,9 @@ def _get_encryption_key() -> bytes:
         return key_bytes
 
     # Derive from SECRET_KEY if no dedicated key is set
-    secret_key = os.getenv("SECRET_KEY")
+    secret_key = os.getenv("SECRET_KEY") or os.getenv("JARVIS_AUTH_SECRET_KEY")
     if not secret_key:
-        raise ValueError("JARVIS_TOKEN_ENCRYPTION_KEY or SECRET_KEY must be set for token encryption")
+        raise ValueError("JARVIS_TOKEN_ENCRYPTION_KEY, SECRET_KEY, or JARVIS_AUTH_SECRET_KEY must be set for token encryption")
     return hashlib.sha256(secret_key.encode()).digest()
 
 
@@ -228,12 +228,17 @@ def create_auth_session(
 
     # Build the full callback URI
     external_base = _get_external_url(request)
-    redirect_uri = f"{external_base}/oauth/callback"
+    redirect_uri = f"{external_base}/api/v0/oauth/callback"
+
+    # For local/discoverable providers (authorize_path, not authorize_url),
+    # use JCC's external URL as client_id so the origin matches redirect_uri.
+    # Providers like HA require redirect_uri and client_id to share the same origin.
+    effective_client_id = external_base if cfg.authorize_path else cfg.client_id
 
     # Build authorize URL with query params
     params: dict[str, str] = {
         "response_type": "code",
-        "client_id": cfg.client_id,
+        "client_id": effective_client_id,
         "redirect_uri": redirect_uri,
         "state": state,
     }
@@ -258,7 +263,7 @@ def create_auth_session(
         provider_base_url=base_url,
         authorize_url=full_authorize_url,
         exchange_url=exchange_endpoint,
-        client_id=cfg.client_id,
+        client_id=effective_client_id,
         expires_at=datetime.utcnow() + timedelta(minutes=SESSION_TTL_MINUTES),
     )
     db.add(session)
@@ -304,7 +309,7 @@ async def oauth_callback(
 
     # Build token exchange request
     external_base = _get_external_url(request)
-    redirect_uri = f"{external_base}/oauth/callback"
+    redirect_uri = f"{external_base}/api/v0/oauth/callback"
 
     exchange_data: dict[str, str] = {
         "grant_type": "authorization_code",
@@ -399,15 +404,15 @@ def get_auth_session_status(
 @router.get("/oauth/provider/{provider}/credentials", response_model=ProviderCredentialsResponse)
 async def get_provider_credentials(
     provider: str,
-    node_id: str = Query(...),
-    _auth=Depends(require_app_auth),
+    node_context=Depends(verify_api_key),
     db: Session = Depends(get_db),
 ) -> ProviderCredentialsResponse:
     """Node pulls credentials after MQTT auth-ready notification.
 
-    Requires app-to-app auth (X-Jarvis-App-Id + X-Jarvis-App-Key).
+    Requires node auth (X-API-Key: node_id:node_key).
     Returns decrypted tokens. Marks session as consumed.
     """
+    node_id = node_context.node.node_id
     session = db.query(AuthSession).filter(
         AuthSession.provider == provider,
         AuthSession.node_id == node_id,

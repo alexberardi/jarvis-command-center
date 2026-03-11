@@ -165,7 +165,7 @@ class IJarvisPromptProvider(ABC):
             "For each function call return a json object with function name and arguments "
             "within <tool_call></tool_call> XML tags as follows:\n"
             "<tool_call>\n"
-            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}}\n'
+            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}, "failure_message": "<brief spoken response if this call fails>"}\n'
             "</tool_call>"
         )
 

@@ -120,7 +120,7 @@ You are a function calling AI model. You are provided with function signatures w
 
 For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
 <tool_call>
-{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}}}
+{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}, "failure_message": "<brief spoken response if this call fails>"}}
 </tool_call>
 
 Example — if the user says "What's the weather in Miami?", respond ONLY with:

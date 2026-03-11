@@ -38,6 +38,7 @@ class ToolCall(BaseModel):
     id: str
     type: str = "function"
     function: Dict[str, Any]
+    failure_message: Optional[str] = None
 
 
 class ValidationRequest(BaseModel):

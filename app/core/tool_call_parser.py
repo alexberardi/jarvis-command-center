@@ -167,7 +167,7 @@ class ToolCallParser:
             arguments["resolved_datetimes"] = unwrapped
 
         tool_call_id = f"call_{uuid.uuid4().hex[:12]}"
-        return {
+        result: Dict[str, Any] = {
             "id": tool_call_id,
             "type": "function",
             "function": {
@@ -175,6 +175,13 @@ class ToolCallParser:
                 "arguments": json.dumps(arguments)
             }
         }
+
+        # Extract optional failure_message (LLM-generated fallback for failed tool calls)
+        failure_message = tool_call_raw.get("failure_message")
+        if failure_message and isinstance(failure_message, str):
+            result["failure_message"] = failure_message
+
+        return result
     
     @staticmethod
     def _strip_json_comments(text: str) -> str:
