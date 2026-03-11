@@ -142,6 +142,111 @@ def build_agent_context_summary(node_context: Dict[str, Any]) -> str:
     return section
 
 
+def build_agent_context_by_room(node_context: Dict[str, Any]) -> str:
+    """
+    Build HA context grouped by room/area so the LLM can match voice
+    commands like "turn on the play room lights" to the correct entity.
+
+    Output format:
+        Home Assistant Devices:
+        Office:
+        - light.office: Office Lights (on)
+        - switch.office_fan: Fan (off)
+        Play Room:
+        - light.play_room: Play Room Lights (off)
+        ...
+
+    Args:
+        node_context: Node context dict with "agents" → "home_assistant" data.
+
+    Returns:
+        Formatted string grouped by room, or empty string if no data.
+    """
+    agents_data = node_context.get("agents", {})
+    if not agents_data:
+        return ""
+
+    ha_data = agents_data.get("home_assistant", {})
+    if not ha_data:
+        return ""
+
+    # Collect all entities into room → list[entity_info]
+    room_entities: Dict[str, List[Dict[str, Any]]] = {}
+
+    # Light controls (room groups — e.g., Hue rooms)
+    light_controls: Dict[str, Any] = ha_data.get("light_controls", {})
+    room_group_ids: set[str] = set()
+    for name, info in light_controls.items():
+        entity_id = info.get("entity_id", "")
+        state = info.get("state", "unknown")
+        room_group_ids.add(entity_id)
+        # Use the friendly name as a rough room guess if no area
+        room_entities.setdefault("Room Groups", []).append({
+            "entity_id": entity_id,
+            "name": name,
+            "state": state,
+        })
+
+    # Device controls (individual devices grouped by domain)
+    device_controls: Dict[str, List[Dict[str, Any]]] = ha_data.get("device_controls", {})
+    for devices in device_controls.values():
+        for dev in devices:
+            entity_id = dev.get("entity_id", "")
+            if dev.get("state") == "unavailable":
+                continue
+            # Skip room group duplicates
+            if entity_id in room_group_ids:
+                continue
+            area = dev.get("area", "Unassigned")
+            room_entities.setdefault(area, []).append({
+                "entity_id": entity_id,
+                "name": dev.get("name", ""),
+                "state": dev.get("state", "unknown"),
+            })
+
+    if not room_entities:
+        return ""
+
+    # Floor layout for floor-level commands
+    floors: Dict[str, List[str]] = ha_data.get("floors", {})
+    section = "\nHome Assistant Devices:\n"
+
+    if floors:
+        floor_parts: List[str] = [
+            f"{fname} ({', '.join(areas)})" for fname, areas in floors.items()
+        ]
+        section += f"Floors: {', '.join(floor_parts)}\n"
+        section += (
+            "Floor commands (e.g., 'turn off lights downstairs') → "
+            "call control_device for EACH device in EVERY area on that floor.\n"
+        )
+
+    # Room groups first (if any)
+    if "Room Groups" in room_entities:
+        section += "\nRoom Groups (control all lights in a room):\n"
+        for dev in room_entities.pop("Room Groups"):
+            section += f"- {dev['entity_id']}: {dev['name']} ({dev['state']})\n"
+
+    # Remaining rooms sorted alphabetically, Unassigned last
+    sorted_rooms = sorted(
+        room_entities.keys(),
+        key=lambda r: (r == "Unassigned", r),
+    )
+    for room_name in sorted_rooms:
+        devices = room_entities[room_name]
+        section += f"\n{room_name}:\n"
+        for dev in devices:
+            section += f"- {dev['entity_id']}: {dev['name']} ({dev['state']})\n"
+
+    section += (
+        "\nUse control_device to control devices. "
+        "Use get_device_status to check state. "
+        "Copy entity_id EXACTLY as shown above.\n"
+    )
+
+    return section
+
+
 def build_agent_context_section(node_context: Dict[str, Any]) -> str:
     """
     Build agent context section (e.g., Home Assistant devices) from node context.

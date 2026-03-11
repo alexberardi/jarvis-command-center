@@ -251,6 +251,10 @@ app.include_router(date_context.date_context_router, prefix="/api/v0", tags=["da
 # Include node settings router
 app.include_router(node_settings.router, prefix="/api/v0", tags=["node-settings"])
 
+# Include smart home router (config push, rooms, devices)
+from app.api import smart_home
+app.include_router(smart_home.router, prefix="/api/v0", tags=["smart-home"])
+
 # Include media proxy router
 app.include_router(media.router, prefix="/api/v0", tags=["media"])
 
@@ -263,6 +267,10 @@ app.include_router(test_commands.router, prefix="/api/v0", tags=["testing"])
 # Include memory CRUD router
 from app.api import memories
 app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
+
+# Include OAuth session management router
+from app.api import oauth
+app.include_router(oauth.router, prefix="/api/v0", tags=["oauth"])
 
 # Settings router is included in startup_event after service_config is initialized
 

@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
-from .deps import get_db, verify_admin_key, verify_api_key
+from .deps import get_db, verify_api_key, verify_user_jwt, verify_household_role, AuthenticatedUser
 from .models import Node, SettingsRequest, SettingsSnapshot
 from .context_providers.node_context_provider import NodeContextProvider
 
@@ -34,7 +34,7 @@ mqtt_client: Optional["MQTTClient"] = None
 def get_mqtt_client() -> Optional["MQTTClient"]:
     """Get or create MQTT client."""
     global mqtt_client
-    if mqtt_client is None:
+    if mqtt_client is None or not mqtt_client.is_connected:
         try:
             from .core.mqtt_client import MQTTClient, get_mqtt_broker_url
             broker_url = get_mqtt_broker_url()
@@ -43,6 +43,7 @@ def get_mqtt_client() -> Optional["MQTTClient"]:
                 mqtt_client.connect()
                 logger.info(f"✅ MQTT client connected to {broker_url}")
         except Exception as e:
+            mqtt_client = None
             logger.warning(f"⚠️  MQTT client not available: {e}")
     return mqtt_client
 
@@ -152,19 +153,27 @@ def _publish_settings_request_mqtt(node_id: str, request_id: str) -> None:
     "/nodes/{node_id}/settings/requests",
     response_model=SettingsRequestResponse,
     status_code=201,
-    dependencies=[Depends(verify_admin_key)],
 )
-def create_settings_request(node_id: str, db: Session = Depends(get_db)):
+def create_settings_request(
+    node_id: str,
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+    db: Session = Depends(get_db),
+):
     """
     Create a new settings request for a node.
 
     This is called by the mobile app when it wants to retrieve node settings.
+    Requires power_user role in the node's household.
     CC will publish an MQTT message to signal the node.
     """
     # Verify node exists
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    # Verify user has power_user role in the node's household
+    if node.household_id:
+        verify_household_role(user.user_id, node.household_id)
 
     # Create request with UUIDv4 (unguessable)
     request = SettingsRequest(
@@ -288,13 +297,14 @@ def get_settings_result(
     node_id: str,
     request_id: str,
     response: Response,
+    user: AuthenticatedUser = Depends(verify_user_jwt),
     db: Session = Depends(get_db),
-    _: None = Depends(verify_admin_key),
 ):
     """
     Poll for settings request result.
 
     This is called by the mobile app to check if the node has responded.
+    Requires power_user role in the node's household.
     Returns 202 if still pending, 200 with snapshot if fulfilled.
     """
     request = db.query(SettingsRequest).filter(

@@ -70,6 +70,25 @@ FALLBACK_BRIEF_REPLY_HERMES: str = (
     "For final answers with no tool needed, respond with a brief spoken reply."
 )
 
+# Tool call format with failure_message
+TOOL_CALL_FORMAT: str = (
+    'For each function call, return a json object with function name and arguments '
+    'within <tool_call></tool_call> XML tags:\n'
+    '<tool_call>\n'
+    '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}, '
+    '"failure_message": "<brief spoken message if this call fails>"}\n'
+    '</tool_call>'
+)
+
+TOOL_CALL_FORMAT_JSON: str = (
+    'When calling a tool:\n'
+    '{{\n'
+    '  "message": "Brief acknowledgment",\n'
+    '  "tool_call": {{"name": "tool_name", "arguments": {{"param": "value"}}, '
+    '"failure_message": "brief spoken message if this fails"}}\n'
+    '}}'
+)
+
 
 # ---------------------------------------------------------------------------
 # Builder functions

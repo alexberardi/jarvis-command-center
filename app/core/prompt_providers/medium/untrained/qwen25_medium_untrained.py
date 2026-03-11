@@ -140,7 +140,7 @@ You are a function calling AI model. You may call one or more functions to assis
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
-{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}}}
+{{"name": "<function-name>", "arguments": {{"<arg-name>": "<arg-value>"}}, "failure_message": "<brief spoken response if this call fails>"}}
 </tool_call>
 
 {rules}
@@ -256,7 +256,7 @@ Tools:
             "For each function call, return a json object with function name "
             "and arguments within <tool_call></tool_call> XML tags:\n"
             "<tool_call>\n"
-            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}}\n'
+            '{"name": "<function-name>", "arguments": {"<arg-name>": "<arg-value>"}, "failure_message": "<brief spoken response if this call fails>"}\n'
             "</tool_call>\n\n"
             f"{rules}\n"
             f"{fallback}"
