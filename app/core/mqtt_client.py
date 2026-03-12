@@ -6,6 +6,7 @@ Broker URL is discovered via service config or environment variable.
 """
 import logging
 import os
+import uuid
 from typing import Optional
 
 import paho.mqtt.client as mqtt
@@ -73,7 +74,7 @@ class MQTTClient:
             return
 
         self.client = mqtt.Client(
-            client_id=f"jarvis-command-center-{os.getpid()}",
+            client_id=f"jarvis-cc-{os.getpid()}-{uuid.uuid4().hex[:8]}",
             protocol=mqtt.MQTTv311,
         )
 
