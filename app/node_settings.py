@@ -32,19 +32,34 @@ mqtt_client: Optional["MQTTClient"] = None
 
 
 def get_mqtt_client() -> Optional["MQTTClient"]:
-    """Get or create MQTT client."""
+    """Get or create MQTT client.
+
+    If the existing client has disconnected, cleanly shuts it down
+    (stopping its background reconnect thread) before creating a new one.
+    This prevents duplicate client IDs from fighting on the broker.
+    """
     global mqtt_client
-    if mqtt_client is None or not mqtt_client.is_connected:
+    if mqtt_client is not None and mqtt_client.is_connected:
+        return mqtt_client
+
+    # Tear down old client to stop its loop_start() thread
+    if mqtt_client is not None:
         try:
-            from .core.mqtt_client import MQTTClient, get_mqtt_broker_url
-            broker_url = get_mqtt_broker_url()
-            if broker_url:
-                mqtt_client = MQTTClient(broker_url)
-                mqtt_client.connect()
-                logger.info(f"✅ MQTT client connected to {broker_url}")
-        except Exception as e:
-            mqtt_client = None
-            logger.warning(f"⚠️  MQTT client not available: {e}")
+            mqtt_client.disconnect()
+        except Exception:
+            pass
+        mqtt_client = None
+
+    try:
+        from .core.mqtt_client import MQTTClient, get_mqtt_broker_url
+        broker_url = get_mqtt_broker_url()
+        if broker_url:
+            mqtt_client = MQTTClient(broker_url)
+            mqtt_client.connect()
+            logger.info(f"✅ MQTT client connected to {broker_url}")
+    except Exception as e:
+        mqtt_client = None
+        logger.warning(f"⚠️  MQTT client not available: {e}")
     return mqtt_client
 
 
