@@ -272,6 +272,10 @@ app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
 from app.api import oauth
 app.include_router(oauth.router, prefix="/api/v0", tags=["oauth"])
 
+# Include agent utility endpoints (news, calendar for node-side agents)
+from app.api import agents
+app.include_router(agents.router, prefix="/api/v0", tags=["agents"])
+
 # Settings router is included in startup_event after service_config is initialized
 
 
