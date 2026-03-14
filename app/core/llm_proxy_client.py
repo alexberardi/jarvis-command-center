@@ -54,7 +54,7 @@ class LLMProxyClient:
     async def chat_completion(
         self,
         messages: list,
-        model: str = "full",
+        model: str = "live",
         temperature: float = 0,
         conversation_id: Optional[str] = None,
         tools: Optional[list] = None,
@@ -113,7 +113,7 @@ class LLMProxyClient:
     async def chat_completion_stream(
         self,
         messages: list,
-        model: str = "full",
+        model: str = "live",
         temperature: float = 0,
         include_date_context: bool = True,
         adapter_settings: Optional[Dict[str, Any]] = None,
@@ -170,7 +170,7 @@ class LLMProxyClient:
     async def lightweight_chat(
         self, 
         messages: list, 
-        model: str = "lightweight", 
+        model: str = "live",
         temperature: float = 0
     ) -> Dict[str, Any]:
         """Make a lightweight chat request."""
@@ -188,7 +188,7 @@ class LLMProxyClient:
         self,
         conversation_id: str,
         messages: list,
-        model: str = "full",
+        model: str = "live",
         temperature: float = 0,
         tools: Optional[list] = None,
         adapter_settings: Optional[Dict[str, Any]] = None

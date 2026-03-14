@@ -245,7 +245,7 @@ async def _enqueue_summarization(
         "ttl_seconds": 600,  # 10 min — research shouldn't take longer
         "metadata": research_metadata,
         "request": {
-            "model": "full",
+            "model": "background",
             "messages": messages,
             "sampling": {
                 "temperature": 0.3,

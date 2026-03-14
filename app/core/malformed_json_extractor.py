@@ -61,7 +61,7 @@ class MalformedJsonExtractorService:
             
             # Call the lightweight chat endpoint
             payload = {
-                "model": "full",
+                "model": "live",
                 "temperature": 0.1,
                 "messages": [
                     {
