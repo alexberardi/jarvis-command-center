@@ -30,6 +30,7 @@ dependencies = [
     "feedparser",
     "jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@main",
     "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@main",
+    "duckduckgo-search>=7.0.0",
 ]
 
 [project.optional-dependencies]
