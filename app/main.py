@@ -842,6 +842,30 @@ async def adapter_training_callback(request: Request):
     return {"status": "ok"}
 
 
+@v0_router.post("/deep-research/callback", name="deep_research_callback")
+async def deep_research_callback(request: Request):
+    """Receive LLM queue callback for deep research summarization."""
+    callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
+    if callback_token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header != f"Bearer {callback_token}":
+            raise HTTPException(status_code=401, detail="Unauthorized callback")
+
+    payload = await request.json()
+    job_id = payload.get("job_id")
+    status = payload.get("status")
+    query = payload.get("metadata", {}).get("query", "unknown")
+    logger.info("📬 Deep research callback: job_id=%s status=%s query=%r", job_id, status, query)
+
+    from app.services.deep_research_service import handle_summarization_callback
+    try:
+        await handle_summarization_callback(payload)
+    except Exception as e:
+        logger.error("❌ Deep research callback handling failed: %s", e, exc_info=True)
+
+    return {"status": "ok"}
+
+
 @v0_router.post("/voice/command/continue", response_model=VoiceCommandResponse)
 async def continue_voice_command(
     request: ToolResultRequest,

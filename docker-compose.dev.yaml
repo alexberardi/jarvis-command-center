@@ -40,6 +40,7 @@ services:
       - DATABASE_URL=${DB_URL}
       - JARVIS_AUTH_SECRET_KEY=${JARVIS_AUTH_SECRET_KEY}
       - JARVIS_EXTERNAL_URL=${JARVIS_EXTERNAL_URL:-}
+      - JARVIS_COMMAND_CENTER_URL=${JARVIS_COMMAND_CENTER_URL:-http://host.docker.internal:7703}
     extra_hosts:
       - "${DOCKER_HOST_ALIAS:-host.docker.internal}:host-gateway"
     command: >

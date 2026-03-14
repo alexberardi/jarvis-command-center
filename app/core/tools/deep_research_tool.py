@@ -73,11 +73,10 @@ class DeepResearchTool(IServerTool):
 
         speaker_user_id = node_context.get("speaker_user_id")
 
-        # Validate depth
         if depth not in ("quick", "thorough"):
             depth = "quick"
 
-        # Spawn background task
+        # Spawn background task — search + scrape + enqueue LLM job
         try:
             loop = asyncio.get_event_loop()
             loop.create_task(
@@ -108,7 +107,7 @@ async def _run_research_background(
     household_id: str,
     speaker_user_id: int | None,
 ) -> None:
-    """Background coroutine that performs the actual research pipeline."""
+    """Background coroutine: search, scrape, enqueue LLM summarization."""
     try:
         from app.services.deep_research_service import run_research
 
@@ -122,18 +121,13 @@ async def _run_research_background(
         logger.error("Deep research failed for query=%r: %s", query, e, exc_info=True)
         # Best-effort: send failure notification
         try:
-            await _send_failure_notification(query, str(e), household_id)
+            from app.services.deep_research_service import _send_notification
+
+            await _send_notification(
+                household_id=household_id,
+                title="Research Failed",
+                body=f"Research on \"{query}\" failed: {e}",
+                data={"type": "deep_research_failed"},
+            )
         except Exception as notify_err:
             logger.error("Failed to send research failure notification: %s", notify_err)
-
-
-async def _send_failure_notification(query: str, error: str, household_id: str) -> None:
-    """Send a push notification about a failed research attempt."""
-    from app.services.deep_research_service import _send_notification
-
-    await _send_notification(
-        household_id=household_id,
-        title="Research Failed",
-        body=f"Research on \"{query}\" failed: {error}",
-        data={"type": "deep_research_failed"},
-    )

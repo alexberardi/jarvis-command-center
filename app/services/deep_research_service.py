@@ -1,12 +1,16 @@
-"""Deep research pipeline — search, scrape, summarize, deliver.
+"""Deep research pipeline — search, scrape, enqueue LLM summarization, deliver.
 
-Called as a background task from deep_research_tool.py.
+Two-phase flow:
+  1. run_research() — search + scrape + enqueue LLM job via Redis queue
+  2. handle_summarization_callback() — called by queue callback, stores inbox + sends push
 """
 
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -32,7 +36,7 @@ async def run_research(
     household_id: str,
     speaker_user_id: int | None,
 ) -> None:
-    """Execute the full research pipeline."""
+    """Phase 1: Search the web, scrape results, enqueue LLM summarization."""
     start_time = time.monotonic()
     logger.info("Starting deep research: query=%r, depth=%s", query, depth)
 
@@ -53,26 +57,105 @@ async def run_research(
 
     logger.info("Scraped %d/%d pages successfully", len(successful), len(urls))
 
-    # Step 3: Summarize with LLM
-    summary = await _summarize(query, successful, search_results)
+    # Step 3: Build LLM messages and enqueue via Redis queue
+    source_texts: list[str] = []
+    for i, page in enumerate(successful, 1):
+        title = page.title or f"Source {i}"
+        source_texts.append(
+            f"## Source {i}: {title}\nURL: {page.url}\n\n{page.text_content}"
+        )
 
-    elapsed_s = time.monotonic() - start_time
-    logger.info("Research complete in %.1fs: %r", elapsed_s, query)
+    user_content = (
+        f"Research query: {query}\n\n"
+        f"{'---'.join(source_texts)}\n\n"
+        f"Please synthesize these {len(successful)} sources into a comprehensive research summary."
+    )
 
-    # Step 4: Store in inbox
-    # Build summary preview (first 200 chars of the LLM summary)
-    preview = summary[:200].rsplit(" ", 1)[0] + "..." if len(summary) > 200 else summary
+    messages = [
+        {"role": "system", "content": _SUMMARIZE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
 
-    metadata = {
+    scrape_elapsed = time.monotonic() - start_time
+
+    # Metadata to pass through the queue callback
+    research_metadata = {
         "query": query,
         "depth": depth,
+        "household_id": household_id,
+        "speaker_user_id": speaker_user_id,
         "sources": [
             {"title": r.get("title", ""), "url": r["url"]}
             for r in search_results
         ],
         "pages_scraped": len(successful),
         "pages_attempted": len(urls),
-        "elapsed_seconds": round(elapsed_s, 1),
+        "scrape_elapsed_seconds": round(scrape_elapsed, 1),
+    }
+
+    await _enqueue_summarization(messages, research_metadata)
+    logger.info(
+        "Enqueued LLM summarization for %r (scraped in %.1fs)",
+        query, scrape_elapsed,
+    )
+
+
+async def handle_summarization_callback(payload: dict[str, Any]) -> None:
+    """Phase 2: Queue callback — extract summary, store inbox item, send push.
+
+    Called by the /api/v0/deep-research/callback endpoint.
+    """
+    job_id: str = payload.get("job_id", "unknown")
+    status: str = payload.get("status", "")
+    metadata: dict[str, Any] = payload.get("metadata", {})
+    query: str = metadata.get("query", "unknown")
+    household_id: str = metadata.get("household_id", "")
+
+    if status != "succeeded":
+        error = payload.get("error", {})
+        error_msg = error.get("message", "Unknown error")
+        logger.error("Research summarization failed for job %s: %s", job_id, error_msg)
+        if household_id:
+            await _send_notification(
+                household_id=household_id,
+                title="Research Failed",
+                body=f"Research on \"{query}\" failed: {error_msg}",
+                data={"type": "deep_research_failed"},
+            )
+        return
+
+    # Extract the LLM summary from the queue result
+    result = payload.get("result", {})
+    summary = result.get("content", "")
+    if not summary:
+        logger.error("Empty summary from LLM for research job %s", job_id)
+        if household_id:
+            await _send_notification(
+                household_id=household_id,
+                title="Research Failed",
+                body=f"Research on \"{query}\" produced an empty summary",
+                data={"type": "deep_research_failed"},
+            )
+        return
+
+    speaker_user_id: int | None = metadata.get("speaker_user_id")
+    depth: str = metadata.get("depth", "quick")
+    scrape_elapsed: float = metadata.get("scrape_elapsed_seconds", 0)
+
+    # Add LLM timing from the queue result
+    timing = payload.get("timing", {})
+    llm_elapsed_ms: int = timing.get("processing_ms", 0)
+    total_elapsed = scrape_elapsed + (llm_elapsed_ms / 1000)
+
+    preview = summary[:200].rsplit(" ", 1)[0] + "..." if len(summary) > 200 else summary
+
+    inbox_metadata = {
+        "query": query,
+        "depth": depth,
+        "sources": metadata.get("sources", []),
+        "pages_scraped": metadata.get("pages_scraped", 0),
+        "pages_attempted": metadata.get("pages_attempted", 0),
+        "elapsed_seconds": round(total_elapsed, 1),
     }
 
     inbox_item_id = await _store_inbox_item(
@@ -81,10 +164,9 @@ async def run_research(
         title=f"Research: {query}",
         summary=preview,
         body=summary,
-        metadata=metadata,
+        metadata=inbox_metadata,
     )
 
-    # Step 5: Send push notification
     await _send_notification(
         household_id=household_id,
         title="Research Complete",
@@ -94,6 +176,16 @@ async def run_research(
             "inbox_item_id": inbox_item_id,
         },
     )
+
+    logger.info(
+        "Research delivered: query=%r, inbox_item=%s, total=%.1fs (scrape=%.1fs, llm=%.1fs)",
+        query, inbox_item_id, total_elapsed, scrape_elapsed, llm_elapsed_ms / 1000,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 
 async def _search_web(query: str, num_results: int) -> list[dict[str, str]]:
@@ -123,38 +215,61 @@ async def _scrape_urls(urls: list[str]) -> list:
     return await scraper.batch_fetch(urls, max_concurrent=3, max_chars=6000)
 
 
-async def _summarize(query: str, pages: list, search_results: list[dict]) -> str:  # noqa: ARG001
-    """Summarize scraped content using the LLM proxy."""
-    from app.core.llm_proxy_client import LLMProxyClient
+async def _enqueue_summarization(
+    messages: list[dict[str, str]],
+    research_metadata: dict[str, Any],
+) -> None:
+    """Submit LLM summarization job to the Redis queue."""
+    from app.core.utils.rest_client import post, build_jarvis_app_headers
 
-    # Build source context
-    source_texts: list[str] = []
-    for i, page in enumerate(pages, 1):
-        title = page.title or f"Source {i}"
-        source_texts.append(
-            f"## Source {i}: {title}\nURL: {page.url}\n\n{page.text_content}"
-        )
+    job_id = str(uuid4())
 
-    user_content = (
-        f"Research query: {query}\n\n"
-        f"{'---'.join(source_texts)}\n\n"
-        f"Please synthesize these {len(pages)} sources into a comprehensive research summary."
+    # Build callback URL
+    cc_base_url = _get_command_center_url()
+    callback_url = f"{cc_base_url}/api/v0/deep-research/callback"
+
+    callback: dict[str, str] = {"url": callback_url}
+    callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
+    if callback_token:
+        callback["auth_type"] = "bearer"
+        callback["token"] = callback_token
+
+    queue_payload = {
+        "job_id": job_id,
+        "job_type": "chat",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "priority": "normal",
+        "trace_id": job_id,
+        "idempotency_key": job_id,
+        "job_type_version": "v1",
+        "ttl_seconds": 600,  # 10 min — research shouldn't take longer
+        "metadata": research_metadata,
+        "request": {
+            "model": "full",
+            "messages": messages,
+            "sampling": {
+                "temperature": 0.3,
+            },
+        },
+        "callback": callback,
+    }
+
+    # Get LLM proxy queue URL
+    llm_proxy_url = _get_llm_proxy_url()
+    queue_url = f"{llm_proxy_url.rstrip('/')}/internal/queue/enqueue"
+
+    headers: dict[str, str] = {}
+    internal_token = os.getenv("LLM_PROXY_INTERNAL_TOKEN")
+    if internal_token:
+        headers["X-Internal-Token"] = internal_token
+
+    result = await post(url=queue_url, json_data=queue_payload, headers=headers)
+
+    deduped = result.get("deduped", False)
+    logger.info(
+        "Enqueued research summarization: job_id=%s, deduped=%s",
+        job_id, deduped,
     )
-
-    client = LLMProxyClient()
-    response = await client.chat_completion(
-        messages=[
-            {"role": "system", "content": _SUMMARIZE_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0.3,
-    )
-
-    content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
-    if not content:
-        raise ValueError("LLM returned empty summary")
-
-    return content
 
 
 async def _store_inbox_item(
@@ -221,6 +336,23 @@ async def _send_notification(
         )
         if resp.status_code != 200:
             logger.warning("Push notification failed: %s %s", resp.status_code, resp.text)
+
+
+def _get_llm_proxy_url() -> str:
+    """Get LLM proxy URL from service discovery or env."""
+    try:
+        from app.core import service_config
+        if service_config.is_initialized():
+            return service_config.get_llm_proxy_url()
+    except (ImportError, AttributeError):
+        pass
+    return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:7704")
+
+
+def _get_command_center_url() -> str:
+    """Get command-center's own URL for callback registration."""
+    # In Docker, use container name; locally use localhost
+    return os.getenv("JARVIS_COMMAND_CENTER_URL", "http://localhost:7703")
 
 
 def _get_notifications_url() -> str:
