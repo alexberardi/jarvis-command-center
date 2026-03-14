@@ -277,7 +277,7 @@ Your answer (just the key):"""
 
             response = await llm_client.chat_completion(
                 messages=messages,
-                model="full",
+                model="live",
                 temperature=0,
                 include_date_context=False  # Don't need date context for this simple task
             )
