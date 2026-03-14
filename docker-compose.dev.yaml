@@ -31,6 +31,7 @@ services:
       - ../jarvis-settings-client:/app/jarvis-settings-client
       - ../jarvis-auth-client:/app/jarvis-auth-client
       - ../jarvis-mcp-client:/app/jarvis-mcp-client
+      - ../jarvis-web-scraper:/app/jarvis-web-scraper
     env_file:
       - .env
     environment:
@@ -42,7 +43,7 @@ services:
     extra_hosts:
       - "${DOCKER_HOST_ALIAS:-host.docker.internal}:host-gateway"
     command: >
-      sh -c "for lib in jarvis-log-client jarvis-config-client jarvis-settings-client jarvis-auth-client jarvis-mcp-client; do
+      sh -c "for lib in jarvis-log-client jarvis-config-client jarvis-settings-client jarvis-auth-client jarvis-mcp-client jarvis-web-scraper; do
                [ -f /app/$$lib/pyproject.toml ] && pip install -q -e /app/$$lib || echo \"SKIP $$lib (not found)\";
              done &&
              alembic upgrade head &&
