@@ -63,6 +63,9 @@ class DeviceImportItem(BaseModel):
     model: str | None = None
     ha_device_id: str | None = None
     source: str = "home_assistant"
+    protocol: str | None = None      # e.g., "lifx", "kasa", "tuya"
+    local_ip: str | None = None      # LAN address
+    mac_address: str | None = None   # MAC for stable identity
 
 
 class DeviceImportRequest(BaseModel):
@@ -86,6 +89,9 @@ class DeviceResponse(BaseModel):
     manufacturer: str | None = None
     model: str | None = None
     source: str
+    protocol: str | None = None
+    local_ip: str | None = None
+    mac_address: str | None = None
     ha_device_id: str | None = None
     is_controllable: bool
     is_active: bool
@@ -275,6 +281,7 @@ def list_devices(
     household_id: str,
     room_id: Optional[str] = Query(None),
     domain: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
     db: Session = Depends(get_db),
 ) -> list[DeviceResponse]:
@@ -283,6 +290,8 @@ def list_devices(
         query = query.filter(Device.room_id == room_id)
     if domain:
         query = query.filter(Device.domain == domain)
+    if source:
+        query = query.filter(Device.source == source)
 
     devices = query.all()
     result = []
@@ -299,6 +308,9 @@ def list_devices(
             manufacturer=dev.manufacturer,
             model=dev.model,
             source=dev.source,
+            protocol=dev.protocol,
+            local_ip=dev.local_ip,
+            mac_address=dev.mac_address,
             ha_device_id=dev.ha_device_id,
             is_controllable=dev.is_controllable,
             is_active=dev.is_active,
@@ -334,6 +346,9 @@ def import_devices(
             existing.model = item.model
             existing.ha_device_id = item.ha_device_id
             existing.source = item.source
+            existing.protocol = item.protocol
+            existing.local_ip = item.local_ip
+            existing.mac_address = item.mac_address
             existing.is_controllable = is_controllable
             if item.room_id:
                 existing.room_id = item.room_id
@@ -351,6 +366,9 @@ def import_devices(
                 manufacturer=item.manufacturer,
                 model=item.model,
                 source=item.source,
+                protocol=item.protocol,
+                local_ip=item.local_ip,
+                mac_address=item.mac_address,
                 ha_device_id=item.ha_device_id,
                 is_controllable=is_controllable,
             )
@@ -393,6 +411,9 @@ def update_device(
         manufacturer=dev.manufacturer,
         model=dev.model,
         source=dev.source,
+        protocol=dev.protocol,
+        local_ip=dev.local_ip,
+        mac_address=dev.mac_address,
         ha_device_id=dev.ha_device_id,
         is_controllable=dev.is_controllable,
         is_active=dev.is_active,
