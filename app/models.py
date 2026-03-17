@@ -67,6 +67,9 @@ class Device(Base):
     manufacturer = Column(String(255), nullable=True)
     model = Column(String(255), nullable=True)
     source = Column(String(50), default="home_assistant")
+    protocol = Column(String(50), nullable=True)  # e.g., "lifx", "kasa", "tuya"
+    local_ip = Column(String(45), nullable=True)   # IPv4/IPv6 address on LAN
+    mac_address = Column(String(17), nullable=True)  # MAC for stable identity
     ha_device_id = Column(String(255), nullable=True)
     is_controllable = Column(Boolean, default=True)
     is_active = Column(Boolean, default=True)
@@ -234,6 +237,7 @@ class AuthSession(Base):
     authorize_url = Column(Text, nullable=True)              # Full URL mobile opens
     exchange_url = Column(Text, nullable=True)               # Token exchange endpoint
     client_id = Column(String(255), nullable=False)
+    redirect_uri = Column(Text, nullable=True)              # Redirect URI used (needed for code exchange)
 
     # Result (populated after successful exchange, encrypted at rest)
     access_token_enc = Column(Text, nullable=True)

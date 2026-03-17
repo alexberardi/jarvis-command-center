@@ -81,6 +81,7 @@ class MQTTClient:
         # Set up callbacks
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
 
         try:
             self.client.connect(self.host, self.port, keepalive=60)
@@ -103,7 +104,11 @@ class MQTTClient:
         """Callback when disconnected from broker."""
         self._connected = False
         if rc != 0:
-            logger.warning(f"⚠️  MQTT client disconnected unexpectedly (rc={rc})")
+            logger.warning(f"MQTT client disconnected unexpectedly (rc={rc})")
+
+    def _on_message(self, client, userdata, msg) -> None:
+        """Default message handler (per-topic callbacks take priority)."""
+        logger.debug(f"MQTT message on {msg.topic} (no specific handler)")
 
     def publish(self, topic: str, payload: str, qos: int = 1) -> None:
         """
@@ -126,6 +131,41 @@ class MQTTClient:
 
         logger.debug(f"📤 MQTT published to {topic}")
 
+    def subscribe_and_wait(
+        self, topic: str, timeout: float = 10.0,
+    ) -> Optional[str]:
+        """Subscribe to a topic, wait for one message, then unsubscribe.
+
+        Args:
+            topic: MQTT topic to subscribe to.
+            timeout: Max seconds to wait for a message.
+
+        Returns:
+            The message payload as a string, or None if timed out.
+        """
+        import threading
+
+        if self.client is None:
+            return None
+
+        result_holder: list[str] = []
+        event = threading.Event()
+
+        def on_message(_client: mqtt.Client, _userdata: object, msg: mqtt.MQTTMessage) -> None:
+            result_holder.append(msg.payload.decode("utf-8", errors="replace"))
+            event.set()
+
+        self.client.subscribe(topic, qos=1)
+        self.client.message_callback_add(topic, on_message)
+
+        try:
+            event.wait(timeout=timeout)
+        finally:
+            self.client.message_callback_remove(topic)
+            self.client.unsubscribe(topic)
+
+        return result_holder[0] if result_holder else None
+
     def disconnect(self) -> None:
         """Disconnect from broker."""
         if self.client is not None:
@@ -133,7 +173,7 @@ class MQTTClient:
             self.client.disconnect()
             self.client = None
             self._connected = False
-            logger.info("🔌 MQTT client disconnected")
+            logger.info("MQTT client disconnected")
 
     @property
     def is_connected(self) -> bool:
