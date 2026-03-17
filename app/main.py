@@ -866,6 +866,56 @@ async def deep_research_callback(request: Request):
     return {"status": "ok"}
 
 
+async def _maybe_push_actions_to_inbox(
+    tool_results: list[dict],
+    node_context_provider: NodeContextProvider,
+) -> None:
+    """If any tool result contains actions, push a confirmation to the inbox."""
+    for tr in tool_results:
+        output = tr.get("output")
+        if not isinstance(output, dict):
+            continue
+        context = output.get("context")
+        if not isinstance(context, dict):
+            continue
+        actions = context.get("actions")
+        if not actions or not isinstance(actions, list):
+            continue
+
+        # Found actions — push to inbox
+        draft = context.get("draft", {})
+        preview = context.get("preview", "")
+        message = context.get("message", "")
+        command_name = context.get("command_name", "unknown")
+
+        # Generic title/summary — commands provide inbox_title/inbox_summary
+        title = context.get("inbox_title") or f"Confirm: {command_name}"
+        summary = context.get("inbox_summary") or message or preview[:100]
+
+        try:
+            from app.services.inbox_notification_service import push_confirmation_to_inbox
+
+            node = node_context_provider.node
+            household_id = node.household_id if hasattr(node, "household_id") else ""
+            if not household_id:
+                logger.warning("Cannot push confirmation: no household_id on node")
+                return
+
+            await push_confirmation_to_inbox(
+                household_id=household_id,
+                user_id=None,
+                node_id=node.node_id,
+                title=title,
+                summary=summary,
+                body=preview,
+                command_name=command_name,
+                actions=actions,
+                draft=draft,
+            )
+        except Exception as e:
+            logger.warning("Failed to push actions to inbox: %s", e)
+
+
 @v0_router.post("/voice/command/continue", response_model=VoiceCommandResponse)
 async def continue_voice_command(
     request: ToolResultRequest,
@@ -894,6 +944,13 @@ async def continue_voice_command(
             tool_results=tool_results
         )
         
+        # Check tool results for actionable responses (e.g. email send confirmation)
+        # and push them to the inbox so the mobile app can render buttons.
+        await _maybe_push_actions_to_inbox(
+            tool_results=tool_results,
+            node_context_provider=node_context_provider,
+        )
+
         # Build response
         response = VoiceCommandResponse(
             commands=[],  # Empty for tool-based responses
@@ -909,7 +966,7 @@ async def continue_voice_command(
                 if result.get("validation_request") else None
             )
         )
-        
+
         duration = time.time() - start_time
         logger.info(f"✅ Continuation processed in {duration:.2f}s, stop_reason={response.stop_reason}")
         return response
