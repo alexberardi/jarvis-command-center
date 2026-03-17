@@ -27,11 +27,20 @@ class NodeCommandService:
         # In-memory store: {request_id: {node_id, command, created_at, expires_at}}
         self._pending_commands: dict[str, dict] = {}
 
+    def publish_command_with_id(
+        self, node_id: str, command: str, details: dict | None, request_id: str,
+    ) -> str:
+        """Publish a command with a caller-supplied request_id. Returns request_id."""
+        return self._publish(node_id, command, details, request_id)
+
     def publish_command(self, node_id: str, command: str, details: dict | None = None) -> str:
         """Publish a command to a node via MQTT. Returns request_id."""
+        return self._publish(node_id, command, details, str(uuid4()))
+
+    def _publish(self, node_id: str, command: str, details: dict | None, request_id: str) -> str:
+        """Internal: register and publish a command."""
         from app.node_settings import get_mqtt_client
 
-        request_id = str(uuid4())
         now = datetime.utcnow()
         self._pending_commands[request_id] = {
             "node_id": node_id,
