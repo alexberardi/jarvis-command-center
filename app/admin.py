@@ -8,8 +8,14 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from .core.conversation_cache import conversation_cache
-from .deps import get_db, verify_admin_key
-from .models import Node
+from .deps import (
+    AuthenticatedUser,
+    get_db,
+    verify_admin_key,
+    verify_household_role,
+    verify_user_jwt,
+)
+from .models import AuthSession, ConfigPush, Node, SettingsRequest, SettingsSnapshot
 
 
 router = APIRouter()
@@ -45,8 +51,9 @@ class NodeResponse(BaseModel):
     node_id: str
     room: str
     user: str
-    voice_mode: str
+    voice_mode: str | None = "brief"
     adapter_hash: Optional[str] = None
+    household_id: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -56,7 +63,7 @@ class NodeCreateResponse(BaseModel):
     node_id: str
     room: str
     user: str
-    voice_mode: str
+    voice_mode: str | None = "brief"
     node_key: str  # Only returned on creation
 
 
@@ -239,25 +246,38 @@ def create_node(node: NodeCreate, db: Session = Depends(get_db)):
     )
 
 
-@router.delete("/nodes/{node_id}", dependencies=[Depends(verify_admin_key)])
-def delete_node(node_id: str, db: Session = Depends(get_db)):
-    """Delete a node.
-
-    This removes the local record. The node should also be deactivated
-    in jarvis-auth to prevent it from authenticating.
-    """
+@router.delete("/nodes/{node_id}")
+def delete_node(
+    node_id: str,
+    db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+):
+    """Delete a node. Requires power_user or admin role in the node's household."""
     node = db.query(Node).filter(Node.node_id == node_id).first()
 
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
 
+    if node.household_id:
+        # Verify the user has power_user (or admin) role in this household
+        verify_household_role(user.user_id, node.household_id, required_role="power_user")
+    elif not user.is_superuser:
+        raise HTTPException(
+            status_code=403,
+            detail="Only superusers can delete nodes without a household",
+        )
+
     # Attempt to deactivate in jarvis-auth
     _deactivate_node_with_auth(node_id)
+
+    # Delete referencing records before removing the node
+    for model in (AuthSession, ConfigPush, SettingsRequest, SettingsSnapshot):
+        db.query(model).filter(model.node_id == node_id).delete()
 
     # Delete local record
     db.delete(node)
     db.commit()
-    logger.info(f"Node deleted: {node.node_id}")
+    logger.info(f"Node deleted: {node.node_id} by user {user.user_id}")
     return {"message": "Deleted"}
 
 
