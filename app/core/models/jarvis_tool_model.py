@@ -459,10 +459,7 @@ Tools:
             return {"type": "string"}
 
         tools = []
-        
-        force_required_commands = {"get_calendar_events", "get_sports_scores"}
-        force_required_params = {"resolved_datetimes"}
-        
+
         for cmd in commands:
             # Build parameters schema
             properties = {}
@@ -481,11 +478,7 @@ Tools:
                     else:
                         properties[param.name]["enum"] = param.enum_values
                 
-                is_forced_required = (
-                    cmd.command_name in force_required_commands
-                    and param.name in force_required_params
-                )
-                if param.required or is_forced_required:
+                if param.required:
                     required.append(param.name)
             
             # Create tool definition

@@ -188,8 +188,12 @@ class TestContinueConversation:
                 )
 
     @pytest.mark.asyncio
-    async def test_continue_adds_tool_result_messages(self):
-        """Test that continue adds tool result messages."""
+    async def test_continue_formats_tool_results_text_mode(self):
+        """Test that continue formats tool results for text-based models.
+
+        Text-based models can't process role='tool' messages, so the handler
+        replaces them with a clean assistant message containing the data.
+        """
         from app.core.conversation_handler import ConversationHandler
 
         mock_model = MagicMock()
@@ -209,16 +213,17 @@ class TestContinueConversation:
             mock_cache.get_messages.return_value = messages
             mock_cache.get_tools.return_value = []
 
-            await handler.continue_conversation_with_tool_results(
+            result = await handler.continue_conversation_with_tool_results(
                 conversation_id="test-conv",
                 tool_results=[{"tool_call_id": "call_123", "output": "Sunny, 72F"}],
             )
 
-            # Check that tool result message was added
-            assert any(
-                msg.get("role") == "tool" and msg.get("tool_call_id") == "call_123"
-                for msg in messages
-            )
+            # The formatted response replaces tool exchange messages
+            # with a single assistant message containing data + response
+            last_msg = messages[-1]
+            assert last_msg["role"] == "assistant"
+            assert "Sunny, 72F" in last_msg["content"]  # tool data preserved
+            assert result["stop_reason"] == "complete"
 
 
 class TestGetSystemPromptDispatch:
@@ -394,6 +399,91 @@ class TestPromptProviderThreading:
                 MockEngine.assert_called_once_with(
                     mock_client, prompt_provider=mock_provider
                 )
+
+
+class TestReplaceToolExchangeInHistory:
+    """Tests for _replace_tool_exchange_in_history."""
+
+    def test_replaces_tool_exchange_with_data_and_response(self):
+        """Tool-call assistant + tool messages are replaced with a clean message."""
+        from app.core.conversation_handler import ConversationHandler
+
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "check my email"},
+            {"role": "assistant", "content": '{"tool_calls": [...]}', "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": '{"emails": []}'},
+        ]
+
+        ConversationHandler._replace_tool_exchange_in_history(
+            messages, '{"emails": [], "total_unread": 0}', "No unread emails"
+        )
+
+        assert len(messages) == 3  # system + user + assistant
+        assert messages[2]["role"] == "assistant"
+        assert "No unread emails" in messages[2]["content"]
+        assert "Tool data:" in messages[2]["content"]
+        assert "total_unread" in messages[2]["content"]
+
+    def test_preserves_earlier_messages(self):
+        """Messages before the tool exchange are untouched."""
+        from app.core.conversation_handler import ConversationHandler
+
+        messages = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "Hi there!"},
+            {"role": "user", "content": "check email"},
+            {"role": "assistant", "content": "{}", "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "data"},
+        ]
+
+        ConversationHandler._replace_tool_exchange_in_history(
+            messages, "data", "You have mail"
+        )
+
+        assert len(messages) == 5  # system + user + assistant + user + assistant(merged)
+        assert messages[0]["content"] == "System"
+        assert messages[2]["content"] == "Hi there!"
+        assert messages[3]["content"] == "check email"
+        assert "You have mail" in messages[4]["content"]
+
+    def test_truncates_large_tool_data(self):
+        """Tool data over 1500 chars is truncated."""
+        from app.core.conversation_handler import ConversationHandler
+
+        messages = [
+            {"role": "user", "content": "test"},
+            {"role": "assistant", "content": "{}", "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "x"},
+        ]
+
+        large_data = "x" * 2000
+        ConversationHandler._replace_tool_exchange_in_history(
+            messages, large_data, "response"
+        )
+
+        content = messages[-1]["content"]
+        # Should be truncated, not the full 2000 chars
+        assert len(content) < 2000
+        assert "..." in content
+
+    def test_no_tool_exchange_appends_normally(self):
+        """When no tool exchange is found, appends response at the end."""
+        from app.core.conversation_handler import ConversationHandler
+
+        messages = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "hello"},
+        ]
+
+        ConversationHandler._replace_tool_exchange_in_history(
+            messages, "data", "response"
+        )
+
+        assert len(messages) == 3
+        assert messages[2]["role"] == "assistant"
+        assert "response" in messages[2]["content"]
 
 
 class TestGetServerToolNames:

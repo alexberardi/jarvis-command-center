@@ -7,6 +7,7 @@ Two-phase flow:
 
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -147,7 +148,9 @@ async def handle_summarization_callback(payload: dict[str, Any]) -> None:
     llm_elapsed_ms: int = timing.get("processing_ms", 0)
     total_elapsed = scrape_elapsed + (llm_elapsed_ms / 1000)
 
-    preview = summary[:200].rsplit(" ", 1)[0] + "..." if len(summary) > 200 else summary
+    # Strip <think> blocks before generating preview
+    clean_summary = re.sub(r"<think>[\s\S]*?</think>", "", summary).strip()
+    preview = clean_summary[:200].rsplit(" ", 1)[0] + "..." if len(clean_summary) > 200 else clean_summary
 
     inbox_metadata = {
         "query": query,
@@ -191,7 +194,10 @@ async def handle_summarization_callback(payload: dict[str, Any]) -> None:
 async def _search_web(query: str, num_results: int) -> list[dict[str, str]]:
     """Search using DuckDuckGo via the ddgs package."""
     try:
-        from duckduckgo_search import DDGS
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
 
         results: list[dict[str, str]] = []
         with DDGS() as ddgs:
@@ -350,9 +356,22 @@ def _get_llm_proxy_url() -> str:
 
 
 def _get_command_center_url() -> str:
-    """Get command-center's own URL for callback registration."""
-    # In Docker, use container name; locally use localhost
-    return os.getenv("JARVIS_COMMAND_CENTER_URL", "http://localhost:7703")
+    """Get command-center's externally-reachable URL for callback registration.
+
+    Checks the ``network.public_url`` setting first (configurable at runtime),
+    then falls back to env vars, then localhost.
+    """
+    try:
+        from app.services.settings_service import get_settings_service
+        public_url = get_settings_service().get("network.public_url")
+        if public_url:
+            return public_url.rstrip("/")
+    except Exception:
+        pass
+    return os.getenv(
+        "CC_PUBLIC_URL",
+        os.getenv("JARVIS_COMMAND_CENTER_URL", "http://localhost:7703"),
+    )
 
 
 def _get_notifications_url() -> str:

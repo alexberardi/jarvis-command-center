@@ -17,6 +17,11 @@ class AnswerQuestionTool(IServerTool):
     """Server-side tool for answering general knowledge questions."""
 
     @property
+    def enabled(self) -> bool:
+        """Disabled: moved to node-side command."""
+        return False
+
+    @property
     def name(self) -> str:
         return "answer_question"
 

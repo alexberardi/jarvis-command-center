@@ -139,6 +139,9 @@ def build_agent_context_summary(node_context: Dict[str, Any]) -> str:
         "\nCall control_device to control devices. Call get_device_status to check device state.\n"
     )
 
+    # Append room hierarchy if available
+    section += build_room_hierarchy_section(node_context)
+
     return section
 
 
@@ -242,6 +245,53 @@ def build_agent_context_by_room(node_context: Dict[str, Any]) -> str:
         "\nUse control_device to control devices. "
         "Use get_device_status to check state. "
         "Copy entity_id EXACTLY as shown above.\n"
+    )
+
+    return section
+
+
+def build_room_hierarchy_section(node_context: Dict[str, Any]) -> str:
+    """
+    Build a room hierarchy section for the system prompt so the LLM knows
+    which rooms contain sub-rooms.
+
+    Output format:
+        Room Hierarchy:
+        Upstairs → Bedroom 1, Bedroom 2, Hallway
+        Bedroom 1 → Bedroom Bathroom 1
+        When user references a room with sub-rooms, target ALL devices in that room and its sub-rooms.
+
+    Args:
+        node_context: Node context dict, may contain a "room_hierarchy" key.
+
+    Returns:
+        Formatted hierarchy string, or empty string if no hierarchy data.
+    """
+    hierarchy: List[Dict[str, Any]] = node_context.get("room_hierarchy", [])
+    if not hierarchy:
+        return ""
+
+    # Build parent → children mapping
+    parent_children: Dict[str, List[str]] = {}
+    name_map: Dict[str, str] = {}  # id → name
+    for room in hierarchy:
+        name_map[room["id"]] = room["name"]
+
+    for room in hierarchy:
+        parent_id = room.get("parent_room_id")
+        if parent_id and parent_id in name_map:
+            parent_children.setdefault(parent_id, []).append(room["name"])
+
+    if not parent_children:
+        return ""
+
+    section = "\nRoom Hierarchy:\n"
+    for parent_id, children in parent_children.items():
+        parent_name = name_map[parent_id]
+        section += f"{parent_name} → {', '.join(children)}\n"
+    section += (
+        "When user references a room with sub-rooms, target ALL devices "
+        "in that room AND its sub-rooms.\n"
     )
 
     return section

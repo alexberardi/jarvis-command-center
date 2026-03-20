@@ -2,7 +2,7 @@ from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, Column, String, DateTime, Integer, ForeignKey, Text, UniqueConstraint
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import backref, declarative_base, relationship
 from datetime import datetime, timedelta
 
 Base = declarative_base()
@@ -11,6 +11,9 @@ Base = declarative_base()
 def _default_expires_at() -> datetime:
     """Default expiration: 5 minutes from now."""
     return datetime.utcnow() + timedelta(minutes=5)
+
+
+ONLINE_THRESHOLD_MINUTES = 15
 
 
 class Node(Base):
@@ -28,6 +31,13 @@ class Node(Base):
     room_id = Column(String(36), ForeignKey('rooms.id', ondelete='SET NULL', use_alter=True), nullable=True)
     household_id = Column(String(255), nullable=True, index=True)
 
+    def is_online(self) -> bool:
+        """Node is online if last_seen is within ONLINE_THRESHOLD_MINUTES."""
+        if self.last_seen is None:
+            return False
+        cutoff = datetime.utcnow() - timedelta(minutes=ONLINE_THRESHOLD_MINUTES)
+        return self.last_seen >= cutoff
+
     # Relationships
     settings_requests = relationship("SettingsRequest", back_populates="node", cascade="all, delete-orphan")
     settings_snapshots = relationship("SettingsSnapshot", back_populates="node", cascade="all, delete-orphan")
@@ -43,6 +53,7 @@ class Room(Base):
     normalized_name = Column(String(255), nullable=False)
     icon = Column(String(50), nullable=True)
     ha_area_id = Column(String(255), nullable=True)
+    parent_room_id = Column(String(36), ForeignKey('rooms.id', ondelete='SET NULL'), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -53,6 +64,7 @@ class Room(Base):
     # Relationships
     devices = relationship("Device", back_populates="room")
     nodes = relationship("Node", back_populates="room_ref", foreign_keys=[Node.room_id])
+    children = relationship("Room", backref=backref("parent", remote_side="Room.id"), cascade="all")
 
 
 class Device(Base):
@@ -70,6 +82,7 @@ class Device(Base):
     protocol = Column(String(50), nullable=True)  # e.g., "lifx", "kasa", "tuya"
     local_ip = Column(String(45), nullable=True)   # IPv4/IPv6 address on LAN
     mac_address = Column(String(17), nullable=True)  # MAC for stable identity
+    cloud_id = Column(String(255), nullable=True)     # Cloud-only device ID (Govee, Nest, Schlage)
     ha_device_id = Column(String(255), nullable=True)
     is_controllable = Column(Boolean, default=True)
     is_active = Column(Boolean, default=True)
@@ -82,6 +95,60 @@ class Device(Base):
 
     # Relationships
     room = relationship("Room", back_populates="devices")
+
+
+class DeviceScanRequest(Base):
+    """User-driven device scan request: mobile → CC → MQTT → node → CC → mobile.
+
+    Lifecycle:
+    1. Mobile POSTs to request a scan (status=pending, expires_at=now+2min)
+    2. CC publishes MQTT to node's device-scan topic
+    3. Node runs protocol adapters, POSTs results back
+    4. Mobile polls for results (CC enriches with already_registered flags)
+    """
+    __tablename__ = 'device_scan_requests'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    household_id = Column(String(255), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="pending")  # pending, completed, failed, expired
+    results_json = Column(Text, nullable=True)  # JSON array of discovered devices
+    device_count = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    node = relationship("Node", backref=backref("scan_requests", passive_deletes=True), passive_deletes=True)
+
+
+class DeviceListRequest(Base):
+    """Device list request: mobile → CC → MQTT → node → CC → mobile.
+
+    Lifecycle:
+    1. Mobile POSTs to request a device list (status=pending, expires_at=now+2min)
+    2. CC publishes MQTT to node's device-list topic with selected manager_name
+    3. Node runs the selected IJarvisDeviceManager, POSTs results back
+    4. Mobile polls for results (CC enriches with room assignments)
+    """
+    __tablename__ = 'device_list_requests'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    household_id = Column(String(255), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="pending")  # pending, completed, failed, expired
+    manager_name = Column(String(100), nullable=True)  # which manager produced the list
+    can_edit_devices = Column(Boolean, nullable=True)  # from the manager
+    results_json = Column(Text, nullable=True)  # JSON array of device dicts
+    device_count = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    node = relationship("Node", backref=backref("device_list_requests", passive_deletes=True), passive_deletes=True)
 
 
 class ConfigPush(Base):
@@ -249,7 +316,7 @@ class AuthSession(Base):
     completed_at = Column(DateTime, nullable=True)
 
     # Relationships
-    node = relationship("Node", backref="auth_sessions", passive_deletes=True)
+    node = relationship("Node", backref=backref("auth_sessions", passive_deletes=True), passive_deletes=True)
 
 
 class UserMemory(Base):
@@ -273,6 +340,34 @@ class UserMemory(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
+
+
+class PackageInstallRequest(Base):
+    """Package install request: mobile -> CC -> MQTT -> node -> CC -> mobile.
+
+    Lifecycle:
+    1. Mobile POSTs to request a package install (status=pending, expires_at=now+5min)
+    2. CC publishes MQTT to node's package-install topic with repo info
+    3. Node clones repo, runs install pipeline, POSTs result back
+    4. Mobile polls for results
+    """
+    __tablename__ = 'package_install_requests'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    household_id = Column(String(255), nullable=False, index=True)
+    command_name = Column(String(255), nullable=False)
+    github_repo_url = Column(Text, nullable=False)
+    git_tag = Column(String(100), nullable=True)
+    status = Column(String(20), nullable=False, default="pending")  # pending, completed, failed, expired
+    results_json = Column(Text, nullable=True)  # JSON object with install result
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    node = relationship("Node", backref=backref("package_install_requests", passive_deletes=True), passive_deletes=True)
 
 
 class ProvisioningToken(Base):

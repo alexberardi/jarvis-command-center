@@ -5,7 +5,11 @@ POST /nodes/{node_id}/commands — admin sends a command to a node via MQTT
 POST /nodes/{node_id}/actions — mobile forwards a user action (e.g. Send/Cancel) to a node via MQTT
 POST /commands/{request_id}/verify — node verifies a command is legitimate
 """
+import json
 import logging
+import os
+import tempfile
+import time
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -17,6 +21,8 @@ from app.services.node_command_service import get_node_command_service
 logger = logging.getLogger("uvicorn")
 
 router = APIRouter()
+
+_RESULT_DIR = os.path.join(tempfile.gettempdir(), "jarvis-device-control")
 
 
 class SendCommandRequest(BaseModel):
@@ -39,6 +45,8 @@ class ActionRequest(BaseModel):
 class ActionResponse(BaseModel):
     status: str
     request_id: str
+    success: bool | None = None
+    error: str | None = None
 
 
 class VerifyResponse(BaseModel):
@@ -59,15 +67,45 @@ def send_node_action(
     Authenticated via JWT (mobile app). Publishes an MQTT message with
     command="action" so the node's MQTT listener can dispatch to the
     correct command's handle_action() method.
+
+    Waits up to 10s for the node to POST its result back, then returns
+    success/failure to the caller.
     """
     service = get_node_command_service()
-    details = {
+    request_id = service.publish_command(node_id, "action", {
         "command_name": body.command_name,
         "action_name": body.action_name,
         "context": body.context or {},
-    }
-    request_id = service.publish_command(node_id, "action", details)
-    return ActionResponse(status="sent", request_id=request_id)
+        "trusted": True,
+    })
+
+    # Wait for node to POST result back via /device-control-results/{request_id}
+    result_file = os.path.join(_RESULT_DIR, f"{request_id}.json")
+    deadline = time.time() + 10.0
+    result = None
+    while time.time() < deadline:
+        if os.path.exists(result_file):
+            try:
+                with open(result_file) as f:
+                    result = json.load(f)
+                os.unlink(result_file)
+                break
+            except (json.JSONDecodeError, OSError):
+                pass
+        time.sleep(0.1)
+
+    if result is None:
+        return ActionResponse(
+            status="timeout", request_id=request_id,
+            success=None, error="Node did not respond in time",
+        )
+
+    return ActionResponse(
+        status="completed",
+        request_id=request_id,
+        success=result.get("success", True),
+        error=result.get("error"),
+    )
 
 
 @router.post(

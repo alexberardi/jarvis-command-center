@@ -83,7 +83,7 @@ TOOL_CALL_FORMAT: str = (
 TOOL_CALL_FORMAT_JSON: str = (
     'When calling a tool:\n'
     '{{\n'
-    '  "message": "Brief acknowledgment",\n'
+    '  "message": "Brief, natural acknowledgment of what you\'re about to do (REQUIRED, never empty)",\n'
     '  "tool_call": {{"name": "tool_name", "arguments": {{"param": "value"}}, '
     '"failure_message": "brief spoken message if this fails"}}\n'
     '}}'
