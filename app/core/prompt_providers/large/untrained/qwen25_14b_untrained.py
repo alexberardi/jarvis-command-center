@@ -1,27 +1,28 @@
 """
-Qwen3LargeUntrained - Prompt provider for Qwen3-30B-A3B (MoE).
+Qwen25_14B_Untrained - Prompt provider for Qwen 2.5 14B Instruct (safetensors).
 
-30B total params, 3.3B active per token. Uses the same ChatML format and
-<tool_call> tags as Qwen 2.5 but strips Qwen3's <think> blocks to avoid
-latency from chain-of-thought reasoning on simple voice commands.
+Based on the Qwen25_7B_Compressed pattern (95%+ accuracy) — compressed tools
+block, minimal rules, DT_KEYS enforcement, force_tool_calls.
 
-Based on Qwen25_7B_Compressed (95%+ accuracy) — compressed tools block,
-5 rules, CRITICAL DT_KEYS, force_tool_calls.
+14B-specific tuning vs 7B compressed:
+- RULE_EXTRACT_PARAMS added back — 14B is more eager to ask clarifying
+  questions instead of making best-effort tool calls.
+- Language rule — the multilingual 14B model occasionally code-switches
+  to non-English on ambiguous queries.
+- User memories in identity header — 14B has enough capacity to use them.
+- Full tool descriptions preserved (compressed block already does this).
 
 Inherits parse_response, build_tools, get_response_format, and
 build_training_completion from Qwen25MediumUntrained via Qwen25_7B_Compressed.
 """
 
-import json
 import logging
 import os
-import re
 from typing import Any, Dict, List, Optional
 
 from app.core.prompt_providers.medium.untrained.qwen25_7b_compressed import (
     Qwen25_7B_Compressed,
 )
-from app.core.tool_builder import ToolBuilder
 from app.core.prompt_providers.shared.context_builders import (
     build_agent_context_summary,
     build_direct_answer_section,
@@ -38,55 +39,19 @@ from app.core.prompt_providers.shared.core_rules import (
 
 logger = logging.getLogger("uvicorn")
 
-# Strip <think>...</think> blocks (Qwen3 thinking mode output)
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
-
-class Qwen3LargeUntrained(Qwen25_7B_Compressed):
+class Qwen25_14B_Untrained(Qwen25_7B_Compressed):
     """
-    Prompt provider for Qwen3-30B-A3B (MoE, untrained).
+    Prompt provider for Qwen 2.5 14B Instruct (untrained, safetensors).
 
-    Compressed prompt matching the Qwen 7B Compressed pattern. Strips
-    <think> blocks from Qwen3's output and injects /nothink in user
-    messages to disable thinking mode.
+    Compressed prompt matching the 7B Compressed pattern with additional
+    rules to tame the 14B model's tendencies to over-clarify and
+    code-switch languages.
     """
 
     @property
     def name(self) -> str:
-        return "Qwen3LargeUntrained"
-
-    @property
-    def user_message_suffix(self) -> str:
-        """Append /nothink to user messages to disable Qwen3 thinking mode.
-
-        Qwen3 ignores /no_think in the system prompt — the model was
-        trained to recognize this token in user turns only.
-        """
-        return "/nothink"
-
-    @staticmethod
-    def _build_compressed_tools_block(tools: List[Dict[str, Any]]) -> str:
-        """Compact <tools> block with descriptions included.
-
-        14B+ models need tool/param descriptions to correctly identify
-        capabilities like remember/forget. Strips format hints and
-        refinable params to save tokens.
-        """
-        clean_tools: List[Dict[str, Any]] = ToolBuilder.build(
-            tools,
-            include_param_descriptions=True,
-            include_format_hints=False,
-            exclude_refinable=True,
-        )
-        if not clean_tools:
-            return "<tools>\n</tools>"
-        lines: List[str] = [json.dumps(t, separators=(",", ":")) for t in clean_tools]
-        return "<tools>\n" + "\n".join(lines) + "\n</tools>"
-
-    def parse_response(self, raw_content: str) -> Optional[str]:
-        """Strip <think> blocks, then delegate to Qwen 2.5 parser."""
-        cleaned: str = _THINK_BLOCK_RE.sub("", raw_content)
-        return super().parse_response(cleaned)
+        return "Qwen25_14B_Untrained"
 
     def build_system_prompt(
         self,
@@ -108,7 +73,7 @@ class Qwen3LargeUntrained(Qwen25_7B_Compressed):
         direct_answer_section: str = build_direct_answer_section(available_commands)
         agent_context_section: str = build_agent_context_summary(node_context)
 
-        # 5 rules (same as Mixtral large — proven at 94.9%)
+        # 6 rules — 7B compressed base (4) + extract_params + language rule
         terminology: str = "function"
 
         def _sub(r: str) -> str:
@@ -120,9 +85,10 @@ class Qwen3LargeUntrained(Qwen25_7B_Compressed):
         rules_lines.append(f"- {_sub(RULE_BEST_MATCH_INTENT)}")
         rules_lines.append(f"- {_sub(RULE_EXTRACT_PARAMS)}")
         rules_lines.append(f"- {_sub(RULE_STT_AWARENESS)}")
+        rules_lines.append("- ALWAYS respond in the language the user spoke. Prefer making a best-effort tool call over asking for clarification.")
         rules: str = "\n".join(rules_lines)
 
-        # DT_KEYS — strong enforcement
+        # DT_KEYS — strong enforcement for 14B (model tries to resolve dates itself)
         dt_keys_line: str = ""
         if date_keys:
             dt_keys_line = (
@@ -133,15 +99,12 @@ class Qwen3LargeUntrained(Qwen25_7B_Compressed):
                 "If the user omits a date, pass [\"today\"].\n"
             )
 
-        # Tools block with descriptions (14B+ can handle the extra tokens)
+        # Compressed tools block (param descriptions stripped, format hints stripped)
         tools_block: str = self._build_compressed_tools_block(tools)
 
         system_prompt: str = f"""{identity}
 
 You are a function calling AI model. You may call one or more functions to assist with the user query. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
-
-You are provided with function signatures within <tools></tools> XML tags:
-{tools_block}
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
@@ -152,10 +115,12 @@ For each function call, return a json object with function name and arguments wi
 {dt_keys_line}
 {direct_answer_section}
 {agent_context_section}
+You are provided with function signatures within <tools></tools> XML tags:
+{tools_block}
 """
 
         logger.info(
-            "Built Qwen3LargeUntrained system prompt: %d chars, %d tools",
+            "Built Qwen25_14B_Untrained system prompt: %d chars, %d tools",
             len(system_prompt),
             len(tools),
         )

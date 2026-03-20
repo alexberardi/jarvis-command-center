@@ -139,7 +139,9 @@ def _check_request_expired(request: SettingsRequest) -> bool:
     return request.expires_at < datetime.utcnow()
 
 
-def _publish_settings_request_mqtt(node_id: str, request_id: str) -> None:
+def _publish_settings_request_mqtt(
+    node_id: str, request_id: str, include_values: bool = False,
+) -> None:
     """Publish MQTT message to signal node about settings request."""
     client = get_mqtt_client()
     if client is None:
@@ -147,10 +149,13 @@ def _publish_settings_request_mqtt(node_id: str, request_id: str) -> None:
         return
 
     topic = f"jarvis/nodes/{node_id}/settings/request"
-    payload = json.dumps({
+    mqtt_payload: dict = {
         "request_id": request_id,
         "node_id": node_id,
-    })
+    }
+    if include_values:
+        mqtt_payload["include_values"] = True
+    payload = json.dumps(mqtt_payload)
 
     try:
         client.publish(topic, payload)
@@ -171,6 +176,7 @@ def _publish_settings_request_mqtt(node_id: str, request_id: str) -> None:
 )
 def create_settings_request(
     node_id: str,
+    include_values: bool = False,
     user: AuthenticatedUser = Depends(verify_user_jwt),
     db: Session = Depends(get_db),
 ):
@@ -180,6 +186,10 @@ def create_settings_request(
     This is called by the mobile app when it wants to retrieve node settings.
     Requires power_user role in the node's household.
     CC will publish an MQTT message to signal the node.
+
+    Args:
+        include_values: If True, the snapshot will include sensitive secret values
+            (for secret sync to other nodes). Default False for normal settings view.
     """
     # Verify node exists
     node = db.query(Node).filter(Node.node_id == node_id).first()
@@ -203,7 +213,7 @@ def create_settings_request(
     logger.info(f"📝 Settings request created: {request.request_id[:8]}... for node {node_id}")
 
     # Publish MQTT signal (non-blocking, best effort)
-    _publish_settings_request_mqtt(node_id, request.request_id)
+    _publish_settings_request_mqtt(node_id, request.request_id, include_values=include_values)
 
     return request
 

@@ -1,8 +1,20 @@
 """OAuth session management: JCC as redirect authority.
 
-Mobile creates a session, JCC builds the authorize URL, the provider redirects
-back to JCC's callback, JCC exchanges the code for tokens, encrypts and stores
-them, and the node pulls credentials via app-to-app auth.
+Two redirect modes:
+
+1. **Direct (local providers like HA):** Provider redirects to JCC's
+   ``/oauth/callback``, JCC exchanges the code, stores tokens, redirects to
+   ``jarvis://auth-complete``.
+
+2. **Relay bounce (external providers like Google):** Provider redirects to the
+   cloud relay's ``/oauth/bounce``, which 302s to ``jarvis://auth-complete``
+   with the auth code.  Mobile extracts the code and POSTs it to JCC's
+   ``/oauth/sessions/{id}/exchange``.  JCC exchanges the code for tokens and
+   stores them.  This avoids requiring JCC to be internet-accessible.
+
+The mode is chosen automatically: if the provider supplies a full
+``authorize_url`` (external) AND ``JARVIS_RELAY_URL`` is set, the relay path is
+used.  Otherwise JCC handles the callback directly.
 """
 
 import base64
@@ -52,6 +64,7 @@ class AuthConfigPayload(BaseModel):
     extra_exchange_params: dict[str, str] = {}
     send_redirect_uri_in_exchange: bool = True
     supports_pkce: bool = False
+    native_redirect_uri: str | None = None
 
 
 class CreateAuthSessionRequest(BaseModel):
@@ -64,6 +77,7 @@ class CreateAuthSessionRequest(BaseModel):
 class CreateAuthSessionResponse(BaseModel):
     session_id: str
     authorize_url: str
+    requires_code_exchange: bool = False  # True = mobile must POST code to /exchange
 
 
 class AuthSessionStatusResponse(BaseModel):
@@ -132,6 +146,33 @@ def _generate_pkce() -> tuple[str, str]:
 
 
 # =============================================================================
+# Relay State Encoding
+# =============================================================================
+
+
+def _encode_relay_state(csrf_token: str, redirect_uri: str) -> str:
+    """Encode CSRF token + redirect URI into the relay's expected state format.
+
+    Format: base64url({"t": "<csrf>", "r": "<redirect_uri>"})
+    """
+    payload = json.dumps({"t": csrf_token, "r": redirect_uri})
+    return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+
+
+def _get_relay_url() -> str | None:
+    """Get the relay base URL for OAuth bounce, if configured.
+
+    Reads from the ``oauth.relay_url`` setting (DB → JARVIS_RELAY_URL env
+    fallback).  Returns *None* when unset so callers fall back to the direct
+    callback flow.
+    """
+    from app.services.settings_service import get_settings_service
+
+    url: str = get_settings_service().get("oauth.relay_url", "")
+    return url or None
+
+
+# =============================================================================
 # External URL Resolution
 # =============================================================================
 
@@ -139,9 +180,12 @@ def _generate_pkce() -> tuple[str, str]:
 def _get_external_url(request: Request) -> str:
     """Get the external base URL for building callback URIs.
 
-    Uses JARVIS_EXTERNAL_URL env var, falling back to request headers.
+    Reads from the ``oauth.external_url`` setting (DB → JARVIS_EXTERNAL_URL
+    env fallback), then falls back to request headers.
     """
-    external_url = os.getenv("JARVIS_EXTERNAL_URL")
+    from app.services.settings_service import get_settings_service
+
+    external_url: str = get_settings_service().get("oauth.external_url", "")
     if external_url:
         return external_url.rstrip("/")
 
@@ -226,21 +270,42 @@ def create_auth_session(
     else:
         raise HTTPException(status_code=400, detail="Cannot build exchange URL: need exchange_url or provider_base_url + exchange_path")
 
-    # Build the full callback URI
-    external_base = _get_external_url(request)
-    redirect_uri = f"{external_base}/api/v0/oauth/callback"
+    # Determine redirect mode:
+    #   1. Native app redirect (iOS/Android custom URL scheme)
+    #   2. Relay bounce (external providers via cloud relay)
+    #   3. Direct callback (local providers like HA)
+    relay_url = _get_relay_url()
+    use_relay = bool(relay_url and cfg.authorize_url)  # external provider + relay configured
 
-    # For local/discoverable providers (authorize_path, not authorize_url),
-    # use JCC's external URL as client_id so the origin matches redirect_uri.
-    # Providers like HA require redirect_uri and client_id to share the same origin.
-    effective_client_id = external_base if cfg.authorize_path else cfg.client_id
+    if cfg.native_redirect_uri:
+        # Native app redirect: provider redirects to the app via custom URL
+        # scheme. Mobile catches it, extracts the code, and POSTs to /exchange.
+        # No client_secret needed — PKCE only.
+        redirect_uri = cfg.native_redirect_uri
+        encoded_state = state  # plain CSRF, not relay-encoded
+        effective_client_id = cfg.client_id
+        use_relay = True  # mobile must POST code to /exchange (same as relay flow)
+    elif use_relay:
+        # External provider (e.g. Google): redirect to relay bounce
+        redirect_uri = f"{relay_url.rstrip('/')}/oauth/bounce"
+        # Encode CSRF + app callback into state so relay can extract it
+        encoded_state = _encode_relay_state(state, "jarvis://auth-complete")
+        effective_client_id = cfg.client_id
+    else:
+        # Local provider (e.g. HA): redirect to JCC's own callback
+        external_base = _get_external_url(request)
+        redirect_uri = f"{external_base}/api/v0/oauth/callback"
+        encoded_state = state
+        # For local providers, use JCC's external URL as client_id
+        # so the origin matches redirect_uri (HA requires this).
+        effective_client_id = external_base if cfg.authorize_path else cfg.client_id
 
     # Build authorize URL with query params
     params: dict[str, str] = {
         "response_type": "code",
         "client_id": effective_client_id,
         "redirect_uri": redirect_uri,
-        "state": state,
+        "state": encoded_state,
     }
     if cfg.scopes:
         params["scope"] = " ".join(cfg.scopes)
@@ -264,6 +329,7 @@ def create_auth_session(
         authorize_url=full_authorize_url,
         exchange_url=exchange_endpoint,
         client_id=effective_client_id,
+        redirect_uri=redirect_uri,
         expires_at=datetime.utcnow() + timedelta(minutes=SESSION_TTL_MINUTES),
     )
     db.add(session)
@@ -278,6 +344,7 @@ def create_auth_session(
     return CreateAuthSessionResponse(
         session_id=session.id,
         authorize_url=full_authorize_url,
+        requires_code_exchange=use_relay,
     )
 
 
@@ -307,9 +374,13 @@ async def oauth_callback(
         db.commit()
         raise HTTPException(status_code=410, detail="Auth session expired")
 
-    # Build token exchange request
-    external_base = _get_external_url(request)
-    redirect_uri = f"{external_base}/api/v0/oauth/callback"
+    # Build token exchange request — use stored redirect_uri if available,
+    # otherwise fall back to building it from the request (backwards compat)
+    if session.redirect_uri:
+        redirect_uri = session.redirect_uri
+    else:
+        external_base = _get_external_url(request)
+        redirect_uri = f"{external_base}/api/v0/oauth/callback"
 
     exchange_data: dict[str, str] = {
         "grant_type": "authorization_code",
@@ -376,6 +447,101 @@ async def oauth_callback(
         url=f"jarvis://auth-complete?session_id={session.id}",
         status_code=302,
     )
+
+
+class CodeExchangeRequest(BaseModel):
+    """Mobile sends the auth code after relay bounce."""
+    code: str
+
+
+@router.post("/oauth/sessions/{session_id}/exchange")
+async def exchange_code(
+    session_id: str,
+    body: CodeExchangeRequest,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+):
+    """Exchange an auth code for tokens (relay bounce flow).
+
+    After the relay bounces the OAuth callback to the mobile app, the app
+    extracts the code and POSTs it here. JCC exchanges the code with the
+    provider's token endpoint, encrypts and stores the tokens, and marks
+    the session active.
+    """
+    session = db.query(AuthSession).filter(AuthSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Auth session not found")
+
+    if session.status != "pending":
+        raise HTTPException(status_code=400, detail=f"Session already {session.status}")
+
+    if datetime.utcnow() > session.expires_at:
+        session.status = "expired"
+        db.commit()
+        raise HTTPException(status_code=410, detail="Auth session expired")
+
+    # Build token exchange request
+    exchange_data: dict[str, str] = {
+        "grant_type": "authorization_code",
+        "code": body.code,
+        "client_id": session.client_id,
+    }
+
+    # Include redirect_uri (provider requires it to match the authorize request)
+    if session.redirect_uri:
+        exchange_data["redirect_uri"] = session.redirect_uri
+
+    # Include PKCE verifier if present
+    if session.code_verifier:
+        exchange_data["code_verifier"] = session.code_verifier
+
+    # Exchange code for tokens
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                session.exchange_url,
+                data=exchange_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+    except httpx.RequestError as exc:
+        logger.error("Token exchange failed for session %s: %s", session.id[:8], exc)
+        raise HTTPException(status_code=502, detail=f"Token exchange failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        logger.error(
+            "Token exchange returned %d for session %s: %s",
+            resp.status_code, session.id[:8], resp.text[:200],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Token exchange failed with status {resp.status_code}",
+        )
+
+    token_data = resp.json()
+
+    # Encrypt and store tokens
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+
+    if access_token:
+        session.access_token_enc = _encrypt_value(access_token)
+    if refresh_token:
+        session.refresh_token_enc = _encrypt_value(refresh_token)
+
+    session.token_data_enc = _encrypt_value(json.dumps(token_data))
+    session.status = "active"
+    session.completed_at = datetime.utcnow()
+    db.commit()
+
+    logger.info(
+        "Auth session completed (relay exchange): %s provider=%s node=%s",
+        session.id[:8], session.provider, session.node_id,
+    )
+
+    # Publish MQTT notification
+    _publish_auth_ready(session.provider, session.node_id, session.id)
+
+    return {"status": "ok", "session_id": session_id}
 
 
 @router.get("/oauth/sessions/{session_id}", response_model=AuthSessionStatusResponse)

@@ -148,6 +148,57 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Maximum number of recall results returned",
     ),
 
+    # Network / callback settings
+    SettingDefinition(
+        key="network.public_url",
+        category="network",
+        value_type="string",
+        default="",
+        description="LAN-reachable URL for this service (used in callbacks to remote workers)",
+        env_fallback="CC_PUBLIC_URL",
+    ),
+
+    # OAuth settings
+    SettingDefinition(
+        key="oauth.relay_url",
+        category="oauth",
+        value_type="string",
+        default="",
+        description="Relay URL for OAuth bounce (external providers like Google)",
+        env_fallback="JARVIS_RELAY_URL",
+    ),
+    SettingDefinition(
+        key="oauth.external_url",
+        category="oauth",
+        value_type="string",
+        default="",
+        description="Public base URL for this service (used as OAuth redirect URI base)",
+        env_fallback="JARVIS_EXTERNAL_URL",
+    ),
+
+    # Smart home settings
+    SettingDefinition(
+        key="smart_home.use_home_assistant",
+        category="smart_home",
+        value_type="bool",
+        default=False,
+        description="Use Home Assistant for device control and aggregation (vs direct WiFi only)",
+    ),
+    SettingDefinition(
+        key="smart_home.device_manager",
+        category="smart_home",
+        value_type="string",
+        default="jarvis_direct",
+        description="Active device manager for device listing (jarvis_direct or home_assistant)",
+    ),
+    SettingDefinition(
+        key="smart_home.primary_node_id",
+        category="smart_home",
+        value_type="string",
+        default="",
+        description="Node that handles device management (discovery, listing) for the household",
+    ),
+
     # Admin settings
     SettingDefinition(
         key="admin.api_key",

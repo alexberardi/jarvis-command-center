@@ -264,6 +264,10 @@ app.include_router(node_commands.router, prefix="/api/v0", tags=["node-commands"
 # Include test commands router (app-to-app auth)
 app.include_router(test_commands.router, prefix="/api/v0", tags=["testing"])
 
+# Include package install router (Pantry store → node install via MQTT)
+from app.api import package_install
+app.include_router(package_install.router, prefix="/api/v0", tags=["package-install"])
+
 # Include memory CRUD router
 from app.api import memories
 app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
@@ -275,6 +279,12 @@ app.include_router(oauth.router, prefix="/api/v0", tags=["oauth"])
 # Include agent utility endpoints (news, calendar for node-side agents)
 from app.api import agents
 app.include_router(agents.router, prefix="/api/v0", tags=["agents"])
+
+# Include mobile chat, audio, and node tools endpoints (JWT auth)
+from app.api import mobile_chat, mobile_audio, node_tools
+app.include_router(mobile_chat.router, prefix="/api/v0/mobile", tags=["mobile-chat"])
+app.include_router(mobile_audio.router, prefix="/api/v0/mobile", tags=["mobile-audio"])
+app.include_router(node_tools.router, prefix="/api/v0/mobile", tags=["node-tools"])
 
 # Settings router is included in startup_event after service_config is initialized
 
@@ -310,6 +320,26 @@ async def start_conversation(
             "household_id": node_context_provider.household_id,
         }
 
+        # Inject room hierarchy from CC database for LLM prompt context
+        if node_context.get("household_id"):
+            try:
+                from app.models import Room as RoomModel
+                from app.db import get_session_local
+                _session = get_session_local()()
+                try:
+                    _hh_id = node_context["household_id"]
+                    _rooms = _session.query(RoomModel).filter(RoomModel.household_id == _hh_id).all()
+                    _has_hierarchy = any(r.parent_room_id for r in _rooms)
+                    if _has_hierarchy:
+                        node_context["room_hierarchy"] = [
+                            {"id": r.id, "name": r.name, "parent_room_id": r.parent_room_id}
+                            for r in _rooms
+                        ]
+                finally:
+                    _session.close()
+            except Exception as e:
+                logger.warning(f"Failed to load room hierarchy: {e}")
+
         # Extract timezone and speaker identity from client context
         client_timezone = None
         if request.node_context:
@@ -338,6 +368,7 @@ async def start_conversation(
                     logger.warning(f"⚠️ Failed to resolve speaker name: {e}")
 
         client_tools = request.client_tools or []
+        available_commands = request.available_commands or []
         logger.info(f"🔧 Starting tool-based conversation with {len(client_tools)} client tools (skip_warmup={request.skip_warmup_inference})")
 
         with timing.measure("warmup_conversation_with_tools"):

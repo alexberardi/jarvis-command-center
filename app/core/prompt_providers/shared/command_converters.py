@@ -58,11 +58,6 @@ def _normalize_param_type(param_type: Optional[str]) -> Dict[str, Any]:
     return {"type": "string"}
 
 
-# Commands where specific params are always required regardless of schema
-_FORCE_REQUIRED_COMMANDS = {"get_calendar_events", "get_sports_scores"}
-_FORCE_REQUIRED_PARAMS = {"resolved_datetimes"}
-
-
 def convert_commands_to_tools(
     commands: List[CommandDefinition],
 ) -> List[Dict[str, Any]]:
@@ -101,11 +96,7 @@ def convert_commands_to_tools(
             if param.refinable:
                 properties[param.name]["_refinable"] = True
 
-            is_forced = (
-                cmd.command_name in _FORCE_REQUIRED_COMMANDS
-                and param.name in _FORCE_REQUIRED_PARAMS
-            )
-            if param.required or is_forced:
+            if param.required:
                 required.append(param.name)
 
         tool: Dict[str, Any] = {

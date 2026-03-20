@@ -147,7 +147,7 @@ class ConversationHandler:
             # Only tools that are simple CRUD / one-shot operations belong
             # here.  Avoid tools that trigger follow-up LLM calls or loops
             # (e.g. get_command_utterance_examples, request_validation).
-            _safe_tool_names: list[str] = ["answer_question"]
+            _safe_tool_names: list[str] = ["answer_question", "deep_research"]
             # Only include tools that require speaker identification when
             # a speaker has actually been identified for this conversation.
             _has_speaker = bool(
@@ -348,9 +348,12 @@ class ConversationHandler:
         )
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool routing done (router took {(time.time()-_router_t0)*1000:.0f}ms)")
 
-        # Apply high-confidence tool pruning
+        # Apply high-confidence tool pruning — also rebuilds the system
+        # prompt with only the pruned tools, dramatically reducing token count.
         tools = self._apply_high_confidence_pruning(
-            tools, router_decision, server_tool_names
+            tools, router_decision, server_tool_names,
+            messages=messages, conversation_id=conversation_id,
+            available_commands=available_commands,
         )
 
         # Add router hint if decision was used
@@ -543,12 +546,16 @@ class ConversationHandler:
                     "role": "system",
                     "content": (
                         "You are Jarvis, a voice assistant. "
-                        "Answer the user based on the information below. "
+                        "The user asked a question and a tool was executed to get the answer. "
+                        "The tool result data is below. Craft a natural, spoken response using "
+                        "the ACTUAL values from the data. Never use placeholders like "
+                        "'[temperature]' — use the real numbers and text from the result. "
                         "Be brief and conversational."
                     ),
                 },
                 {"role": "user", "content": user_utterance},
-                {"role": "system", "content": f"Information:\n{tool_context}"},
+                {"role": "assistant", "content": f"Tool result:\n{tool_context}"},
+                {"role": "user", "content": "Now give me a brief spoken response using those exact values."},
             ]
 
         # Use a fresh conversation_id so the MLX backend does NOT reuse the
@@ -604,13 +611,172 @@ class ConversationHandler:
             len(tool_results),
         )
 
-        # Add the formatted response to conversation history
-        messages.append({"role": "assistant", "content": assistant_message})
+        # For text-based models, role="tool" messages are invisible (dropped by
+        # the chat template) and the raw assistant tool-call JSON is noise.
+        # Replace the trailing [assistant(tool_calls), tool(results)] sequence
+        # with a single assistant message that embeds the data so follow-up
+        # questions can reference specific values from the tool results.
+        self._replace_tool_exchange_in_history(
+            messages, tool_context, assistant_message
+        )
 
         return {
             "stop_reason": "complete",
             "assistant_message": assistant_message,
         }
+
+    async def stream_final_response(
+        self,
+        conversation_id: str,
+        tool_results: List[Dict[str, Any]],
+    ):
+        """Stream the final LLM response token-by-token after tool execution.
+
+        Same logic as _format_tool_result_text_mode but uses chat_completion_stream()
+        to yield tokens as they arrive. For text-based models only.
+
+        Yields:
+            str tokens as they arrive from the LLM
+        """
+        messages = conversation_cache.get_messages(conversation_id)
+        if not messages:
+            raise ValueError(f"Conversation {conversation_id} not found or expired")
+
+        # Add tool results to messages (same as continue_conversation)
+        for result in tool_results:
+            output = result["output"]
+            if not isinstance(output, str):
+                output = json.dumps(output)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": result["tool_call_id"],
+                "content": output,
+            })
+
+        # Find user utterance
+        user_utterance: str = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                user_utterance = msg.get("content", "")
+                break
+
+        # Collect tool result outputs
+        result_parts: List[str] = []
+        for tr in tool_results:
+            output = tr["output"]
+            if not isinstance(output, str):
+                output = json.dumps(output)
+            result_parts.append(output)
+        tool_context: str = "\n".join(result_parts)
+
+        is_knowledge_query: bool = self._is_knowledge_delegation(tool_context)
+
+        # Check if the client supports rich/markdown responses
+        node_ctx = conversation_cache.get_node_context(conversation_id)
+        rich = node_ctx.get("rich_response", False) if node_ctx else False
+        style_hint = (
+            "Use markdown formatting (bold, lists, headers) when it improves readability."
+            if rich else "Keep it brief and spoken-friendly."
+        )
+
+        if is_knowledge_query:
+            formatting_messages: List[Dict[str, Any]] = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Jarvis, a voice assistant. "
+                        "Answer the user's question from your own knowledge. "
+                        f"Be conversational. {style_hint}"
+                    ),
+                },
+                {"role": "user", "content": user_utterance},
+            ]
+        else:
+            formatting_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Jarvis, a voice assistant. "
+                        "The user asked a question and a tool was executed to get the answer. "
+                        "The tool result data is below. Craft a natural response using "
+                        "the ACTUAL values from the data. Never use placeholders like "
+                        f"'[temperature]' — use the real numbers and text from the result. "
+                        f"Be conversational. {style_hint}"
+                    ),
+                },
+                {"role": "user", "content": user_utterance},
+                {"role": "assistant", "content": f"Tool result:\n{tool_context}"},
+                {"role": "user", "content": "Now give me a response using those exact values."},
+            ]
+
+        format_conv_id: str = f"fmt-{uuid.uuid4().hex[:12]}"
+
+        full_text = ""
+        async for event in self.llm_client.chat_completion_stream(
+            messages=formatting_messages,
+            include_date_context=True,
+            max_tokens=256,
+        ):
+            if event.get("done"):
+                break
+            delta = event.get("delta", "")
+            if delta:
+                # Strip tool_call tags from streaming output
+                cleaned = re.sub(r"</?tool_call>", "", delta)
+                if cleaned:
+                    full_text += cleaned
+                    yield cleaned
+
+        # Update conversation history with the formatted response
+        self._replace_tool_exchange_in_history(
+            messages, tool_context, full_text
+        )
+        conversation_cache.update_messages(conversation_id, messages)
+
+        logger.info(
+            "Streamed final response: %d chars (from %d tool results)",
+            len(full_text),
+            len(tool_results),
+        )
+
+    @staticmethod
+    def _replace_tool_exchange_in_history(
+        messages: List[Dict[str, Any]],
+        tool_context: str,
+        formatted_response: str,
+    ) -> None:
+        """Replace tool-exchange messages with a text-friendly assistant message.
+
+        Finds the trailing [assistant(tool_calls), tool(result), ...] sequence
+        and replaces it with a single assistant message that includes both the
+        condensed data (for follow-up context) and the spoken response.
+        """
+        # Walk backwards to find the start of the tool exchange
+        cut_start: int = len(messages)
+        for i in range(len(messages) - 1, -1, -1):
+            role = messages[i].get("role")
+            if role == "tool":
+                cut_start = i
+            elif role == "assistant" and messages[i].get("tool_calls"):
+                cut_start = i
+                break
+            else:
+                break
+
+        # Condense tool data to avoid bloating the context window
+        max_data_chars = 1500
+        condensed = tool_context[:max_data_chars]
+        if len(tool_context) > max_data_chars:
+            condensed += "\n..."
+
+        # Replace the tool exchange with a clean assistant message
+        del messages[cut_start:]
+        messages.append({
+            "role": "assistant",
+            "content": (
+                f"[Tool data: {condensed}]\n\n{formatted_response}"
+            ),
+        })
 
     @staticmethod
     def _is_knowledge_delegation(tool_context: str) -> bool:
@@ -735,12 +901,17 @@ class ConversationHandler:
         tools: Optional[List[Dict[str, Any]]],
         router_decision: Optional[Dict[str, Any]],
         server_tool_names: Set[str],
+        messages: Optional[List[Dict[str, Any]]] = None,
+        conversation_id: Optional[str] = None,
+        available_commands: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Prune tools based on high-confidence router decision.
 
-        Returns pruned tools but does NOT rebuild the system prompt,
-        preserving the warmup KV cache.
+        When pruning fires, rebuilds the system prompt with only the pruned
+        tools. This trades the warmup KV cache for a much smaller prompt
+        (~500 tokens instead of ~3000), which is a net win because prefill
+        on the smaller prompt is faster than reusing a cached large prompt.
         """
         if not router_decision or not tools:
             return tools
@@ -763,11 +934,62 @@ class ConversationHandler:
         if len(pruned_tools) < len(tools):
             predicted_tool = router_decision.get("tool_name")
             logger.info(
-                "🧹 Pruned tools to %d (predicted=%s, KV cache preserved)",
-                len(pruned_tools), predicted_tool,
+                "🧹 Pruned tools from %d to %d (predicted=%s)",
+                len(tools), len(pruned_tools), predicted_tool,
             )
 
+            # Rebuild system prompt with only the pruned tools so the LLM
+            # processes far fewer tokens. This invalidates the warmup KV
+            # cache but the smaller prompt more than compensates.
+            if messages and conversation_id:
+                self._rebuild_system_prompt_for_pruned_tools(
+                    messages, conversation_id, pruned_tools, available_commands,
+                )
+
         return pruned_tools
+
+    def _rebuild_system_prompt_for_pruned_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        conversation_id: str,
+        pruned_tools: List[Dict[str, Any]],
+        available_commands: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Replace the system prompt in messages[0] with one built from pruned tools.
+
+        This dramatically reduces input token count (e.g. 3000 → 500 tokens)
+        at the cost of invalidating the warmup KV cache.
+        """
+        node_context = conversation_cache.get_node_context(conversation_id)
+        timezone = conversation_cache.get_timezone(conversation_id)
+
+        if not node_context:
+            logger.warning("Cannot rebuild system prompt: no cached node_context")
+            return
+
+        # Filter available_commands to only include pruned tool names
+        pruned_names = {get_tool_name(t) for t in pruned_tools if get_tool_name(t)}
+        filtered_commands = None
+        if available_commands:
+            filtered_commands = [
+                cmd for cmd in available_commands
+                if cmd.get("command_name") in pruned_names
+            ]
+
+        available_command_flags = build_available_command_flags(
+            filtered_commands or []
+        )
+
+        new_prompt = self._get_system_prompt(
+            node_context, timezone, pruned_tools, available_command_flags
+        )
+
+        old_len = len(messages[0]["content"]) if messages else 0
+        messages[0] = {"role": "system", "content": new_prompt}
+        logger.info(
+            "📝 Rebuilt system prompt: %d → %d chars (~%d → ~%d tokens)",
+            old_len, len(new_prompt), old_len // 4, len(new_prompt) // 4,
+        )
 
     def _get_system_prompt(
         self,

@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime
 from typing import List, Optional
 
 import httpx
@@ -8,10 +9,12 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from .core.conversation_cache import conversation_cache
+from .context_providers.node_context_provider import NodeContextProvider
 from .deps import (
     AuthenticatedUser,
     get_db,
     verify_admin_key,
+    verify_api_key,
     verify_household_role,
     verify_user_jwt,
 )
@@ -54,6 +57,8 @@ class NodeResponse(BaseModel):
     voice_mode: str | None = "brief"
     adapter_hash: Optional[str] = None
     household_id: str | None = None
+    online: bool = False
+    last_seen: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -199,9 +204,38 @@ def _deactivate_node_with_auth(node_id: str) -> bool:
 
 
 @router.get("/nodes", response_model=List[NodeResponse])
-def list_nodes(db: Session = Depends(get_db)):
-    """List all nodes registered with this command center."""
-    return db.query(Node).all()
+def list_nodes(household_id: str | None = None, db: Session = Depends(get_db)):
+    """List nodes registered with this command center.
+
+    Args:
+        household_id: Optional filter by household UUID.
+    """
+    query = db.query(Node)
+    if household_id:
+        query = query.filter(Node.household_id == household_id)
+    nodes = query.all()
+
+    results: list[NodeResponse] = []
+    for node in nodes:
+        resp = NodeResponse.model_validate(node)
+        resp.online = node.is_online()
+        results.append(resp)
+    return results
+
+
+@router.post("/nodes/heartbeat")
+def node_heartbeat(
+    node_context: NodeContextProvider = Depends(verify_api_key),
+    db: Session = Depends(get_db),
+):
+    """Receive heartbeat from a node, update last_seen timestamp."""
+    node = db.query(Node).filter(
+        Node.node_id == node_context.node.node_id,
+    ).first()
+    if node:
+        node.last_seen = datetime.utcnow()
+        db.commit()
+    return {"status": "ok"}
 
 
 @router.post("/nodes", response_model=NodeCreateResponse, dependencies=[Depends(verify_admin_key)])

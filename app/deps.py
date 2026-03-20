@@ -237,6 +237,7 @@ class AuthenticatedUser:
     """User info extracted from a validated JWT."""
     user_id: int
     email: str | None = None
+    is_superuser: bool = False
 
 
 def verify_user_jwt(authorization: str | None = Header(None)) -> AuthenticatedUser:
@@ -270,7 +271,11 @@ def verify_user_jwt(authorization: str | None = Header(None)) -> AuthenticatedUs
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token: missing user ID")
 
-    return AuthenticatedUser(user_id=int(user_id), email=payload.get("email"))
+    return AuthenticatedUser(
+        user_id=int(user_id),
+        email=payload.get("email"),
+        is_superuser=payload.get("is_superuser", False),
+    )
 
 
 def verify_household_role(

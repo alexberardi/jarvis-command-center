@@ -15,11 +15,108 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from app.deps import get_db, verify_api_key
-from app.models import ConfigPush, Device, DeviceScanRequest, Node, Room
+from app.models import ConfigPush, Device, DeviceListRequest, DeviceScanRequest, Node, Room
 from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
+
+
+# =============================================================================
+# Smart Home Config (device manager selection + primary node)
+# =============================================================================
+
+
+class SmartHomeConfigResponse(BaseModel):
+    device_manager: str
+    primary_node_id: str
+
+
+class SmartHomeConfigUpdate(BaseModel):
+    device_manager: str | None = None
+    primary_node_id: str | None = None
+
+
+class NodeOption(BaseModel):
+    node_id: str
+    room: str | None = None
+    online: bool = False
+    last_seen: datetime | None = None
+
+
+class SmartHomeConfigWithNodes(BaseModel):
+    device_manager: str
+    primary_node_id: str
+    nodes: list[NodeOption]
+
+
+@router.get(
+    "/households/{household_id}/smart-home/config",
+    response_model=SmartHomeConfigWithNodes,
+)
+def get_smart_home_config(
+    household_id: str,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> SmartHomeConfigWithNodes:
+    """Get smart home configuration for a household (device manager + primary node + node list)."""
+    from app.services.settings_service import get_settings_service
+
+    settings = get_settings_service()
+    device_manager: str = settings.get("smart_home.device_manager", household_id=household_id) or "jarvis_direct"
+    primary_node_id: str = settings.get("smart_home.primary_node_id", household_id=household_id) or ""
+
+    # Get all nodes in this household for the dropdown
+    nodes = db.query(Node).filter(Node.household_id == household_id).all()
+    node_options = [
+        NodeOption(node_id=n.node_id, room=n.room, online=n.is_online(), last_seen=n.last_seen)
+        for n in nodes
+    ]
+
+    return SmartHomeConfigWithNodes(
+        device_manager=device_manager,
+        primary_node_id=primary_node_id,
+        nodes=node_options,
+    )
+
+
+@router.put(
+    "/households/{household_id}/smart-home/config",
+    response_model=SmartHomeConfigResponse,
+)
+def update_smart_home_config(
+    household_id: str,
+    body: SmartHomeConfigUpdate,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> SmartHomeConfigResponse:
+    """Update smart home configuration for a household."""
+    from app.services.settings_service import get_settings_service
+
+    settings = get_settings_service()
+
+    if body.device_manager is not None:
+        settings.set("smart_home.device_manager", body.device_manager, household_id=household_id)
+
+    if body.primary_node_id is not None:
+        # Validate node exists in household (allow empty to clear)
+        if body.primary_node_id:
+            node = db.query(Node).filter(
+                Node.node_id == body.primary_node_id,
+                Node.household_id == household_id,
+            ).first()
+            if not node:
+                raise HTTPException(status_code=400, detail="Node not in this household")
+        settings.set("smart_home.primary_node_id", body.primary_node_id, household_id=household_id)
+
+    # Return current values
+    device_manager: str = settings.get("smart_home.device_manager", household_id=household_id) or "jarvis_direct"
+    primary_node_id: str = settings.get("smart_home.primary_node_id", household_id=household_id) or ""
+
+    return SmartHomeConfigResponse(
+        device_manager=device_manager,
+        primary_node_id=primary_node_id,
+    )
 
 
 # =============================================================================
@@ -31,11 +128,13 @@ class RoomCreate(BaseModel):
     name: str
     icon: str | None = None
     ha_area_id: str | None = None
+    parent_room_id: str | None = None
 
 
 class RoomUpdate(BaseModel):
     name: str | None = None
     icon: str | None = None
+    parent_room_id: str | None = None
 
 
 class RoomResponse(BaseModel):
@@ -45,10 +144,28 @@ class RoomResponse(BaseModel):
     normalized_name: str
     icon: str | None = None
     ha_area_id: str | None = None
+    parent_room_id: str | None = None
     device_count: int = 0
     node_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RoomTreeNode(BaseModel):
+    id: str
+    household_id: str
+    name: str
+    normalized_name: str
+    icon: str | None = None
+    ha_area_id: str | None = None
+    parent_room_id: str | None = None
+    device_count: int = 0
+    node_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+    children: list["RoomTreeNode"] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -158,6 +275,11 @@ _PROTOCOL_ACTIONS: dict[str, list[dict[str, str]]] = {
         {"button_text": "Turn On", "button_action": "turn_on", "button_type": "primary", "button_icon": "power"},
         {"button_text": "Turn Off", "button_action": "turn_off", "button_type": "secondary", "button_icon": "power-off"},
     ],
+    "nest": [
+        {"button_text": "Set Temperature", "button_action": "set_temperature", "button_type": "primary", "button_icon": "thermometer"},
+        {"button_text": "Set Mode", "button_action": "set_mode", "button_type": "secondary", "button_icon": "thermostat"},
+        {"button_text": "Turn Off", "button_action": "turn_off", "button_type": "secondary", "button_icon": "power-off"},
+    ],
     "apple": [
         {"button_text": "Play", "button_action": "play", "button_type": "primary", "button_icon": "play"},
         {"button_text": "Pause", "button_action": "pause", "button_type": "secondary", "button_icon": "pause"},
@@ -183,7 +305,16 @@ _DOMAIN_ACTIONS: dict[str, list[dict[str, str]]] = {
         {"button_text": "Unlock", "button_action": "unlock", "button_type": "destructive", "button_icon": "lock-open"},
     ],
     "climate": [
-        {"button_text": "Turn On", "button_action": "turn_on", "button_type": "primary", "button_icon": "thermostat"},
+        {"button_text": "Set Temperature", "button_action": "set_temperature", "button_type": "primary", "button_icon": "thermometer"},
+        {"button_text": "Set Mode", "button_action": "set_mode", "button_type": "secondary", "button_icon": "thermostat"},
+        {"button_text": "Turn Off", "button_action": "turn_off", "button_type": "secondary", "button_icon": "power-off"},
+    ],
+    "camera": [
+        {"button_text": "Get Stream", "button_action": "get_stream", "button_type": "primary", "button_icon": "video"},
+    ],
+    "kettle": [
+        {"button_text": "Boil", "button_action": "turn_on", "button_type": "primary", "button_icon": "kettle"},
+        {"button_text": "Set Temperature", "button_action": "set_temperature", "button_type": "secondary", "button_icon": "thermometer"},
         {"button_text": "Turn Off", "button_action": "turn_off", "button_type": "secondary", "button_icon": "power-off"},
     ],
     "fan": [
@@ -222,6 +353,62 @@ def _get_device_actions(dev: "Device") -> list[JarvisButtonResponse] | None:
 
 
 # =============================================================================
+# Room Helpers
+# =============================================================================
+
+
+def get_descendant_room_ids(db: Session, room_id: str, household_id: str) -> list[str]:
+    """BFS to collect room_id + all descendant IDs within a household."""
+    result: list[str] = [room_id]
+    queue = [room_id]
+    while queue:
+        parent_id = queue.pop(0)
+        children = db.query(Room.id).filter(
+            Room.parent_room_id == parent_id,
+            Room.household_id == household_id,
+        ).all()
+        for (child_id,) in children:
+            result.append(child_id)
+            queue.append(child_id)
+    return result
+
+
+def _would_create_cycle(db: Session, room_id: str, proposed_parent_id: str, household_id: str) -> bool:
+    """Walk up from proposed_parent; if we reach room_id, it's a cycle."""
+    current = proposed_parent_id
+    while current is not None:
+        if current == room_id:
+            return True
+        parent = db.query(Room.parent_room_id).filter(
+            Room.id == current,
+            Room.household_id == household_id,
+        ).scalar()
+        current = parent
+    return False
+
+
+def _build_room_response(room: Room, db: Session) -> RoomResponse:
+    """Build a RoomResponse with device/node counts."""
+    device_count = db.query(Device).filter(
+        Device.room_id == room.id, Device.is_active.is_(True),
+    ).count()
+    node_count = db.query(Node).filter(Node.room_id == room.id).count()
+    return RoomResponse(
+        id=room.id,
+        household_id=room.household_id,
+        name=room.name,
+        normalized_name=room.normalized_name,
+        icon=room.icon,
+        ha_area_id=room.ha_area_id,
+        parent_room_id=room.parent_room_id,
+        device_count=device_count,
+        node_count=node_count,
+        created_at=room.created_at,
+        updated_at=room.updated_at,
+    )
+
+
+# =============================================================================
 # Room Endpoints
 # =============================================================================
 
@@ -233,26 +420,7 @@ def list_rooms(
     db: Session = Depends(get_db),
 ) -> list[RoomResponse]:
     rooms = db.query(Room).filter(Room.household_id == household_id).all()
-    result = []
-    for room in rooms:
-        device_count = db.query(Device).filter(
-            Device.room_id == room.id, Device.is_active.is_(True),
-        ).count()
-        node_count = db.query(Node).filter(Node.room_id == room.id).count()
-        resp = RoomResponse(
-            id=room.id,
-            household_id=room.household_id,
-            name=room.name,
-            normalized_name=room.normalized_name,
-            icon=room.icon,
-            ha_area_id=room.ha_area_id,
-            device_count=device_count,
-            node_count=node_count,
-            created_at=room.created_at,
-            updated_at=room.updated_at,
-        )
-        result.append(resp)
-    return result
+    return [_build_room_response(room, db) for room in rooms]
 
 
 @router.post("/households/{household_id}/rooms", response_model=RoomResponse, status_code=201)
@@ -270,6 +438,15 @@ def create_room(
     if existing:
         raise HTTPException(status_code=409, detail=f"Room '{body.name}' already exists")
 
+    # Validate parent exists in same household
+    if body.parent_room_id:
+        parent = db.query(Room).filter(
+            Room.id == body.parent_room_id,
+            Room.household_id == household_id,
+        ).first()
+        if not parent:
+            raise HTTPException(status_code=400, detail="Parent room not found in this household")
+
     room = Room(
         id=str(uuid4()),
         household_id=household_id,
@@ -277,24 +454,14 @@ def create_room(
         normalized_name=normalized,
         icon=body.icon,
         ha_area_id=body.ha_area_id,
+        parent_room_id=body.parent_room_id,
     )
     db.add(room)
     db.commit()
     db.refresh(room)
     logger.info("Room created: %s in household %s", room.name, household_id)
 
-    return RoomResponse(
-        id=room.id,
-        household_id=room.household_id,
-        name=room.name,
-        normalized_name=room.normalized_name,
-        icon=room.icon,
-        ha_area_id=room.ha_area_id,
-        device_count=0,
-        node_count=0,
-        created_at=room.created_at,
-        updated_at=room.updated_at,
-    )
+    return _build_room_response(room, db)
 
 
 @router.patch("/households/{household_id}/rooms/{room_id}", response_model=RoomResponse)
@@ -323,26 +490,25 @@ def update_room(
     if body.icon is not None:
         room.icon = body.icon
 
+    # Handle parent_room_id update (explicit None clears the parent)
+    if "parent_room_id" in (body.model_dump(exclude_unset=True)):
+        new_parent = body.parent_room_id
+        if new_parent is not None:
+            # Validate parent exists in same household
+            parent = db.query(Room).filter(
+                Room.id == new_parent, Room.household_id == household_id,
+            ).first()
+            if not parent:
+                raise HTTPException(status_code=400, detail="Parent room not found in this household")
+            # Reject cycles: cannot set parent to self or any descendant
+            if _would_create_cycle(db, room_id, new_parent, household_id):
+                raise HTTPException(status_code=400, detail="Cannot set parent: would create a cycle")
+        room.parent_room_id = new_parent
+
     db.commit()
     db.refresh(room)
 
-    device_count = db.query(Device).filter(
-        Device.room_id == room.id, Device.is_active.is_(True),
-    ).count()
-    node_count = db.query(Node).filter(Node.room_id == room.id).count()
-
-    return RoomResponse(
-        id=room.id,
-        household_id=room.household_id,
-        name=room.name,
-        normalized_name=room.normalized_name,
-        icon=room.icon,
-        ha_area_id=room.ha_area_id,
-        device_count=device_count,
-        node_count=node_count,
-        created_at=room.created_at,
-        updated_at=room.updated_at,
-    )
+    return _build_room_response(room, db)
 
 
 @router.delete("/households/{household_id}/rooms/{room_id}", status_code=204)
@@ -361,6 +527,47 @@ def delete_room(
     logger.info("Room deleted: %s", room.name)
 
 
+@router.get("/households/{household_id}/rooms/tree", response_model=list[RoomTreeNode])
+def get_room_tree(
+    household_id: str,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> list[RoomTreeNode]:
+    """Return rooms as a nested tree structure."""
+    rooms = db.query(Room).filter(Room.household_id == household_id).all()
+
+    # Build lookup and count maps
+    room_map: dict[str, RoomTreeNode] = {}
+    for room in rooms:
+        device_count = db.query(Device).filter(
+            Device.room_id == room.id, Device.is_active.is_(True),
+        ).count()
+        node_count = db.query(Node).filter(Node.room_id == room.id).count()
+        room_map[room.id] = RoomTreeNode(
+            id=room.id,
+            household_id=room.household_id,
+            name=room.name,
+            normalized_name=room.normalized_name,
+            icon=room.icon,
+            ha_area_id=room.ha_area_id,
+            parent_room_id=room.parent_room_id,
+            device_count=device_count,
+            node_count=node_count,
+            created_at=room.created_at,
+            updated_at=room.updated_at,
+        )
+
+    # Build tree: attach children to parents
+    roots: list[RoomTreeNode] = []
+    for node in room_map.values():
+        if node.parent_room_id and node.parent_room_id in room_map:
+            room_map[node.parent_room_id].children.append(node)
+        else:
+            roots.append(node)
+
+    return roots
+
+
 # =============================================================================
 # Device Endpoints
 # =============================================================================
@@ -370,6 +577,7 @@ def delete_room(
 def list_devices(
     household_id: str,
     room_id: Optional[str] = Query(None),
+    recursive: bool = Query(False),
     domain: Optional[str] = Query(None),
     source: Optional[str] = Query(None),
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
@@ -377,7 +585,11 @@ def list_devices(
 ) -> list[DeviceResponse]:
     query = db.query(Device).filter(Device.household_id == household_id)
     if room_id:
-        query = query.filter(Device.room_id == room_id)
+        if recursive:
+            all_room_ids = get_descendant_room_ids(db, room_id, household_id)
+            query = query.filter(Device.room_id.in_(all_room_ids))
+        else:
+            query = query.filter(Device.room_id == room_id)
     if domain:
         query = query.filter(Device.domain == domain)
     if source:
@@ -684,6 +896,119 @@ def post_device_control_result(
 
 
 # =============================================================================
+# Device State Endpoint (mobile -> CC -> MQTT -> node -> CC -> mobile)
+# =============================================================================
+
+
+class DeviceStateResponse(BaseModel):
+    entity_id: str
+    domain: str
+    state: dict | None = None
+    ui_hints: dict | None = None
+    error: str | None = None
+
+
+@router.get(
+    "/households/{household_id}/devices/{device_id}/state",
+    response_model=DeviceStateResponse,
+)
+def get_device_state(
+    household_id: str,
+    device_id: str,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> DeviceStateResponse:
+    """Query current device state via a node. Sends MQTT, waits for HTTP callback.
+
+    Flow: CC publishes MQTT → node queries adapter → node POSTs result → CC returns.
+    """
+    import time
+
+    dev = db.query(Device).filter(
+        Device.id == device_id, Device.household_id == household_id,
+    ).first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    nodes = db.query(Node).filter(Node.household_id == household_id).all()
+    node = nodes[-1] if nodes else None
+    if not node:
+        raise HTTPException(status_code=400, detail="No node available in household")
+
+    from app.node_settings import get_mqtt_client
+    from app.services.node_command_service import get_node_command_service
+
+    mqtt = get_mqtt_client()
+    if mqtt is None:
+        raise HTTPException(status_code=503, detail="MQTT not available")
+
+    request_id = str(uuid4())
+    result_file = _os.path.join(_RESULT_DIR, f"state-{request_id}.json")
+
+    # Determine domain from entity_id
+    domain = dev.entity_id.split(".", 1)[0] if "." in dev.entity_id else ""
+
+    # Publish MQTT request to node
+    service = get_node_command_service()
+    topic = f"jarvis/nodes/{node.node_id}/device-state"
+    payload = json.dumps({
+        "request_id": request_id,
+        "entity_id": dev.entity_id,
+        "domain": domain,
+        "protocol": dev.protocol,
+        "source": dev.source,
+        "cloud_id": dev.cloud_id,
+        "local_ip": dev.local_ip,
+        "mac_address": dev.mac_address,
+    })
+    mqtt.publish(topic, payload)
+
+    # Poll for result file (node writes it via POST callback)
+    deadline = time.time() + 10.0
+    result = None
+    while time.time() < deadline:
+        if _os.path.exists(result_file):
+            try:
+                with open(result_file) as f:
+                    result = json.load(f)
+                _os.unlink(result_file)
+                break
+            except (json.JSONDecodeError, OSError):
+                pass
+        time.sleep(0.1)
+
+    if result is None:
+        try:
+            _os.unlink(result_file)
+        except OSError:
+            pass
+        return DeviceStateResponse(
+            entity_id=dev.entity_id, domain=domain,
+            error="Timed out waiting for node response",
+        )
+
+    return DeviceStateResponse(
+        entity_id=result.get("entity_id", dev.entity_id),
+        domain=result.get("domain", domain),
+        state=result.get("state"),
+        ui_hints=result.get("ui_hints"),
+        error=result.get("error"),
+    )
+
+
+@router.post("/device-state-results/{request_id}")
+def post_device_state_result(
+    request_id: str,
+    body: dict,
+) -> dict:
+    """Node POSTs device state result back to CC."""
+    result_file = _os.path.join(_RESULT_DIR, f"state-{request_id}.json")
+    with open(result_file, "w") as f:
+        json.dump(body, f)
+    return {"status": "ok"}
+
+
+# =============================================================================
 # Device Scan Endpoints (user-driven: mobile -> CC -> MQTT -> node -> CC -> mobile)
 # =============================================================================
 
@@ -922,6 +1247,289 @@ def _publish_device_scan_mqtt(node_id: str, request_id: str) -> None:
         logger.info("Published device scan request to %s", topic)
     except Exception as e:
         logger.error("Failed to publish device scan MQTT: %s", e)
+
+
+# =============================================================================
+# Device List Request/Poll (mobile → CC → MQTT → node → CC → mobile)
+# =============================================================================
+
+
+class DeviceListResponse(BaseModel):
+    id: str
+    status: str
+    created_at: datetime
+
+
+class DeviceListResultUpload(BaseModel):
+    devices: list[dict]
+    manager_name: str | None = None
+    can_edit_devices: bool | None = None
+    error: str | None = None
+
+
+class DeviceListItem(BaseModel):
+    name: str
+    domain: str
+    entity_id: str
+    is_controllable: bool = True
+    manufacturer: str | None = None
+    model: str | None = None
+    protocol: str | None = None
+    local_ip: str | None = None
+    mac_address: str | None = None
+    cloud_id: str | None = None
+    device_class: str | None = None
+    source: str = "direct"
+    area: str | None = None
+    state: str | None = None
+    already_registered: bool = False
+    existing_device_id: str | None = None
+    room_id: str | None = None
+    room_name: str | None = None
+
+
+class DeviceListPollResponse(BaseModel):
+    status: str
+    request_id: str
+    manager_name: str | None = None
+    can_edit_devices: bool | None = None
+    devices: list[DeviceListItem] | None = None
+    device_count: int | None = None
+    error_message: str | None = None
+
+
+@router.post(
+    "/nodes/{node_id}/device-list/request",
+    response_model=DeviceListResponse,
+    status_code=201,
+)
+def request_device_list(
+    node_id: str,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> DeviceListResponse:
+    """Request a full device list from a node.  Mobile calls this, CC notifies node via MQTT."""
+    node = db.query(Node).filter(Node.node_id == node_id).first()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    # Read the selected device manager from settings
+    from app.services.settings_service import get_settings_service
+
+    manager_name: str = get_settings_service().get("smart_home.device_manager", "jarvis_direct")
+
+    now = datetime.utcnow()
+    list_request = DeviceListRequest(
+        id=str(uuid4()),
+        node_id=node_id,
+        household_id=node.household_id or "",
+        status="pending",
+        manager_name=manager_name,
+        created_at=now,
+        expires_at=now + timedelta(minutes=2),
+    )
+    db.add(list_request)
+    db.commit()
+    db.refresh(list_request)
+
+    logger.info("Device list requested for node %s, request_id=%s, manager=%s", node_id, list_request.id[:8], manager_name)
+
+    _publish_device_list_mqtt(node_id, list_request.id, manager_name)
+
+    return DeviceListResponse(
+        id=list_request.id,
+        status=list_request.status,
+        created_at=list_request.created_at,
+    )
+
+
+@router.post("/nodes/{node_id}/device-list/{request_id}/results")
+def upload_device_list_results(
+    node_id: str,
+    request_id: str,
+    body: DeviceListResultUpload,
+    node_context=Depends(verify_api_key),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Node uploads device list results after running the selected device manager."""
+    list_request = db.query(DeviceListRequest).filter(
+        DeviceListRequest.id == request_id,
+        DeviceListRequest.node_id == node_id,
+    ).first()
+    if not list_request:
+        raise HTTPException(status_code=404, detail="Device list request not found")
+
+    now = datetime.utcnow()
+    if list_request.expires_at and list_request.expires_at < now:
+        list_request.status = "expired"
+        db.commit()
+        raise HTTPException(status_code=410, detail="Device list request expired")
+
+    if body.error:
+        list_request.status = "failed"
+        list_request.error_message = body.error
+    else:
+        list_request.status = "completed"
+        list_request.results_json = json.dumps(body.devices)
+        list_request.device_count = len(body.devices)
+
+    if body.manager_name:
+        list_request.manager_name = body.manager_name
+    if body.can_edit_devices is not None:
+        list_request.can_edit_devices = body.can_edit_devices
+
+    list_request.completed_at = now
+    db.commit()
+
+    logger.info(
+        "Device list results uploaded: request=%s status=%s devices=%d",
+        request_id[:8], list_request.status, len(body.devices),
+    )
+    return {"status": "ok"}
+
+
+@router.get(
+    "/nodes/{node_id}/device-list/{request_id}",
+    response_model=DeviceListPollResponse,
+)
+def poll_device_list(
+    node_id: str,
+    request_id: str,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> DeviceListPollResponse:
+    """Mobile polls for device list results.  CC enriches with room assignments."""
+    list_request = db.query(DeviceListRequest).filter(
+        DeviceListRequest.id == request_id,
+        DeviceListRequest.node_id == node_id,
+    ).first()
+    if not list_request:
+        raise HTTPException(status_code=404, detail="Device list request not found")
+
+    now = datetime.utcnow()
+
+    # Check expiration
+    if list_request.status == "pending" and list_request.expires_at and list_request.expires_at < now:
+        list_request.status = "expired"
+        db.commit()
+
+    if list_request.status == "expired":
+        raise HTTPException(status_code=410, detail="Device list request expired")
+
+    if list_request.status == "pending":
+        return DeviceListPollResponse(
+            status="pending",
+            request_id=request_id,
+            manager_name=list_request.manager_name,
+        )
+
+    if list_request.status == "failed":
+        return DeviceListPollResponse(
+            status="failed",
+            request_id=request_id,
+            manager_name=list_request.manager_name,
+            error_message=list_request.error_message,
+        )
+
+    # Completed — enrich with room assignments and already_registered flags
+    raw_devices: list[dict] = json.loads(list_request.results_json or "[]")
+    household_id: str = list_request.household_id
+
+    # Load existing devices for matching
+    existing_devices = db.query(Device).filter(
+        Device.household_id == household_id,
+        Device.is_active.is_(True),
+    ).all()
+
+    existing_entity_ids = {d.entity_id: d for d in existing_devices}
+    existing_cloud_ids = {d.cloud_id: d for d in existing_devices if d.cloud_id}
+    existing_macs = {d.mac_address.lower(): d for d in existing_devices if d.mac_address}
+
+    # Load rooms for enrichment
+    rooms = db.query(Room).filter(Room.household_id == household_id).all()
+    room_by_id = {r.id: r for r in rooms}
+    # Build device_id → room mapping
+    device_room_map: dict[str, Room] = {}
+    for d in existing_devices:
+        if d.room_id and d.room_id in room_by_id:
+            device_room_map[d.id] = room_by_id[d.room_id]
+
+    enriched: list[DeviceListItem] = []
+    for dev in raw_devices:
+        entity_id: str = dev.get("entity_id", "")
+        cloud_id: str | None = dev.get("cloud_id")
+        mac: str = dev.get("mac_address") or ""
+
+        already_registered = False
+        existing_device_id: str | None = None
+        room_id: str | None = None
+        room_name: str | None = None
+
+        # Match against existing devices
+        matched_device: Device | None = None
+        if entity_id in existing_entity_ids:
+            matched_device = existing_entity_ids[entity_id]
+        elif cloud_id and cloud_id in existing_cloud_ids:
+            matched_device = existing_cloud_ids[cloud_id]
+        elif mac and mac.lower() in existing_macs:
+            matched_device = existing_macs[mac.lower()]
+
+        if matched_device:
+            already_registered = True
+            existing_device_id = matched_device.id
+            if matched_device.id in device_room_map:
+                room_obj = device_room_map[matched_device.id]
+                room_id = room_obj.id
+                room_name = room_obj.name
+
+        enriched.append(DeviceListItem(
+            name=dev.get("name", "Unknown"),
+            domain=dev.get("domain", "unknown"),
+            entity_id=entity_id,
+            is_controllable=dev.get("is_controllable", True),
+            manufacturer=dev.get("manufacturer"),
+            model=dev.get("model"),
+            protocol=dev.get("protocol"),
+            local_ip=dev.get("local_ip"),
+            mac_address=dev.get("mac_address"),
+            cloud_id=cloud_id,
+            device_class=dev.get("device_class"),
+            source=dev.get("source", "direct"),
+            area=dev.get("area"),
+            state=dev.get("state"),
+            already_registered=already_registered,
+            existing_device_id=existing_device_id,
+            room_id=room_id,
+            room_name=room_name,
+        ))
+
+    return DeviceListPollResponse(
+        status="completed",
+        request_id=request_id,
+        manager_name=list_request.manager_name,
+        can_edit_devices=list_request.can_edit_devices,
+        devices=enriched,
+        device_count=len(enriched),
+    )
+
+
+def _publish_device_list_mqtt(node_id: str, request_id: str, manager_name: str) -> None:
+    """Publish MQTT message to tell node to collect a device list."""
+    from app.node_settings import get_mqtt_client
+
+    client = get_mqtt_client()
+    if client is None:
+        logger.warning("MQTT not available, node %s cannot receive device list request", node_id)
+        return
+
+    topic = f"jarvis/nodes/{node_id}/device-list"
+    payload = json.dumps({"request_id": request_id, "manager_name": manager_name})
+
+    try:
+        client.publish(topic, payload)
+        logger.info("Published device list request to %s", topic)
+    except Exception as e:
+        logger.error("Failed to publish device list MQTT: %s", e)
 
 
 # =============================================================================

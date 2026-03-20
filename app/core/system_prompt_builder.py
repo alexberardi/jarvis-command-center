@@ -97,6 +97,7 @@ def build_tool_system_message(
     room = node_context.get("room", "unknown")
     speaker_name = node_context.get("speaker_name") or node_context.get("user", "default")
     voice_mode = node_context.get("voice_mode", "brief")
+    rich_response = node_context.get("rich_response", False)
     user_memories = node_context.get("user_memories", "")
 
     # Build memory block if memories exist
@@ -144,7 +145,7 @@ You MUST respond with valid JSON only. No comments, no explanations, no markdown
 
 When calling a tool (ONE at a time):
 {{
-  "message": "Brief acknowledgment",
+  "message": "Brief, natural acknowledgment of what you're about to do (REQUIRED, never empty)",
   "tool_call": {{"name": "tool_name", "arguments": {{"param_name": "param_value"}}, "failure_message": "brief spoken response if this fails"}}{reason_suffix_block}
 }}
 
@@ -160,7 +161,8 @@ Available Tools:
 Key Guidelines:
 - Extract parameters directly from user's message when they are clearly stated. If the user says "Seattle", extract "Seattle" as the city parameter - do not ask for validation when the information is already provided.
 - Only ask for validation if a required parameter is truly missing or genuinely ambiguous after trying all other options.
-- Be conversational and {voice_mode}"""
+- Be conversational and {voice_mode}
+{"- The user is on a mobile app that supports rich text. Use markdown formatting (bold, lists, headers) when it improves readability." if rich_response else "- Keep responses brief and spoken-friendly (no markdown)."}"""
     else:
         system_msg = f"""You are Jarvis. Always call tools; respond with VALID JSON only.
 
@@ -171,9 +173,10 @@ Rules:
 - Relative dates are resolved automatically; use natural terms like 'tomorrow' or 'next_week' in date parameters.
 - Ask for validation only if required params are missing/ambiguous.
 {"- You may include an optional 'reason' field explaining tool/parameter choices." if include_reason else ""}
+{"- User is on mobile app. Use markdown (bold, lists, headers) in message values when helpful." if rich_response else ""}
 
 Format:
-- Tool call: {{"message":"brief ack","tool_call":{{"name":"tool_name","arguments":{{...}},"failure_message":"brief spoken response if this fails"}}{reason_suffix_inline}}}
+- Tool call: {{"message":"brief natural ack of what you're doing (REQUIRED, never empty)","tool_call":{{"name":"tool_name","arguments":{{...}},"failure_message":"brief spoken response if this fails"}}{reason_suffix_inline}}}
 - Final: {{"message":"concise reply","tool_call":null{reason_suffix_inline}}}
 
 Tools:

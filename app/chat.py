@@ -19,7 +19,7 @@ async def passthrough_chat(request: ChatCompletionRequest):
     llm_client = LLMProxyClient()
     
     try:
-        result = await llm_client.passthrough_chat(request.dict(), "/chat")
+        result = await llm_client.passthrough_chat(request.dict())
         return JSONResponse(status_code=result["status_code"], content=result["content"])
     except Exception as e:
         logger.error(f"[passthrough /chat] error: {e}")
@@ -31,7 +31,7 @@ async def passthrough_lightweight_chat(request: ChatCompletionRequest):
     llm_client = LLMProxyClient()
     
     try:
-        result = await llm_client.passthrough_chat(request.dict(), "/lightweight/chat")
+        result = await llm_client.passthrough_chat(request.dict())
         return JSONResponse(status_code=result["status_code"], content=result["content"])
     except Exception as e:
         logger.error(f"[passthrough /lightweight/chat] error: {e}")

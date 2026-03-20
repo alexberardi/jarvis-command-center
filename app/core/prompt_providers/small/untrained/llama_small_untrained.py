@@ -74,7 +74,7 @@ Rules:
 {direct_answer_section}
 
 Response format: JSON ONLY (no extra text).
-- Tool call: {{"message":"brief ack","tool_calls":[{{"name":"<tool>","arguments":{{...}}}}],"error":null}}
+- Tool call: {{"message":"brief natural ack of what you're doing (REQUIRED, never empty)","tool_calls":[{{"name":"<tool>","arguments":{{...}}}}],"error":null}}
 - Final: {{"message":"<concise spoken reply>","tool_calls":[],"error":null}}
 
 Tools:

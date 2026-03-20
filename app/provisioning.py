@@ -215,6 +215,7 @@ def register_node(
         room=room,
         user="default",
         voice_mode="brief",
+        household_id=token_record.household_id,
     )
     db.add(db_node)
 
