@@ -198,6 +198,13 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         default="",
         description="Node that handles device management (discovery, listing) for the household",
     ),
+    SettingDefinition(
+        key="smart_home.use_external_devices",
+        category="smart_home",
+        value_type="bool",
+        default=False,
+        description="Show devices from the node's device manager instead of the CC database",
+    ),
 
     # Admin settings
     SettingDefinition(
