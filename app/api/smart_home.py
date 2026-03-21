@@ -30,11 +30,13 @@ logger = logging.getLogger("uvicorn")
 class SmartHomeConfigResponse(BaseModel):
     device_manager: str
     primary_node_id: str
+    use_external_devices: bool
 
 
 class SmartHomeConfigUpdate(BaseModel):
     device_manager: str | None = None
     primary_node_id: str | None = None
+    use_external_devices: bool | None = None
 
 
 class NodeOption(BaseModel):
@@ -47,6 +49,7 @@ class NodeOption(BaseModel):
 class SmartHomeConfigWithNodes(BaseModel):
     device_manager: str
     primary_node_id: str
+    use_external_devices: bool
     nodes: list[NodeOption]
 
 
@@ -65,6 +68,7 @@ def get_smart_home_config(
     settings = get_settings_service()
     device_manager: str = settings.get("smart_home.device_manager", household_id=household_id) or "jarvis_direct"
     primary_node_id: str = settings.get("smart_home.primary_node_id", household_id=household_id) or ""
+    use_external_devices: bool = settings.get("smart_home.use_external_devices", household_id=household_id) or False
 
     # Get all nodes in this household for the dropdown
     nodes = db.query(Node).filter(Node.household_id == household_id).all()
@@ -76,6 +80,7 @@ def get_smart_home_config(
     return SmartHomeConfigWithNodes(
         device_manager=device_manager,
         primary_node_id=primary_node_id,
+        use_external_devices=use_external_devices,
         nodes=node_options,
     )
 
@@ -109,13 +114,18 @@ def update_smart_home_config(
                 raise HTTPException(status_code=400, detail="Node not in this household")
         settings.set("smart_home.primary_node_id", body.primary_node_id, household_id=household_id)
 
+    if body.use_external_devices is not None:
+        settings.set("smart_home.use_external_devices", body.use_external_devices, household_id=household_id)
+
     # Return current values
     device_manager: str = settings.get("smart_home.device_manager", household_id=household_id) or "jarvis_direct"
     primary_node_id: str = settings.get("smart_home.primary_node_id", household_id=household_id) or ""
+    use_external_devices: bool = settings.get("smart_home.use_external_devices", household_id=household_id) or False
 
     return SmartHomeConfigResponse(
         device_manager=device_manager,
         primary_node_id=primary_node_id,
+        use_external_devices=use_external_devices,
     )
 
 
@@ -332,24 +342,31 @@ _DOMAIN_ACTIONS: dict[str, list[dict[str, str]]] = {
 }
 
 
-def _get_device_actions(dev: "Device") -> list[JarvisButtonResponse] | None:
-    """Resolve supported actions for a device based on protocol or domain."""
-    if not dev.is_controllable:
+def _get_actions_for_raw(
+    domain: str, protocol: str | None, is_controllable: bool,
+) -> list[JarvisButtonResponse] | None:
+    """Resolve supported actions based on protocol or domain (no DB model needed)."""
+    if not is_controllable:
         return None
 
     # Protocol-specific actions take priority
-    if dev.protocol and dev.protocol in _PROTOCOL_ACTIONS:
-        return [JarvisButtonResponse(**a) for a in _PROTOCOL_ACTIONS[dev.protocol]]
+    if protocol and protocol in _PROTOCOL_ACTIONS:
+        return [JarvisButtonResponse(**a) for a in _PROTOCOL_ACTIONS[protocol]]
 
     # Fall back to domain-based actions
-    if dev.domain in _DOMAIN_ACTIONS:
-        return [JarvisButtonResponse(**a) for a in _DOMAIN_ACTIONS[dev.domain]]
+    if domain in _DOMAIN_ACTIONS:
+        return [JarvisButtonResponse(**a) for a in _DOMAIN_ACTIONS[domain]]
 
     # Generic fallback for controllable devices
     return [
         JarvisButtonResponse(button_text="Turn On", button_action="turn_on", button_type="primary", button_icon="power"),
         JarvisButtonResponse(button_text="Turn Off", button_action="turn_off", button_type="secondary", button_icon="power-off"),
     ]
+
+
+def _get_device_actions(dev: "Device") -> list[JarvisButtonResponse] | None:
+    """Resolve supported actions for a DB device."""
+    return _get_actions_for_raw(dev.domain, dev.protocol, dev.is_controllable)
 
 
 # =============================================================================
@@ -896,6 +913,118 @@ def post_device_control_result(
 
 
 # =============================================================================
+# External Device Control (non-persisted devices via MQTT)
+# =============================================================================
+
+
+class ExternalDeviceControlRequest(BaseModel):
+    entity_id: str
+    action: str
+    source: str = "direct"
+    protocol: str | None = None
+    cloud_id: str | None = None
+    model: str | None = None
+    local_ip: str | None = None
+    mac_address: str | None = None
+    data: dict | None = None
+
+
+@router.post(
+    "/households/{household_id}/devices/control-external",
+    response_model=DeviceControlResponse,
+)
+def control_external_device(
+    household_id: str,
+    body: ExternalDeviceControlRequest,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> DeviceControlResponse:
+    """Control a non-persisted (external) device via a node.
+
+    Same MQTT flow as control_device but skips the DB device lookup.
+    Uses the primary_node_id from settings, falling back to any household node.
+    """
+    import time
+
+    from app.services.settings_service import get_settings_service
+
+    settings = get_settings_service()
+    primary_node_id: str = settings.get("smart_home.primary_node_id", household_id=household_id) or ""
+
+    # Find node: prefer primary, fall back to any household node
+    node = None
+    if primary_node_id:
+        node = db.query(Node).filter(
+            Node.node_id == primary_node_id, Node.household_id == household_id,
+        ).first()
+    if not node:
+        nodes = db.query(Node).filter(Node.household_id == household_id).all()
+        node = nodes[-1] if nodes else None
+    if not node:
+        raise HTTPException(status_code=400, detail="No node available in household")
+
+    from app.node_settings import get_mqtt_client
+    from app.services.node_command_service import get_node_command_service
+
+    mqtt = get_mqtt_client()
+    if mqtt is None:
+        raise HTTPException(status_code=503, detail="MQTT not available")
+
+    request_id = str(uuid4())
+    result_file = _os.path.join(_RESULT_DIR, f"{request_id}.json")
+
+    service = get_node_command_service()
+    details = {
+        "command_name": "control_device",
+        "action_name": body.action,
+        "context": {
+            "entity_id": body.entity_id,
+            "protocol": body.protocol,
+            "cloud_id": body.cloud_id,
+            "model": body.model,
+            "local_ip": body.local_ip,
+            "mac_address": body.mac_address,
+            "source": body.source,
+            **(body.data or {}),
+        },
+        "trusted": True,
+        "reply_request_id": request_id,
+    }
+    service.publish_command_with_id(node.node_id, "action", details, request_id)
+
+    # Poll for result file (node writes it via POST callback)
+    deadline = time.time() + 10.0
+    result = None
+    while time.time() < deadline:
+        if _os.path.exists(result_file):
+            try:
+                with open(result_file) as f:
+                    result = json.load(f)
+                _os.unlink(result_file)
+                break
+            except (json.JSONDecodeError, OSError):
+                pass
+        time.sleep(0.1)
+
+    if result is None:
+        try:
+            _os.unlink(result_file)
+        except OSError:
+            pass
+        return DeviceControlResponse(
+            success=False, entity_id=body.entity_id, action=body.action,
+            error="Timed out waiting for node response",
+        )
+
+    return DeviceControlResponse(
+        success=result.get("success", False),
+        entity_id=body.entity_id,
+        action=body.action,
+        error=result.get("error"),
+    )
+
+
+# =============================================================================
 # Device State Endpoint (mobile -> CC -> MQTT -> node -> CC -> mobile)
 # =============================================================================
 
@@ -1286,6 +1415,7 @@ class DeviceListItem(BaseModel):
     existing_device_id: str | None = None
     room_id: str | None = None
     room_name: str | None = None
+    supported_actions: list[JarvisButtonResponse] | None = None
 
 
 class DeviceListPollResponse(BaseModel):
@@ -1313,10 +1443,8 @@ def request_device_list(
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
 
-    # Read the selected device manager from settings
-    from app.services.settings_service import get_settings_service
-
-    manager_name: str = get_settings_service().get("smart_home.device_manager", "jarvis_direct")
+    # Aggregate devices from all enabled managers on the node
+    manager_name = "all"
 
     now = datetime.utcnow()
     list_request = DeviceListRequest(
@@ -1482,14 +1610,18 @@ def poll_device_list(
                 room_id = room_obj.id
                 room_name = room_obj.name
 
+        dev_domain = dev.get("domain", "unknown")
+        dev_protocol = dev.get("protocol")
+        dev_controllable = dev.get("is_controllable", True)
+
         enriched.append(DeviceListItem(
             name=dev.get("name", "Unknown"),
-            domain=dev.get("domain", "unknown"),
+            domain=dev_domain,
             entity_id=entity_id,
-            is_controllable=dev.get("is_controllable", True),
+            is_controllable=dev_controllable,
             manufacturer=dev.get("manufacturer"),
             model=dev.get("model"),
-            protocol=dev.get("protocol"),
+            protocol=dev_protocol,
             local_ip=dev.get("local_ip"),
             mac_address=dev.get("mac_address"),
             cloud_id=cloud_id,
@@ -1501,6 +1633,7 @@ def poll_device_list(
             existing_device_id=existing_device_id,
             room_id=room_id,
             room_name=room_name,
+            supported_actions=_get_actions_for_raw(dev_domain, dev_protocol, dev_controllable),
         ))
 
     return DeviceListPollResponse(
