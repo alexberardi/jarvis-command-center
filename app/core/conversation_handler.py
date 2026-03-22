@@ -147,7 +147,7 @@ class ConversationHandler:
             # Only tools that are simple CRUD / one-shot operations belong
             # here.  Avoid tools that trigger follow-up LLM calls or loops
             # (e.g. get_command_utterance_examples, request_validation).
-            _safe_tool_names: list[str] = ["answer_question", "deep_research"]
+            _safe_tool_names: list[str] = ["answer_question", "deep_research", "quick_search"]
             # Only include tools that require speaker identification when
             # a speaker has actually been identified for this conversation.
             _has_speaker = bool(
@@ -362,6 +362,16 @@ class ConversationHandler:
             messages.append({
                 "role": "system",
                 "content": f"Router hint: likely tool is '{hint_tool}'. Use it if it matches intent; otherwise choose the best tool."
+            })
+
+        # Pre-execute quick_search for search-intent utterances so the LLM
+        # gets web results in context without needing to call the tool itself.
+        # Smaller models (e.g. Qwen 14B) don't reliably call tools on their own.
+        search_results = await self._maybe_quick_search(voice_command)
+        if search_results:
+            messages.append({
+                "role": "system",
+                "content": search_results,
             })
 
         # Add user message (with optional provider suffix, e.g. /nothink for Qwen3)
@@ -947,6 +957,58 @@ class ConversationHandler:
                 )
 
         return pruned_tools
+
+    # Keyword patterns that indicate the user wants real-time web info.
+    _SEARCH_PATTERNS: list[re.Pattern[str]] = [
+        re.compile(r"\b(search|look up|google|find out|search for)\b", re.I),
+        re.compile(r"\b(latest|current|recent|today'?s|right now|happening)\b", re.I),
+        re.compile(r"\bwho is the (current|new|present)\b", re.I),
+        re.compile(r"\bwho (is|are|was) (president|ceo|prime minister|leader|king|queen|governor|mayor)\b", re.I),
+        re.compile(r"\b(stock price|share price|market cap)\b", re.I),
+        re.compile(r"\bhow much (is|does|are|do)\b.*\b(cost|worth)\b", re.I),
+        re.compile(r"\bwhat('?s| is) (new|happening|going on)\b", re.I),
+        re.compile(r"\b(did .+ win|who won|final score)\b", re.I),
+    ]
+
+    async def _maybe_quick_search(self, utterance: str) -> str | None:
+        """Run quick_search if the utterance matches search-intent keywords.
+
+        Returns formatted search results as a system message string, or None
+        if no search was triggered.
+        """
+        if not any(p.search(utterance) for p in self._SEARCH_PATTERNS):
+            return None
+
+        tool = tool_registry.get_tool("quick_search")
+        if not tool:
+            return None
+
+        logger.info("🔍 Keyword-triggered quick_search for: %r", utterance)
+        result = tool.execute(query=utterance)
+
+        if "error" in result:
+            logger.warning("Quick search failed: %s", result.get("message"))
+            return None
+
+        sources = result.get("sources", [])
+        if not sources:
+            return None
+
+        parts = [f"[Web search results for: {utterance}]"]
+        for i, src in enumerate(sources, 1):
+            title = src.get("title", f"Source {i}")
+            url = src.get("url", "")
+            content = src.get("content", "")[:3000]
+            parts.append(f"\n## Source {i}: {title}\nURL: {url}\n{content}")
+        parts.append(
+            "\nUse these web sources to answer the user's question. "
+            "Cite sources when relevant."
+        )
+
+        elapsed = result.get("elapsed_seconds", "?")
+        logger.info("Quick search completed in %ss, %d sources", elapsed, len(sources))
+
+        return "\n".join(parts)
 
     def _rebuild_system_prompt_for_pruned_tools(
         self,
