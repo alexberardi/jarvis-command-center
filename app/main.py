@@ -268,6 +268,10 @@ app.include_router(test_commands.router, prefix="/api/v0", tags=["testing"])
 from app.api import package_install
 app.include_router(package_install.router, prefix="/api/v0", tags=["package-install"])
 
+# Include test install router (Forge share code → node test install)
+from app.api import test_install
+app.include_router(test_install.router, prefix="/api/v0", tags=["test-install"])
+
 # Include memory CRUD router
 from app.api import memories
 app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
@@ -280,11 +284,12 @@ app.include_router(oauth.router, prefix="/api/v0", tags=["oauth"])
 from app.api import agents
 app.include_router(agents.router, prefix="/api/v0", tags=["agents"])
 
-# Include mobile chat, audio, and node tools endpoints (JWT auth)
-from app.api import mobile_chat, mobile_audio, node_tools
+# Include mobile chat, audio, node tools, and routine builder endpoints (JWT auth)
+from app.api import mobile_chat, mobile_audio, node_tools, routine_builder
 app.include_router(mobile_chat.router, prefix="/api/v0/mobile", tags=["mobile-chat"])
 app.include_router(mobile_audio.router, prefix="/api/v0/mobile", tags=["mobile-audio"])
 app.include_router(node_tools.router, prefix="/api/v0/mobile", tags=["node-tools"])
+app.include_router(routine_builder.router, prefix="/api/v0/mobile/routines", tags=["routine-builder"])
 
 # Settings router is included in startup_event after service_config is initialized
 
