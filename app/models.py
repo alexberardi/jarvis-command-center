@@ -370,6 +370,33 @@ class PackageInstallRequest(Base):
     node = relationship("Node", backref=backref("package_install_requests", passive_deletes=True), passive_deletes=True)
 
 
+class TestInstallRequest(Base):
+    """Test install request: mobile -> CC -> MQTT nudge -> node verifies -> downloads from Pantry.
+
+    Lifecycle:
+    1. Mobile POSTs share_code + node_id (status=pending, expires_at=now+5min)
+    2. CC publishes MQTT with just request_id (lightweight nudge)
+    3. Node verifies with CC, gets Pantry download URL, installs to test_commands/
+    4. Node POSTs result back, mobile polls for status
+    """
+    __tablename__ = 'test_install_requests'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    household_id = Column(String(255), nullable=False, index=True)
+    share_code = Column(String(6), nullable=False)
+    package_name = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False, default="pending")  # pending, completed, failed, expired
+    results_json = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    node = relationship("Node", backref=backref("test_install_requests", passive_deletes=True), passive_deletes=True)
+
+
 class ProvisioningToken(Base):
     """Short-lived token for node self-registration.
 
