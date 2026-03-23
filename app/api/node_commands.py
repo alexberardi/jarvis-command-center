@@ -132,3 +132,53 @@ def verify_command(
     service = get_node_command_service()
     valid = service.verify_command(request_id, node_context.node.node_id)
     return VerifyResponse(valid=valid)
+
+
+# ── Node Push Notification ────────────────────────────────────────────
+
+
+class PushNotificationRequest(BaseModel):
+    title: str
+    body: str
+    priority: str = "default"
+    category: str = "alert"
+
+
+class PushNotificationResponse(BaseModel):
+    sent: bool
+    inbox_item_id: str | None = None
+
+
+@router.post(
+    "/node/push-notification",
+    response_model=PushNotificationResponse,
+)
+async def node_push_notification(
+    request: PushNotificationRequest,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+) -> PushNotificationResponse:
+    """Push a notification from a node to the household's mobile devices.
+
+    Used by agents (e.g., reminder_agent) to send push notifications
+    when a setting like REMINDER_PUSH_NOTIFICATIONS is enabled.
+    """
+    from app.services.inbox_notification_service import push_confirmation_to_inbox
+
+    household_id = node_context.node.household_id
+    node_id = node_context.node.node_id
+
+    inbox_item_id = await push_confirmation_to_inbox(
+        household_id=household_id,
+        user_id=None,  # Broadcast to household
+        node_id=node_id,
+        title=request.title,
+        summary=request.body,
+        body=request.body,
+        command_name="reminder",
+        actions=[],  # No actions — informational only
+    )
+
+    return PushNotificationResponse(
+        sent=inbox_item_id is not None,
+        inbox_item_id=inbox_item_id,
+    )
