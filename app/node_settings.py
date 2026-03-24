@@ -379,3 +379,49 @@ def get_settings_result(
             "created_at": snapshot.created_at.isoformat(),
         },
     }
+
+
+# =============================================================================
+# K2 Provisioning via MQTT
+# =============================================================================
+
+
+class K2ProvisionRequest(BaseModel):
+    k2: str
+    kid: str
+    created_at: str
+
+
+@router.post("/nodes/{node_id}/k2")
+def provision_k2(
+    node_id: str,
+    body: K2ProvisionRequest,
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+    db: Session = Depends(get_db),
+):
+    """Relay K2 encryption key to a node via MQTT.
+
+    Used by the mobile app to provision K2 for Docker/headless nodes
+    that aren't reachable via direct AP connection.
+    """
+    node = db.query(Node).filter(Node.node_id == node_id).first()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    if node.household_id:
+        verify_household_role(user.user_id, node.household_id, required_role="member")
+
+    client = get_mqtt_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="MQTT not available")
+
+    topic = f"jarvis/nodes/{node_id}/k2/provision"
+    payload = json.dumps({
+        "k2": body.k2,
+        "kid": body.kid,
+        "created_at": body.created_at,
+    })
+    client.publish(topic, payload)
+
+    logger.info("K2 provisioned to node %s via MQTT (kid=%s)", node_id, body.kid)
+    return {"ok": True, "node_id": node_id, "kid": body.kid}
