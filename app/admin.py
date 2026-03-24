@@ -223,6 +223,17 @@ def list_nodes(household_id: str | None = None, db: Session = Depends(get_db)):
     return results
 
 
+@router.get("/nodes/{node_id}", response_model=NodeResponse)
+def get_node(node_id: str, db: Session = Depends(get_db)):
+    """Get a single node by ID."""
+    node = db.query(Node).filter(Node.node_id == node_id).first()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+    resp = NodeResponse.model_validate(node)
+    resp.online = node.is_online()
+    return resp
+
+
 @router.post("/nodes/heartbeat")
 def node_heartbeat(
     node_context: NodeContextProvider = Depends(verify_api_key),
