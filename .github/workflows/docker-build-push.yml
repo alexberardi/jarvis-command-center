@@ -65,7 +65,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             # Tag as 'dev' on push to main
-            type=raw,value=dev,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
             # Tag with version on tag push (e.g., v1.0.0 -> 1.0.0)
             type=semver,pattern={{version}}
             # Tag with major.minor on tag push (e.g., v1.0.0 -> 1.0)
