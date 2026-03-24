@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Central voice command API for the Jarvis ecosystem"
 requires-python = ">=3.11"
 dependencies = [
+    "jarvis-config-client @ git+https://github.com/alexberardi/jarvis-config-client.git@main",
+    "jarvis-log-client @ git+https://github.com/alexberardi/jarvis-log-client.git@main",
     "fastapi",
     "uvicorn",
     "python-multipart",
