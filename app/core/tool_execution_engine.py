@@ -39,14 +39,6 @@ from app.core.usage_logging import (
     write_prompt_response_log,
 )
 from app.core.general_context import generate_date_context_object
-from app.core.ha_entity_resolver import (
-    _needs_resolution,
-    _build_device_catalog,
-    resolve_ha_control,
-    resolve_ha_status,
-    normalize_ha_action,
-    get_ha_tool_redirect,
-)
 from app.core.param_refinement import refine_params
 from app.core.tools.resolve_relative_date_tool import ResolveRelativeDateTool
 
@@ -97,145 +89,6 @@ def _normalize_native_tool_calls(raw_calls: List[Dict[str, Any]]) -> List[Dict[s
             },
         })
     return normalized
-
-
-def _normalize_ha_calls(client_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Normalize HA tool calls: redirect hallucinated names and fix short actions.
-
-    Runs synchronously before param validation so corrected actions don't
-    trigger unnecessary retry loops.
-    """
-    for i, call in enumerate(client_calls):
-        tool_name = call.get("function", {}).get("name", "")
-
-        # Redirect hallucinated HA-like tool names to control_device
-        redirect = get_ha_tool_redirect(tool_name)
-        if redirect:
-            logger.info(
-                "🏠 HA normalize: redirecting '%s' → control_device", tool_name,
-            )
-            args_raw = call["function"].get("arguments", "{}")
-            try:
-                args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
-            except (json.JSONDecodeError, ValueError, TypeError):
-                args = {}
-            for key, val in redirect.items():
-                if key not in args or not args[key]:
-                    args[key] = val
-            client_calls[i]["function"]["name"] = "control_device"
-            client_calls[i]["function"]["arguments"] = json.dumps(args)
-            tool_name = "control_device"
-
-        # Normalize short action names for control_device
-        if tool_name == "control_device":
-            args_raw = call["function"].get("arguments", "{}")
-            try:
-                args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
-            except (json.JSONDecodeError, ValueError, TypeError):
-                continue
-            action = args.get("action")
-            normalized = normalize_ha_action(action)
-            if normalized != action:
-                logger.info(
-                    "🏠 HA normalize: action '%s' → '%s'", action, normalized,
-                )
-                args["action"] = normalized
-                client_calls[i]["function"]["arguments"] = json.dumps(args)
-
-    return client_calls
-
-
-async def _resolve_ha_client_calls(
-    client_calls: List[Dict[str, Any]],
-    conversation_id: str,
-    user_utterance: str,
-    llm_client: Any,
-) -> List[Dict[str, Any]]:
-    """Resolve HA entity IDs in client tool calls via a secondary LLM call.
-
-    Inspects control_device and get_device_status calls.  If the entity_id
-    looks invalid (placeholder, spaces, missing dot, etc.), performs a
-    focused LLM call with the device catalog to resolve the correct value.
-
-    On any failure the original call is returned unchanged so the node can
-    attempt its own fallback resolution.
-    """
-    _HA_TOOLS = {"control_device", "get_device_status"}
-
-    # Find HA tool calls that need entity_id resolution
-    ha_indices: List[int] = []
-    for i, call in enumerate(client_calls):
-        tool_name = call.get("function", {}).get("name", "")
-        if tool_name in _HA_TOOLS:
-            ha_indices.append(i)
-    if not ha_indices:
-        return client_calls
-
-    # Get HA data from node context
-    try:
-        node_context = conversation_cache.get_node_context(conversation_id) or {}
-        ha_data: Dict[str, Any] = node_context.get("agents", {}).get("home_assistant", {})
-        if not ha_data:
-            logger.debug("🏠 HA resolver: no HA data in node context, skipping")
-            return client_calls
-    except Exception as e:
-        logger.warning("🏠 HA resolver: failed to get node context: %s", e)
-        return client_calls
-
-    # Build catalog of known entity IDs for existence checks
-    catalog = _build_device_catalog(ha_data)
-    catalog_ids: set[str] = {d["entity_id"] for d in catalog}
-
-    for idx in ha_indices:
-        call = client_calls[idx]
-        tool_name: str = call["function"]["name"]
-        args_raw = call["function"].get("arguments", "{}")
-        try:
-            args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
-        except (json.JSONDecodeError, ValueError, TypeError):
-            args = {}
-
-        entity_id = args.get("entity_id")
-        needs_resolve = _needs_resolution(entity_id)
-        # Also resolve if entity_id looks syntactically valid but doesn't exist
-        if not needs_resolve and catalog_ids and entity_id not in catalog_ids:
-            needs_resolve = True
-            logger.info(
-                "🏠 HA resolver: entity_id '%s' not in catalog (%d devices), resolving",
-                entity_id, len(catalog_ids),
-            )
-        if not needs_resolve:
-            logger.debug("🏠 HA resolver: entity_id '%s' looks valid, skipping", entity_id)
-            continue
-
-        logger.info(
-            "🏠 HA resolver: entity_id '%s' needs resolution for %s",
-            entity_id, tool_name,
-        )
-
-        try:
-            if tool_name == "control_device":
-                resolved = await resolve_ha_control(user_utterance, ha_data, llm_client)
-            else:
-                resolved = await resolve_ha_status(user_utterance, ha_data, llm_client)
-
-            if resolved:
-                args["entity_id"] = resolved["entity_id"]
-                if "action" in resolved and tool_name == "control_device":
-                    args["action"] = resolved["action"]
-                if "value" in resolved:
-                    args["value"] = resolved["value"]
-                client_calls[idx]["function"]["arguments"] = json.dumps(args)
-                logger.info(
-                    "🏠 HA resolver: updated %s → entity_id=%s",
-                    tool_name, resolved["entity_id"],
-                )
-            else:
-                logger.warning("🏠 HA resolver: could not resolve, forwarding original call")
-        except Exception as e:
-            logger.error("🏠 HA resolver: error resolving %s: %s", tool_name, e)
-
-    return client_calls
 
 
 class ToolExecutionEngine:
@@ -905,9 +758,6 @@ class ToolExecutionEngine:
 
                 # Return client tool calls
                 if client_calls:
-                    # Normalize HA tool names and actions before validation
-                    client_calls = _normalize_ha_calls(client_calls)
-
                     # Refine params for commands with refinable parameters
                     # (only when compressed provider is active — gated on force_tools)
                     force_tools = conversation_cache.get_force_tool_calls(conversation_id)
@@ -931,12 +781,6 @@ class ToolExecutionEngine:
                             messages.append({"role": "system", "content": retry_message})
                             logger.info("Invalid parameter guard triggered; retrying tool call formatting")
                             continue
-
-                    # Resolve HA entity IDs via secondary LLM call if needed
-                    if user_utterance:
-                        client_calls = await _resolve_ha_client_calls(
-                            client_calls, conversation_id, user_utterance, self.llm_client
-                        )
 
                     logger.info(f"Returning {len(client_calls)} client tool calls (no server tools to wait for)")
                     _log_usage(iteration + 1, "tool_calls")
