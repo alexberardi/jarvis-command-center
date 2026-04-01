@@ -212,6 +212,7 @@ async def _wait_for_result_file(request_id: str, timeout: float = 10.0) -> dict[
 
 async def _route_tool_call_to_node(
     node_id: str, tool_call: dict[str, Any],
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     """Route a single tool call to a node via MQTT and wait for the result."""
     from app.services.node_command_service import get_node_command_service
@@ -222,13 +223,15 @@ async def _route_tool_call_to_node(
     request_id = str(uuid4())
     os.makedirs(_RESULT_DIR, exist_ok=True)
 
-    details = {
+    details: dict[str, Any] = {
         "command_name": func.get("name"),
         "arguments": func.get("arguments", {}),
         "tool_call_id": tool_call_id,
         "reply_request_id": request_id,
         "trusted": True,
     }
+    if user_id is not None:
+        details["user_id"] = user_id
 
     service = get_node_command_service()
     service.publish_command_with_id(node_id, "tool_call", details, request_id)
@@ -342,7 +345,7 @@ async def _chat_stream(
 
                 tool_results: list[dict[str, Any]] = []
                 for tc in tool_calls:
-                    tc_result = await _route_tool_call_to_node(node.node_id, tc)
+                    tc_result = await _route_tool_call_to_node(node.node_id, tc, user_id=user.user_id)
                     tool_results.append(tc_result)
 
                     # Extract actions from tool output
