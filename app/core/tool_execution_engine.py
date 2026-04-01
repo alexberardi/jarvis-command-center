@@ -465,13 +465,25 @@ class ToolExecutionEngine:
                     existing = args_obj.get(param_name)
                     is_array = is_datetime_array(param_schema)
 
-                    # Case 1: Empty - inject resolved_dates
+                    # Case 1: Empty - inject resolved_dates (default to today if none)
                     if existing in (None, [], ""):
-                        if resolved_dates:
+                        dates_to_inject = resolved_dates
+                        if not dates_to_inject:
+                            # No date keys from LLM — default to today
+                            if date_context is None:
+                                date_context = generate_date_context_object(timezone_str)
+                                flat_context = flatten_date_context(date_context)
+                            today_val = flat_context.get("today")
+                            if isinstance(today_val, str):
+                                dates_to_inject = [today_val]
+                            elif isinstance(today_val, list):
+                                dates_to_inject = [v for v in today_val if isinstance(v, str)]
+                            logger.info("No date keys from LLM, defaulting to today: %s", dates_to_inject)
+                        if dates_to_inject:
                             if is_array:
-                                args_obj[param_name] = resolved_dates
+                                args_obj[param_name] = dates_to_inject
                             else:
-                                args_obj[param_name] = resolved_dates[0]
+                                args_obj[param_name] = dates_to_inject[0]
                             mutated = True
                         continue
 
