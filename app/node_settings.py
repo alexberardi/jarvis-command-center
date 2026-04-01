@@ -141,6 +141,7 @@ def _check_request_expired(request: SettingsRequest) -> bool:
 
 def _publish_settings_request_mqtt(
     node_id: str, request_id: str, include_values: bool = False,
+    user_id: int | None = None,
 ) -> None:
     """Publish MQTT message to signal node about settings request."""
     client = get_mqtt_client()
@@ -155,6 +156,8 @@ def _publish_settings_request_mqtt(
     }
     if include_values:
         mqtt_payload["include_values"] = True
+    if user_id is not None:
+        mqtt_payload["user_id"] = user_id
     payload = json.dumps(mqtt_payload)
 
     try:
@@ -213,7 +216,7 @@ def create_settings_request(
     logger.info(f"📝 Settings request created: {request.request_id[:8]}... for node {node_id}")
 
     # Publish MQTT signal (non-blocking, best effort)
-    _publish_settings_request_mqtt(node_id, request.request_id, include_values=include_values)
+    _publish_settings_request_mqtt(node_id, request.request_id, include_values=include_values, user_id=user.user_id)
 
     return request
 
