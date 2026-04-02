@@ -208,6 +208,154 @@ def poll_package_install(
 
 
 # =============================================================================
+# Package Uninstall
+# =============================================================================
+
+
+class PackageUninstallBody(BaseModel):
+    command_name: str
+
+
+@router.post(
+    "/nodes/{node_id}/package-uninstall",
+    response_model=PackageInstallResponse,
+    status_code=201,
+)
+def request_package_uninstall(
+    node_id: str,
+    body: PackageUninstallBody,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> PackageInstallResponse:
+    """Request a package uninstall on a node. Mobile calls this, CC notifies node via MQTT."""
+    node = db.query(Node).filter(Node.node_id == node_id).first()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    now = datetime.utcnow()
+    uninstall_request = PackageInstallRequest(
+        id=str(uuid4()),
+        node_id=node_id,
+        household_id=node.household_id or "",
+        command_name=body.command_name,
+        github_repo_url="",  # not needed for uninstall
+        status="pending",
+        created_at=now,
+        expires_at=now + timedelta(minutes=5),
+    )
+    db.add(uninstall_request)
+    db.commit()
+    db.refresh(uninstall_request)
+
+    logger.info(
+        "Package uninstall requested: node=%s command=%s request_id=%s",
+        node_id, body.command_name, uninstall_request.id[:8],
+    )
+
+    _publish_package_uninstall_mqtt(node_id, uninstall_request)
+
+    return PackageInstallResponse(
+        id=uninstall_request.id,
+        status=uninstall_request.status,
+        created_at=uninstall_request.created_at,
+    )
+
+
+@router.post("/nodes/{node_id}/package-uninstall/{request_id}/results")
+def upload_package_uninstall_results(
+    node_id: str,
+    request_id: str,
+    body: PackageInstallResultUpload,
+    node_context=Depends(verify_api_key),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Node uploads uninstall results."""
+    request = db.query(PackageInstallRequest).filter(
+        PackageInstallRequest.id == request_id,
+        PackageInstallRequest.node_id == node_id,
+    ).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Uninstall request not found")
+
+    now = datetime.utcnow()
+    if request.expires_at and request.expires_at < now:
+        request.status = "expired"
+        db.commit()
+        raise HTTPException(status_code=410, detail="Uninstall request expired")
+
+    if body.success:
+        request.status = "completed"
+        if body.details:
+            request.results_json = json.dumps(body.details)
+    else:
+        request.status = "failed"
+        request.error_message = body.error or "Unknown error"
+
+    request.completed_at = now
+    db.commit()
+
+    logger.info(
+        "Package uninstall results uploaded: request=%s status=%s command=%s",
+        request_id[:8], request.status, request.command_name,
+    )
+    return {"status": "ok"}
+
+
+@router.get(
+    "/nodes/{node_id}/package-uninstall/{request_id}",
+    response_model=PackageInstallPollResponse,
+)
+def poll_package_uninstall(
+    node_id: str,
+    request_id: str,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> PackageInstallPollResponse:
+    """Mobile polls for uninstall results."""
+    request = db.query(PackageInstallRequest).filter(
+        PackageInstallRequest.id == request_id,
+        PackageInstallRequest.node_id == node_id,
+    ).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Uninstall request not found")
+
+    now = datetime.utcnow()
+    if request.status == "pending" and request.expires_at and request.expires_at < now:
+        request.status = "expired"
+        db.commit()
+
+    return PackageInstallPollResponse(
+        status=request.status,
+        request_id=request_id,
+        command_name=request.command_name,
+        error_message=request.error_message if request.status in ("failed", "expired") else None,
+        details=json.loads(request.results_json) if request.results_json else None,
+    )
+
+
+def _publish_package_uninstall_mqtt(node_id: str, request: PackageInstallRequest) -> None:
+    """Publish MQTT message to tell node to uninstall a package."""
+    from app.node_settings import get_mqtt_client
+
+    client = get_mqtt_client()
+    if client is None:
+        logger.warning("MQTT not available, node %s cannot receive uninstall request", node_id)
+        return
+
+    topic = f"jarvis/nodes/{node_id}/package-uninstall"
+    payload = json.dumps({
+        "request_id": request.id,
+        "command_name": request.command_name,
+    })
+
+    try:
+        client.publish(topic, payload)
+        logger.info("Published package uninstall request to %s", topic)
+    except Exception as e:
+        logger.error("Failed to publish package uninstall MQTT: %s", e)
+
+
+# =============================================================================
 # Prompt Provider Install (CC-local, no MQTT)
 # =============================================================================
 
