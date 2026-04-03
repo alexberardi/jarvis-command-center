@@ -12,6 +12,8 @@ Flow:
 """
 import json
 import logging
+import os
+import tempfile
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -395,6 +397,10 @@ class K2ProvisionRequest(BaseModel):
     created_at: str
 
 
+_K2_RESULT_DIR = os.path.join(tempfile.gettempdir(), "jarvis-k2-provision")
+os.makedirs(_K2_RESULT_DIR, exist_ok=True)
+
+
 @router.post("/nodes/{node_id}/k2")
 def provision_k2(
     node_id: str,
@@ -402,11 +408,14 @@ def provision_k2(
     user: AuthenticatedUser = Depends(verify_user_jwt),
     db: Session = Depends(get_db),
 ):
-    """Relay K2 encryption key to a node via MQTT.
+    """Relay K2 encryption key to a node via MQTT and wait for ack.
 
     Used by the mobile app to provision K2 for Docker/headless nodes
-    that aren't reachable via direct AP connection.
+    that aren't reachable via direct AP connection. Waits up to 15s
+    for the node to acknowledge receipt.
     """
+    import time as _time
+
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
@@ -418,13 +427,52 @@ def provision_k2(
     if client is None:
         raise HTTPException(status_code=503, detail="MQTT not available")
 
+    request_id = str(uuid.uuid4())
     topic = f"jarvis/nodes/{node_id}/k2/provision"
     payload = json.dumps({
         "k2": body.k2,
         "kid": body.kid,
         "created_at": body.created_at,
+        "request_id": request_id,
     })
     client.publish(topic, payload)
+    logger.info("K2 provision sent to node %s (kid=%s, request_id=%s)", node_id, body.kid, request_id[:8])
 
-    logger.info("K2 provisioned to node %s via MQTT (kid=%s)", node_id, body.kid)
-    return {"ok": True, "node_id": node_id, "kid": body.kid}
+    # Poll for ack from node
+    result_file = os.path.join(_K2_RESULT_DIR, f"{request_id}.json")
+    deadline = _time.time() + 15.0
+    while _time.time() < deadline:
+        if os.path.exists(result_file):
+            try:
+                with open(result_file) as f:
+                    result = json.load(f)
+                os.unlink(result_file)
+                if result.get("success"):
+                    logger.info("K2 provision acknowledged by node %s", node_id)
+                    return {"ok": True, "node_id": node_id, "kid": body.kid}
+                else:
+                    raise HTTPException(status_code=502, detail=result.get("error", "Node failed to store K2"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        _time.sleep(0.3)
+
+    # Timeout — node didn't ack
+    try:
+        os.unlink(result_file)
+    except OSError:
+        pass
+    raise HTTPException(status_code=504, detail="Node did not acknowledge K2 — it may not be online yet. Try again in a few seconds.")
+
+
+@router.post("/nodes/{node_id}/k2/ack/{request_id}")
+def ack_k2_provision(
+    node_id: str,
+    request_id: str,
+    body: dict,
+    node_context=Depends(verify_api_key),
+):
+    """Node acknowledges K2 receipt. Writes result file for polling."""
+    result_file = os.path.join(_K2_RESULT_DIR, f"{request_id}.json")
+    with open(result_file, "w") as f:
+        json.dump(body, f)
+    return {"status": "ok"}
