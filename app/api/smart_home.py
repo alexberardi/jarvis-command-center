@@ -796,6 +796,7 @@ class DeviceControlResponse(BaseModel):
     entity_id: str
     action: str
     error: str | None = None
+    input_required: dict | None = None
 
 
 import os as _os
@@ -897,6 +898,7 @@ def control_device(
         entity_id=dev.entity_id,
         action=body.action,
         error=result.get("error"),
+        input_required=result.get("input_required"),
     )
 
 
@@ -1021,6 +1023,7 @@ def control_external_device(
         entity_id=body.entity_id,
         action=body.action,
         error=result.get("error"),
+        input_required=result.get("input_required"),
     )
 
 
