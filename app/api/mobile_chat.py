@@ -139,9 +139,9 @@ async def _build_node_context(
     except Exception as e:
         logger.warning("Failed to resolve speaker name for mobile chat: %s", e)
 
-    # Load room hierarchy for LLM context
+    # Load room hierarchy and device context for LLM
     try:
-        from app.models import Room as RoomModel
+        from app.models import Device, Room as RoomModel
         from app.db import get_session_local
         session = get_session_local()()
         try:
@@ -154,10 +154,34 @@ async def _build_node_context(
                     {"id": r.id, "name": r.name, "parent_room_id": r.parent_room_id}
                     for r in rooms
                 ]
+
+            # Inject device data so the LLM knows available devices.
+            # For voice flow, the node's DeviceDiscoveryAgent provides this
+            # via agent context. For mobile chat, the CC loads it from DB.
+            from sqlalchemy.orm import joinedload
+            devices = session.query(Device).options(
+                joinedload(Device.room),
+            ).filter(
+                Device.household_id == household_id,
+                Device.is_active == True,  # noqa: E712
+            ).all()
+            if devices:
+                device_controls: dict[str, list[dict]] = {}
+                for d in devices:
+                    domain = d.domain or "switch"
+                    device_controls.setdefault(domain, []).append({
+                        "entity_id": d.entity_id,
+                        "name": d.name,
+                        "area": d.room.name if d.room else "",
+                        "state": "unknown",
+                    })
+                node_context.setdefault("agents", {})["home_assistant"] = {
+                    "device_controls": device_controls,
+                }
         finally:
             session.close()
     except Exception as e:
-        logger.warning("Failed to load room hierarchy for mobile chat: %s", e)
+        logger.warning("Failed to load room/device context for mobile chat: %s", e, exc_info=True)
 
     return node_context
 

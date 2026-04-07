@@ -125,6 +125,18 @@ def build_agent_context_summary(node_context: Dict[str, Any]) -> str:
     if not domain_counts:
         return ""
 
+    # Count total devices
+    total_devices: int = sum(
+        len([d for d in device_controls.get(dom, []) if d.get("state") != "unavailable"])
+        for dom in device_controls
+    ) + len(light_controls)
+
+    # Small device lists (≤ 20): show full room-grouped list so the LLM
+    # can resolve names and entity_ids directly — no get_ha_entities needed.
+    if total_devices <= 20:
+        return build_agent_context_by_room(node_context)
+
+    # Large device lists: compact summary + instruct LLM to call get_ha_entities
     section = f"\nHome Assistant: {', '.join(domain_counts)}"
 
     # Floor layout
