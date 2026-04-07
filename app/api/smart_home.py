@@ -117,6 +117,11 @@ def update_smart_home_config(
     if body.use_external_devices is not None:
         settings.set("smart_home.use_external_devices", body.use_external_devices, household_id=household_id)
 
+        # Toggle the built-in control_device on all household nodes:
+        # external=True → disable built-in (Pantry package provides it)
+        # external=False → enable built-in (no external package)
+        _toggle_builtin_control_device(household_id, enabled=not body.use_external_devices, db=db)
+
     # Return current values
     device_manager: str = settings.get("smart_home.device_manager", household_id=household_id) or "jarvis_direct"
     primary_node_id: str = settings.get("smart_home.primary_node_id", household_id=household_id) or ""
@@ -126,6 +131,31 @@ def update_smart_home_config(
         device_manager=device_manager,
         primary_node_id=primary_node_id,
         use_external_devices=use_external_devices,
+    )
+
+
+def _toggle_builtin_control_device(household_id: str, *, enabled: bool, db: Session) -> None:
+    """Publish toggle_command to all nodes in a household via MQTT.
+
+    Enables/disables the built-in control_device command so it doesn't
+    conflict with a Pantry package's control_device.
+    """
+    from app.services.node_command_service import get_node_command_service
+
+    nodes = db.query(Node).filter(Node.household_id == household_id).all()
+    if not nodes:
+        return
+
+    service = get_node_command_service()
+    for node in nodes:
+        service.publish_command(
+            node.node_id,
+            "toggle_command",
+            {"command_name": "control_device", "enabled": enabled},
+        )
+    logger.info(
+        "Toggled built-in control_device on %d nodes: enabled=%s",
+        len(nodes), enabled,
     )
 
 
@@ -798,6 +828,76 @@ class DeviceControlResponse(BaseModel):
     action: str
     error: str | None = None
     input_required: dict | None = None
+
+
+@router.get("/node/devices")
+def list_devices_for_node(
+    node_ctx=Depends(verify_api_key),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """List devices for the node's household (node API key auth).
+
+    Used by the built-in control_device command to populate DirectDeviceService.
+    """
+    household_id: str = node_ctx.household_id or ""
+    if not household_id:
+        return []
+
+    devices = db.query(Device).filter(
+        Device.household_id == household_id,
+        Device.is_active == True,  # noqa: E712
+    ).all()
+
+    return [
+        {
+            "entity_id": d.entity_id,
+            "name": d.name,
+            "domain": d.domain,
+            "source": d.source,
+            "protocol": d.protocol,
+            "local_ip": d.local_ip or "",
+            "mac_address": d.mac_address or "",
+            "cloud_id": d.cloud_id or "",
+            "model": d.model or "",
+        }
+        for d in devices
+    ]
+
+
+@router.get("/node/devices/{entity_id:path}")
+def get_device_for_node(
+    entity_id: str,
+    node_ctx=Depends(verify_api_key),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Get a single device by entity_id (node API key auth).
+
+    Used by control_device command to resolve entity_id → protocol/IP details.
+    """
+    household_id: str = node_ctx.household_id or ""
+    if not household_id:
+        raise HTTPException(status_code=400, detail="No household context")
+
+    device = db.query(Device).filter(
+        Device.household_id == household_id,
+        Device.entity_id == entity_id,
+        Device.is_active == True,  # noqa: E712
+    ).first()
+
+    if not device:
+        raise HTTPException(status_code=404, detail=f"Device '{entity_id}' not found")
+
+    return {
+        "entity_id": device.entity_id,
+        "name": device.name,
+        "domain": device.domain,
+        "source": device.source,
+        "protocol": device.protocol,
+        "local_ip": device.local_ip or "",
+        "mac_address": device.mac_address or "",
+        "cloud_id": device.cloud_id or "",
+        "model": device.model or "",
+    }
 
 
 import os as _os

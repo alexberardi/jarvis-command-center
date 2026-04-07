@@ -77,6 +77,7 @@ def send_node_action(
         "action_name": body.action_name,
         "context": body.context or {},
         "trusted": True,
+        "user_id": user.user_id,
     })
 
     # Wait for node to POST result back via /device-control-results/{request_id}
