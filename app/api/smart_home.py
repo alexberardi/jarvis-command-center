@@ -291,6 +291,7 @@ _PROTOCOL_ACTIONS: dict[str, list[dict[str, str]]] = {
         {"button_text": "Turn Off", "button_action": "turn_off", "button_type": "secondary", "button_icon": "power-off"},
     ],
     "apple": [
+        {"button_text": "Pair", "button_action": "pair_start", "button_type": "primary", "button_icon": "link"},
         {"button_text": "Play", "button_action": "play", "button_type": "primary", "button_icon": "play"},
         {"button_text": "Pause", "button_action": "pause", "button_type": "secondary", "button_icon": "pause"},
         {"button_text": "Power On", "button_action": "turn_on", "button_type": "primary", "button_icon": "power"},
@@ -866,10 +867,15 @@ def control_device(
         "trusted": True,
         "reply_request_id": request_id,
     }
+    logger.info("DEVICE CONTROL: action=%s node=%s device=%s mqtt=%s", body.action, node.node_id[:12], dev.entity_id, mqtt.is_connected if mqtt else "N/A")
     service.publish_command_with_id(node.node_id, "action", details, request_id)
+    logger.info("DEVICE CONTROL: published, polling for %s", request_id[:8])
 
-    # Poll for result file (node writes it via POST callback)
-    deadline = time.time() + 10.0
+    # Poll for result file (node writes it via POST callback).
+    # Pairing actions need longer: pair_start does device scan + SRP handshake,
+    # pair_finish sends PIN verification. Regular control actions are fast.
+    timeout: float = 20.0 if body.action.startswith("pair") else 10.0
+    deadline = time.time() + timeout
     result = None
     while time.time() < deadline:
         if _os.path.exists(result_file):
@@ -1170,6 +1176,7 @@ class DiscoveredDeviceItem(BaseModel):
     is_controllable: bool = True
     already_registered: bool = False
     existing_device_id: str | None = None
+    supported_actions: list[dict[str, str]] | None = None
 
 
 class DeviceScanPollResponse(BaseModel):
@@ -1352,6 +1359,7 @@ def poll_device_scan(
             is_controllable=dev.get("is_controllable", True),
             already_registered=already_registered,
             existing_device_id=existing_device_id,
+            supported_actions=dev.get("supported_actions"),
         ))
 
     return DeviceScanPollResponse(
