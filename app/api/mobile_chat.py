@@ -22,6 +22,7 @@ from app.core.conversation_cache import conversation_cache
 from app.deps import get_db, get_model_service, verify_user_jwt, verify_household_role, AuthenticatedUser
 from app.core.model_service import ModelService
 from app.models import Node
+from app.services.acknowledgment_service import generate_acknowledgment
 
 logger = logging.getLogger("uvicorn")
 
@@ -299,13 +300,35 @@ async def _chat_stream(
                 request.client_tools, request.available_commands,
             )
 
-        # Process the message
+        # Process the message — fire acknowledgment in parallel with the pipeline.
+        # If the pipeline finishes first (fast command), skip the acknowledgment.
         yield _sse_event({"type": "status", "message": "Processing..."})
 
-        result = await model_service.process_voice_command_with_tools(
-            voice_command=request.message,
-            conversation_id=conversation_id,
+        ack_task = asyncio.create_task(
+            generate_acknowledgment(model_service.llm_client, request.message)
         )
+        pipeline_task = asyncio.create_task(
+            model_service.process_voice_command_with_tools(
+                voice_command=request.message,
+                conversation_id=conversation_id,
+            )
+        )
+
+        done, _pending = await asyncio.wait(
+            [ack_task, pipeline_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if pipeline_task in done:
+            # Pipeline was fast — skip acknowledgment
+            ack_task.cancel()
+            result = pipeline_task.result()
+        else:
+            # Acknowledgment was faster — stream it, then wait for pipeline
+            ack_text = ack_task.result()
+            if ack_text:
+                yield _sse_event({"type": "acknowledgment", "text": ack_text})
+            result = await pipeline_task
 
         # Track actions and preview extracted from tool results
         pending_actions: list[dict[str, Any]] = []
