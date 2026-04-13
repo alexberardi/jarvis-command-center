@@ -342,6 +342,29 @@ class UserMemory(Base):
     expires_at = Column(DateTime, nullable=True)
 
 
+class ConversationTranscript(Base):
+    """Buffered voice conversation transcript for passive memory extraction.
+
+    Logged fire-and-forget after each voice interaction. A background task
+    batches unprocessed transcripts per user, sends them to the LLM background
+    model for memory extraction, then marks them processed. Expired rows are
+    cleaned up based on a configurable TTL (default 7 days).
+    """
+    __tablename__ = 'conversation_transcripts'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    household_id = Column(String(255), nullable=False)
+    conversation_id = Column(String(255), nullable=False)
+    user_message = Column(Text, nullable=False)
+    assistant_message = Column(Text, nullable=True)
+    tool_calls_json = Column(Text, nullable=True)
+    is_processed = Column(Boolean, nullable=False, default=False, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    processed_at = Column(DateTime, nullable=True)
+    extraction_job_id = Column(String(36), nullable=True)
+
+
 class PackageInstallRequest(Base):
     """Package install request: mobile -> CC -> MQTT -> node -> CC -> mobile.
 
@@ -395,6 +418,30 @@ class TestInstallRequest(Base):
 
     # Relationships
     node = relationship("Node", backref=backref("test_install_requests", passive_deletes=True), passive_deletes=True)
+
+
+class PromptProviderInstallRequest(Base):
+    """Async prompt provider install request: mobile -> CC -> background task -> mobile polls.
+
+    Lifecycle:
+    1. Mobile POSTs to request a prompt provider install (status=pending, expires_at=now+5min)
+    2. CC kicks off BackgroundTasks to clone repo, validate, and install
+    3. Background task updates status to completed/failed
+    4. Mobile polls for results
+    """
+    __tablename__ = 'prompt_provider_install_requests'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    household_id = Column(String(255), nullable=False, index=True)
+    package_name = Column(String(255), nullable=True)
+    github_repo_url = Column(Text, nullable=False)
+    git_tag = Column(String(100), nullable=True)
+    status = Column(String(20), nullable=False, default="pending")  # pending, completed, failed, expired
+    results_json = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
 
 
 class ProvisioningToken(Base):

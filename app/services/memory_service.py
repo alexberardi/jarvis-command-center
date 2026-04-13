@@ -94,6 +94,7 @@ class MemoryService:
         key: str | None = None,
         source: str = "voice",
         is_pinned: bool = False,
+        expires_at: datetime | None = None,
     ) -> UserMemory:
         """Save a memory, upserting if a matching key exists.
 
@@ -105,6 +106,7 @@ class MemoryService:
             key: Optional structured key for upsert matching
             source: Origin (voice, ui, system)
             is_pinned: Whether this is a pinned identity fact
+            expires_at: Optional expiration (memory auto-excluded after this date)
 
         Returns:
             The created or updated UserMemory
@@ -123,6 +125,7 @@ class MemoryService:
                 existing.category = category
                 existing.source = source
                 existing.is_pinned = is_pinned
+                existing.expires_at = expires_at
                 existing.updated_at = datetime.utcnow()
                 self.db.commit()
                 self.db.refresh(existing)
@@ -137,6 +140,7 @@ class MemoryService:
             content=content,
             source=source,
             is_pinned=is_pinned,
+            expires_at=expires_at,
         )
         self.db.add(memory)
         self.db.commit()

@@ -1,8 +1,34 @@
 from datetime import datetime, timedelta
+import re
 import pytz
 import logging
 
 logger = logging.getLogger("uvicorn")
+
+
+def _normalize_timezone(tz_str: str | None) -> str | None:
+    """Normalize timezone strings to valid pytz identifiers.
+
+    Handles offset formats like 'UTC-00:00', 'UTC+05:30' that pytz rejects.
+    """
+    if not tz_str:
+        return tz_str
+    # 'UTC-00:00', 'UTC+00:00', 'UTC' → 'UTC'
+    if tz_str in ("UTC", "UTC-00:00", "UTC+00:00", "UTC-0", "UTC+0"):
+        return "UTC"
+    # 'UTC+05:30' → pytz.FixedOffset won't work as a string; try stripping to see
+    # if there's a valid IANA name hiding, otherwise return as-is for pytz to attempt
+    match = re.match(r"^UTC([+-])(\d{1,2}):?(\d{2})?$", tz_str)
+    if match:
+        sign = 1 if match.group(1) == "+" else -1
+        hours = int(match.group(2))
+        minutes = int(match.group(3) or 0)
+        offset = sign * (hours * 60 + minutes)
+        if offset == 0:
+            return "UTC"
+        return f"Etc/GMT{'+' if sign == -1 else '-'}{hours}"  # Etc/GMT sign is inverted
+    return tz_str
+
 
 def generate_date_context_object(timezone_str: str = None) -> dict:
     """
@@ -15,8 +41,9 @@ def generate_date_context_object(timezone_str: str = None) -> dict:
         dict: Object containing all calculated dates and timezone information
     """
     # Get current date/time for context
+    timezone_str = _normalize_timezone(timezone_str)
     logger.info(f"📅 Generating comprehensive date context object with timezone: {timezone_str}")
-    
+
     if timezone_str:
         try:
             # Convert to user's timezone
