@@ -113,6 +113,7 @@ def build_agent_context_summary(node_context: Dict[str, Any]) -> str:
         ("cover", "covers"),
         ("climate", "climate"),
         ("fan", "fans"),
+        ("media_player", "media players"),
         ("scene", "scenes"),
     ]:
         items = [
@@ -147,9 +148,13 @@ def build_agent_context_summary(node_context: Dict[str, Any]) -> str:
         ]
         section += f"\nFloors: {', '.join(floor_parts)}"
 
-    section += (
-        "\nCall control_device to control devices. Call get_device_status to check device state.\n"
-    )
+    room = node_context.get("room", "")
+    section += "\nCall control_device to control devices. Call get_device_status to check device state."
+    if room:
+        section += (
+            f"\nWhen the user doesn't specify a room, prefer devices in '{room}' (the current room)."
+        )
+    section += "\n"
 
     # Append room hierarchy if available
     section += build_room_hierarchy_section(node_context)
@@ -253,11 +258,15 @@ def build_agent_context_by_room(node_context: Dict[str, Any]) -> str:
         for dev in devices:
             section += f"- {dev['entity_id']}: {dev['name']} ({dev['state']})\n"
 
-    section += (
-        "\nUse control_device to control devices. "
-        "Use get_device_status to check state. "
-        "Copy entity_id EXACTLY as shown above.\n"
-    )
+    room = node_context.get("room", "")
+    section += "\nUse control_device to control devices. "
+    section += "Use get_device_status to check state. "
+    section += "Copy entity_id EXACTLY as shown above."
+    if room:
+        section += (
+            f"\nWhen the user doesn't specify a room, prefer devices in '{room}' (the current room)."
+        )
+    section += "\n"
 
     return section
 
@@ -411,6 +420,16 @@ def build_agent_context_section(node_context: Dict[str, Any]) -> str:
             for dev in fans[:10]:
                 section += _format_device_line(dev) + "\n"
 
+        # Media players (TVs, speakers, etc.)
+        media_players = [
+            m for m in device_controls.get("media_player", [])
+            if m.get("state") != "unavailable"
+        ]
+        if media_players:
+            section += "\nAvailable Media Players (use turn_on/turn_off/play/pause/stop actions):\n"
+            for dev in media_players[:10]:
+                section += _format_device_line(dev) + "\n"
+
         # Scenes
         scenes = device_controls.get("scene", [])
         if scenes:
@@ -419,5 +438,11 @@ def build_agent_context_section(node_context: Dict[str, Any]) -> str:
                 entity_id = dev.get("entity_id", "")
                 dev_name = dev.get("name", "")
                 section += f"- {dev_name}: {entity_id}\n"
+
+    room = node_context.get("room", "")
+    if room and section:
+        section += (
+            f"\nWhen the user doesn't specify a room, prefer devices in '{room}' (the current room).\n"
+        )
 
     return section

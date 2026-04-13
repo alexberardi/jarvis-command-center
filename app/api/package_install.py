@@ -1,7 +1,7 @@
 """Package install API: mobile -> CC -> MQTT -> node -> CC -> mobile.
 
 Follows the same request/poll pattern as device-scan (smart_home.py).
-Also handles prompt provider installs (CC-local, no MQTT).
+Also handles prompt provider installs (CC-local, async via BackgroundTasks).
 """
 
 import json
@@ -9,12 +9,13 @@ import logging
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.db import get_session_local
 from app.deps import get_db, verify_api_key
-from app.models import Node, PackageInstallRequest
+from app.models import Node, PackageInstallRequest, PromptProviderInstallRequest
 from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext
 
 router = APIRouter()
@@ -356,7 +357,7 @@ def _publish_package_uninstall_mqtt(node_id: str, request: PackageInstallRequest
 
 
 # =============================================================================
-# Prompt Provider Install (CC-local, no MQTT)
+# Prompt Provider Install (CC-local, async via BackgroundTasks)
 # =============================================================================
 
 
@@ -365,22 +366,134 @@ class PromptProviderInstallBody(BaseModel):
     git_tag: str | None = None
 
 
-@router.post("/prompt-providers/install", status_code=201)
-def install_prompt_provider_endpoint(
-    body: PromptProviderInstallBody,
-    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
-) -> dict:
-    """Install a prompt provider to the command center from GitHub."""
+class PromptProviderInstallPollResponse(BaseModel):
+    status: str
+    request_id: str
+    package_name: str | None = None
+    provider_name: str | None = None
+    error_message: str | None = None
+    details: dict | None = None
+
+
+def _run_prompt_provider_install(request_id: str, repo_url: str, git_tag: str | None) -> None:
+    """Background task: clone, validate, install prompt provider, update DB record."""
     from app.services.prompt_provider_installer import (
         install_prompt_provider,
         PromptProviderInstallError,
     )
 
+    SessionLocal = get_session_local()
+    db = SessionLocal()
     try:
-        result = install_prompt_provider(body.github_repo_url, body.git_tag)
-        return {"status": "installed", **result}
-    except PromptProviderInstallError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        result = install_prompt_provider(repo_url, git_tag)
+
+        request = db.query(PromptProviderInstallRequest).get(request_id)
+        if request and request.status == "pending":
+            request.status = "completed"
+            request.package_name = result.get("package_name")
+            request.results_json = json.dumps(result)
+            request.completed_at = datetime.utcnow()
+            db.commit()
+            logger.info("Prompt provider installed: %s", result.get("provider_name"))
+
+    except (PromptProviderInstallError, Exception) as e:
+        request = db.query(PromptProviderInstallRequest).get(request_id)
+        if request and request.status == "pending":
+            request.status = "failed"
+            request.error_message = str(e)
+            request.completed_at = datetime.utcnow()
+            db.commit()
+        logger.error("Prompt provider install failed: %s", e)
+    finally:
+        db.close()
+
+
+@router.post("/prompt-providers/install", status_code=201)
+def install_prompt_provider_endpoint(
+    body: PromptProviderInstallBody,
+    background_tasks: BackgroundTasks,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Start async prompt provider install. Returns request_id for polling."""
+    request = PromptProviderInstallRequest(
+        id=str(uuid4()),
+        household_id=auth.household_id,
+        github_repo_url=body.github_repo_url,
+        git_tag=body.git_tag,
+        status="pending",
+        expires_at=datetime.utcnow() + timedelta(minutes=5),
+    )
+    db.add(request)
+    db.commit()
+
+    background_tasks.add_task(
+        _run_prompt_provider_install,
+        request.id, body.github_repo_url, body.git_tag,
+    )
+
+    logger.info("Prompt provider install queued: request=%s repo=%s", request.id[:8], body.github_repo_url)
+    return {"id": request.id, "status": "pending", "created_at": request.created_at.isoformat()}
+
+
+@router.get(
+    "/prompt-providers/install/{request_id}",
+    response_model=PromptProviderInstallPollResponse,
+)
+def poll_prompt_provider_install(
+    request_id: str,
+    auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
+    db: Session = Depends(get_db),
+) -> PromptProviderInstallPollResponse:
+    """Poll for prompt provider install status."""
+    request = db.query(PromptProviderInstallRequest).filter(
+        PromptProviderInstallRequest.id == request_id,
+        PromptProviderInstallRequest.household_id == auth.household_id,
+    ).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Install request not found")
+
+    now = datetime.utcnow()
+
+    if request.status == "pending" and request.expires_at and request.expires_at < now:
+        request.status = "expired"
+        db.commit()
+
+    if request.status == "expired":
+        return PromptProviderInstallPollResponse(
+            status="expired",
+            request_id=request_id,
+            error_message="Install request expired",
+        )
+
+    if request.status == "pending":
+        return PromptProviderInstallPollResponse(
+            status="pending",
+            request_id=request_id,
+        )
+
+    if request.status == "failed":
+        return PromptProviderInstallPollResponse(
+            status="failed",
+            request_id=request_id,
+            package_name=request.package_name,
+            error_message=request.error_message,
+        )
+
+    # Completed
+    details = None
+    provider_name = None
+    if request.results_json:
+        details = json.loads(request.results_json)
+        provider_name = details.get("provider_name")
+
+    return PromptProviderInstallPollResponse(
+        status="completed",
+        request_id=request_id,
+        package_name=request.package_name,
+        provider_name=provider_name,
+        details=details,
+    )
 
 
 @router.get("/prompt-providers")

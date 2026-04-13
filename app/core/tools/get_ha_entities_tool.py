@@ -17,7 +17,7 @@ from app.core.prompt_providers.shared.context_builders import _format_device_lin
 logger = logging.getLogger("uvicorn")
 
 # Domains the tool can query
-_SUPPORTED_DOMAINS = ("light", "switch", "lock", "cover", "climate", "fan", "scene")
+_SUPPORTED_DOMAINS = ("light", "switch", "lock", "cover", "climate", "fan", "media_player", "scene")
 
 
 class GetHAEntitiesTool(IServerTool):
