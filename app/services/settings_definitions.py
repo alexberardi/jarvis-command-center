@@ -14,8 +14,9 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         key="llm.interface",
         category="llm",
         value_type="string",
-        default="HermesMediumUntrained",
+        default="Qwen25MediumUntrained",
         description="LLM interface type for command processing",
+        requires_reload=True,
     ),
     SettingDefinition(
         key="llm.proxy.url",
@@ -148,6 +149,29 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Maximum number of recall results returned",
     ),
 
+    # Passive memory extraction settings
+    SettingDefinition(
+        key="memory.extraction_enabled",
+        category="memory",
+        value_type="bool",
+        default=True,
+        description="Enable passive memory extraction from conversation transcripts",
+    ),
+    SettingDefinition(
+        key="memory.extraction_interval_seconds",
+        category="memory",
+        value_type="int",
+        default=300,
+        description="Interval in seconds between extraction batch runs (e.g., 30 for dev, 3600 for prod)",
+    ),
+    SettingDefinition(
+        key="memory.transcript_ttl_days",
+        category="memory",
+        value_type="int",
+        default=7,
+        description="Days to retain conversation transcripts before cleanup",
+    ),
+
     # Network / callback settings
     SettingDefinition(
         key="network.public_url",
@@ -189,7 +213,8 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         category="smart_home",
         value_type="string",
         default="jarvis_direct",
-        description="Active device manager for device listing (jarvis_direct or home_assistant)",
+        description="Active device manager for device listing",
+        options=["jarvis_direct", "home_assistant"],
     ),
     SettingDefinition(
         key="smart_home.primary_node_id",

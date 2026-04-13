@@ -99,6 +99,7 @@ class RecallTool(IServerTool):
 
                 # Fallback to substring search if vector search fails or returns nothing
                 if results is None:
+                    db.rollback()  # Clear any failed transaction from vector search
                     results = svc.search_memories_substring(
                         user_id=speaker_user_id,
                         household_id=household_id,
