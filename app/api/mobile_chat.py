@@ -60,6 +60,36 @@ class WarmupRequest(BaseModel):
 # ─── Shared Helpers ───────────────────────────────────────────────────────────
 
 
+async def _log_mobile_transcript(
+    conversation_id: str,
+    user_message: str,
+    assistant_message: str | None,
+    tool_calls: list | None,
+    user_id: int,
+    household_id: str,
+) -> None:
+    """Fire-and-forget: log a mobile chat transcript for passive memory extraction."""
+    try:
+        from app.db import get_session_local
+        from app.services.transcript_service import TranscriptService
+
+        SessionLocal = get_session_local()
+        db = SessionLocal()
+        try:
+            TranscriptService(db).log_transcript(
+                user_id=user_id,
+                household_id=household_id,
+                conversation_id=conversation_id,
+                user_message=user_message,
+                assistant_message=assistant_message,
+                tool_calls=tool_calls,
+            )
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Failed to log mobile transcript (non-fatal): %s", e)
+
+
 def _sse_event(data: dict[str, Any]) -> str:
     """Format a dict as an SSE data line."""
     return f"data: {json.dumps(data)}\n\n"
@@ -300,35 +330,15 @@ async def _chat_stream(
                 request.client_tools, request.available_commands,
             )
 
-        # Process the message — fire acknowledgment in parallel with the pipeline.
-        # If the pipeline finishes first (fast command), skip the acknowledgment.
-        yield _sse_event({"type": "status", "message": "Processing..."})
+        # Instant acknowledgment — keyword-matched, no LLM call.
+        # Streamed before the pipeline starts so the user sees feedback immediately.
+        ack_text = generate_acknowledgment(request.message)
+        yield _sse_event({"type": "acknowledgment", "text": ack_text})
 
-        ack_task = asyncio.create_task(
-            generate_acknowledgment(model_service.llm_client, request.message)
+        result = await model_service.process_voice_command_with_tools(
+            voice_command=request.message,
+            conversation_id=conversation_id,
         )
-        pipeline_task = asyncio.create_task(
-            model_service.process_voice_command_with_tools(
-                voice_command=request.message,
-                conversation_id=conversation_id,
-            )
-        )
-
-        done, _pending = await asyncio.wait(
-            [ack_task, pipeline_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        if pipeline_task in done:
-            # Pipeline was fast — skip acknowledgment
-            ack_task.cancel()
-            result = pipeline_task.result()
-        else:
-            # Acknowledgment was faster — stream it, then wait for pipeline
-            ack_text = ack_task.result()
-            if ack_text:
-                yield _sse_event({"type": "acknowledgment", "text": ack_text})
-            result = await pipeline_task
 
         # Track actions and preview extracted from tool results
         pending_actions: list[dict[str, Any]] = []
@@ -341,6 +351,11 @@ async def _chat_stream(
 
             if stop_reason in ("complete", "server_tool_complete"):
                 assistant_message = result.get("assistant_message", "")
+                # Strip [Tool data: ...] prefix that's meant for history context, not display
+                if assistant_message and "[Tool data:" in assistant_message:
+                    idx = assistant_message.find("]\n\n")
+                    if idx != -1:
+                        assistant_message = assistant_message[idx + 3:].strip()
                 if assistant_message:
                     words = assistant_message.split(" ")
                     for i, word in enumerate(words):
@@ -361,6 +376,16 @@ async def _chat_stream(
                     if action_preview:
                         done_event["action_preview"] = action_preview
                 yield _sse_event(done_event)
+
+                # Fire-and-forget: log transcript for passive memory extraction
+                asyncio.create_task(_log_mobile_transcript(
+                    conversation_id=conversation_id,
+                    user_message=request.message,
+                    assistant_message=assistant_message,
+                    tool_calls=result.get("tool_calls"),
+                    user_id=user.user_id,
+                    household_id=request.household_id,
+                ))
                 return
 
             elif stop_reason == "validation_required":
@@ -418,29 +443,17 @@ async def _chat_stream(
                                     or None
                                 )
 
-                # If actions are present, skip streaming (buttons handle it)
-                if pending_actions:
-                    result = await model_service.continue_conversation_with_tool_results(
-                        conversation_id=conversation_id,
-                        tool_results=tool_results,
-                    )
-                else:
-                    # Stream the final LLM response token-by-token
-                    handler = model_service._conversation_handler
-                    full_text = intermediate
-                    async for token in handler.stream_final_response(
-                        conversation_id, tool_results,
-                    ):
-                        full_text += token
-                        yield _sse_event({"type": "delta", "text": token})
-
-                    yield _sse_event({
-                        "type": "done",
-                        "conversation_id": conversation_id,
-                        "full_text": full_text,
-                        "stop_reason": "complete",
-                    })
-                    return
+                # Continue conversation with tool results.
+                # NOTE: Previously used stream_final_response() for token-by-token
+                # streaming, but that creates a separate formatting conversation
+                # with a different system prompt, which evicts llama.cpp's KV
+                # prefix cache and causes ~6s cache misses on follow-up messages.
+                # Using continue_conversation keeps the same conversation context
+                # so the prefix cache is preserved across turns.
+                result = await model_service.continue_conversation_with_tool_results(
+                    conversation_id=conversation_id,
+                    tool_results=tool_results,
+                )
 
             elif stop_reason == "error":
                 error_msg = result.get("error", "An error occurred")

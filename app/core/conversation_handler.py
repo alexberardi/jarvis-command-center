@@ -268,11 +268,19 @@ class ConversationHandler:
         if not skip_warmup_inference:
             try:
                 if use_native_tools:
-                    # Native tools path: full warmup with tool definitions
+                    # Native tools path: full warmup with tool definitions.
+                    # IMPORTANT: use the same tool transformation as the inference
+                    # path (strip_jarvis_extensions + prompt_provider.build_tools)
+                    # so the token sequence matches and llama.cpp's prefix cache
+                    # is reused on the first real inference call.
+                    from app.core.tool_builder import ToolBuilder
+                    warmup_tools = self.prompt_provider.build_tools(
+                        ToolBuilder.strip_jarvis_extensions(all_tools)
+                    )
                     await self.llm_client.chat_completion(
                         conversation_id=conversation_id,
                         messages=messages,
-                        tools=all_tools,
+                        tools=warmup_tools,
                         adapter_settings=adapter_settings,
                     )
                 else:
@@ -505,16 +513,9 @@ class ConversationHandler:
 
         Text-based models (supports_native_tools=False) can't process role="tool"
         messages — the chat template either drops them or the model re-calls tools
-        endlessly.  Instead, make ONE LLM call with a tool-free prompt that presents
-        the results as plain context.
+        endlessly.  Instead, inject the tool results as a user message into the
+        existing conversation so the KV prefix cache is preserved.
         """
-        # Find the user's original question
-        user_utterance: str = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                user_utterance = msg.get("content", "")
-                break
-
         # Collect tool result outputs
         result_parts: List[str] = []
         for tr in tool_results:
@@ -525,20 +526,85 @@ class ConversationHandler:
 
         tool_context: str = "\n".join(result_parts)
 
-        # Detect delegation tools (e.g., answer_question) that just echo the
-        # query back.  For these, the model should answer from its own knowledge
-        # rather than trying to format a tool result.
         is_knowledge_query: bool = self._is_knowledge_delegation(tool_context)
 
-        # Build a formatting prompt.
-        # Qwen always emits <tool_call> tags, so for knowledge queries we
-        # work WITH that behavior: define a "respond" tool so the model
-        # puts the answer in the tool arguments.
+        # Strip any role="tool" messages that the text-based model can't handle
+        messages[:] = [m for m in messages if m.get("role") != "tool"]
+
+        # Inject tool results as a user message into the EXISTING conversation
+        # so the KV prefix cache (system prompt + tools + prior turns) is reused.
         if is_knowledge_query:
-            # Knowledge delegation: the model called answer_question but
-            # can't answer from its own knowledge (model limitation).
-            # Make a best-effort formatting call; downstream parsing will
-            # extract whatever the model produces.
+            messages.append({
+                "role": "user",
+                "content": "Answer the question from your own knowledge. Be brief and conversational.",
+            })
+        else:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Here are the tool results. Craft a natural response using the "
+                    f"ACTUAL values — never use placeholders. Be brief and conversational.\n\n"
+                    f"{tool_context}"
+                ),
+            })
+
+        # Use the existing conversation's LLM call path
+        adapter_settings = conversation_cache.get_adapter_settings(conversation_id) if hasattr(conversation_cache, 'get_adapter_settings') else None
+
+        response = await self.llm_client.chat_completion(
+            messages=messages,
+            conversation_id=conversation_id,
+            include_date_context=True,
+            adapter_settings=adapter_settings,
+            max_tokens=256,
+        )
+
+        content: str = ""
+        try:
+            content = response["choices"][0]["message"].get("content", "")
+        except (KeyError, IndexError):
+            content = str(response.get("content", ""))
+
+        # Clean up tool_call tags that text-based models emit
+        import re
+        content = re.sub(r"</?tool_call>", "", content).strip()
+
+        # Update cache
+        if content:
+            messages.append({"role": "assistant", "content": content})
+
+        return {
+            "stop_reason": "complete",
+            "assistant_message": content,
+        }
+
+    async def _format_tool_result_text_mode_UNUSED(
+        self,
+        conversation_id: str,
+        messages: List[Dict[str, Any]],
+        tool_results: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """DEPRECATED: Original implementation that created a separate formatting
+        conversation, which evicted llama.cpp's KV prefix cache on every tool call.
+        Kept for reference.
+        """
+        user_utterance: str = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                user_utterance = msg.get("content", "")
+                break
+
+        result_parts: List[str] = []
+        for tr in tool_results:
+            output = tr["output"]
+            if not isinstance(output, str):
+                output = json.dumps(output)
+            result_parts.append(output)
+
+        tool_context: str = "\n".join(result_parts)
+        is_knowledge_query: bool = self._is_knowledge_delegation(tool_context)
+
+        if is_knowledge_query:
             formatting_messages: List[Dict[str, Any]] = [
                 {
                     "role": "system",

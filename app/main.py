@@ -9,6 +9,7 @@ from uuid import uuid4
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Depends, Request, APIRouter, BackgroundTasks
+from pydantic import BaseModel
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from app.context_providers.node_context_provider import NodeContextProvider
@@ -181,12 +182,68 @@ async def startup_event():
     from app.core import service_config
 
     auth_url = service_config.get_auth_url()
+    settings_service = get_settings_service()
     _settings_router = create_settings_router(
-        service=get_settings_service(),
+        service=settings_service,
         auth_dependency=create_combined_auth(auth_url),
         write_auth_dependency=create_superuser_auth(auth_url),
     )
     app.include_router(_settings_router, prefix="/settings", tags=["settings"])
+
+    # Schedule passive memory extraction
+    async def _periodic_memory_extraction() -> None:
+        while True:
+            try:
+                interval = int(settings_service.get("memory.extraction_interval_seconds") or 300)
+            except (TypeError, ValueError):
+                interval = 300
+            await asyncio.sleep(interval)
+            try:
+                enabled = settings_service.get("memory.extraction_enabled")
+                if enabled is False or str(enabled).lower() in ("false", "0", "no"):
+                    continue
+                from app.services.memory_extraction_service import run_extraction_batch
+                await run_extraction_batch()
+            except Exception as e:
+                logger.warning("Memory extraction batch failed: %s", e)
+
+    asyncio.create_task(_periodic_memory_extraction())
+
+    # Schedule transcript TTL cleanup (daily)
+    async def _periodic_transcript_cleanup() -> None:
+        while True:
+            await asyncio.sleep(86400)
+            try:
+                ttl_days = int(settings_service.get("memory.transcript_ttl_days") or 7)
+                from app.services.transcript_service import TranscriptService
+                db = SessionLocal()
+                try:
+                    removed = TranscriptService(db).cleanup_expired(ttl_days)
+                    if removed:
+                        logger.info("Transcript cleanup removed %d expired entries", removed)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("Transcript cleanup failed: %s", e)
+
+    asyncio.create_task(_periodic_transcript_cleanup())
+
+    # Enrich llm.interface with available prompt providers dynamically
+    if "llm.interface" in settings_service.definitions:
+        from app.core.prompt_provider_factory import PromptProviderFactory
+        original_list_all = settings_service.list_all
+
+        def list_all_with_provider_options(**kwargs):  # type: ignore[no-untyped-def]
+            results = original_list_all(**kwargs)
+            for setting in results:
+                if setting["key"] == "llm.interface":
+                    try:
+                        setting["options"] = PromptProviderFactory.get_available_providers()
+                    except Exception:
+                        pass
+            return results
+
+        settings_service.list_all = list_all_with_provider_options  # type: ignore[assignment]
 
 
 # Add shutdown event for cleanup
@@ -398,6 +455,43 @@ async def start_conversation(
 
 
 
+async def _log_transcript(
+    conversation_id: str,
+    voice_command: str,
+    assistant_message: str | None,
+    tool_calls: list | None,
+) -> None:
+    """Fire-and-forget: log a conversation transcript for passive memory extraction."""
+    try:
+        node_context = conversation_cache.get_node_context(conversation_id)
+        if not node_context:
+            return
+        speaker_user_id = node_context.get("speaker_user_id")
+        household_id = node_context.get("household_id")
+        if not speaker_user_id or not household_id:
+            return
+
+        from app.db import get_session_local
+        from app.services.transcript_service import TranscriptService
+
+        SessionLocal = get_session_local()
+        db = SessionLocal()
+        try:
+            svc = TranscriptService(db)
+            svc.log_transcript(
+                user_id=speaker_user_id,
+                household_id=household_id,
+                conversation_id=conversation_id,
+                user_message=voice_command,
+                assistant_message=assistant_message,
+                tool_calls=tool_calls,
+            )
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Failed to log transcript (non-fatal): %s", e)
+
+
 @v0_router.post("/voice/command", response_model=VoiceCommandResponse)
 async def handle_voice(
     request: VoiceCommandRequest,
@@ -459,6 +553,13 @@ async def handle_voice(
                     assistant_message=None
                 )
             else:
+                # Strip [Tool data: ...] prefix (history context, not for display)
+                _msg = result.get("assistant_message") or ""
+                if "[Tool data:" in _msg:
+                    _idx = _msg.find("]\n\n")
+                    if _idx != -1:
+                        _msg = _msg[_idx + 3:].strip()
+
                 response = VoiceCommandResponse(
                     commands=[],  # Empty for tool-based responses
                     request_information=RequestInformation(
@@ -466,7 +567,7 @@ async def handle_voice(
                         conversation_id=request.conversation_id
                     ),
                     stop_reason=stop_reason,
-                    assistant_message=result.get("assistant_message"),
+                    assistant_message=_msg or None,
                     tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
                     validation_request=(
                         ValidationRequest(**result["validation_request"])
@@ -477,6 +578,16 @@ async def handle_voice(
         duration = time.time() - start_time
         logger.info(f"✅ Tool-based command processed in {duration:.2f}s, stop_reason={response.stop_reason}")
         latency_logger.end_request(request.conversation_id)
+
+        # Fire-and-forget: log transcript for passive memory extraction
+        import asyncio
+        asyncio.create_task(_log_transcript(
+            conversation_id=request.conversation_id,
+            voice_command=request.voice_command,
+            assistant_message=result.get("assistant_message"),
+            tool_calls=result.get("tool_calls"),
+        ))
+
         return response
 
     except Exception as e:
@@ -506,6 +617,27 @@ async def handle_voice(
             validation_request=None,
             assistant_message=None
         )
+
+
+class VoiceAcknowledgeRequest(BaseModel):
+    voice_command: str
+
+
+@v0_router.post("/voice/acknowledge")
+async def voice_acknowledge(
+    request: VoiceAcknowledgeRequest,
+    node_context_provider: NodeContextProvider = Depends(verify_api_key),
+):
+    """Instant keyword-matched acknowledgment for voice commands.
+
+    Nodes call this in parallel with /voice/command/stream to get a quick
+    acknowledgment to speak while the main pipeline processes. No LLM call —
+    avoids competing for llama.cpp's inference slot or evicting the prefix cache.
+    """
+    from app.services.acknowledgment_service import generate_acknowledgment
+
+    text = generate_acknowledgment(request.voice_command)
+    return {"text": text}
 
 
 @v0_router.post("/voice/command/stream")
@@ -898,6 +1030,30 @@ async def deep_research_callback(request: Request):
         await handle_summarization_callback(payload)
     except Exception as e:
         logger.error("❌ Deep research callback handling failed: %s", e, exc_info=True)
+
+    return {"status": "ok"}
+
+
+@v0_router.post("/memory-extraction/callback", name="memory_extraction_callback")
+async def memory_extraction_callback(request: Request):
+    """Receive LLM queue callback for passive memory extraction."""
+    callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
+    if callback_token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header != f"Bearer {callback_token}":
+            raise HTTPException(status_code=401, detail="Unauthorized callback")
+
+    payload = await request.json()
+    job_id = payload.get("job_id")
+    status = payload.get("status")
+    user_id = payload.get("metadata", {}).get("user_id", "?")
+    logger.info("Memory extraction callback: job_id=%s status=%s user_id=%s", job_id, status, user_id)
+
+    from app.services.memory_extraction_service import handle_extraction_callback
+    try:
+        await handle_extraction_callback(payload)
+    except Exception as e:
+        logger.error("Memory extraction callback failed: %s", e, exc_info=True)
 
     return {"status": "ok"}
 
