@@ -162,7 +162,7 @@ class TestSettingsServiceEnvFallback:
         with patch.dict(os.environ, {"JARVIS_MODEL_INTERFACE": "EnvInterface"}):
             result = service.get("llm.interface")
             # Should return definition default, NOT env var (no env_fallback)
-            assert result == "HermesMediumUntrained"
+            assert result == "Qwen25MediumUntrained"
 
     def test_default_when_no_env(self, service):
         """Test that defaults are used when no env var is set."""
