@@ -228,6 +228,48 @@ async def startup_event():
 
     asyncio.create_task(_periodic_transcript_cleanup())
 
+    # Node-update task sweeper — fails any update task that's been
+    # in_progress/dispatched longer than 10 minutes (dead node, botched
+    # upgrade, etc.). Keeps the mobile UI from getting stuck showing
+    # "installing…" forever.
+    from datetime import datetime, timedelta
+    NODE_TASK_TIMEOUT = timedelta(minutes=10)
+
+    async def _periodic_node_task_timeout():
+        while True:
+            await asyncio.sleep(120)
+            try:
+                from app.db import SessionLocal
+                from app.models import NodeTask
+                db = SessionLocal()
+                try:
+                    cutoff = datetime.utcnow() - NODE_TASK_TIMEOUT
+                    stale = (
+                        db.query(NodeTask)
+                        .filter(
+                            NodeTask.state.in_(["dispatched", "in_progress"]),
+                            NodeTask.updated_at < cutoff,
+                        )
+                        .all()
+                    )
+                    for task in stale:
+                        task.state = "failed"
+                        task.error_message = (
+                            task.error_message
+                            or f"Timeout: no heartbeat confirming {task.target_version}"
+                        )
+                        task.finished_at = datetime.utcnow()
+                        task.updated_at = datetime.utcnow()
+                    if stale:
+                        db.commit()
+                        logger.info("Marked %d stale node update tasks as failed", len(stale))
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("Node task timeout sweep failed: %s", e)
+
+    asyncio.create_task(_periodic_node_task_timeout())
+
     # Enrich llm.interface with available prompt providers dynamically
     if "llm.interface" in settings_service.definitions:
         from app.core.prompt_provider_factory import PromptProviderFactory
