@@ -18,6 +18,7 @@ from .deps import (
     verify_household_role,
     verify_user_jwt,
 )
+from .api.node_updates import dispatch_pending_task, reconcile_open_task
 from .models import AuthSession, ConfigPush, Node, SettingsRequest, SettingsSnapshot
 
 
@@ -269,17 +270,28 @@ def node_heartbeat(
         return {"status": "ok"}
 
     node.last_seen = datetime.utcnow()
+    reported_version: str | None = None
     if payload is not None:
         if payload.version_info:
-            node.last_seen_version = payload.version_info.get("version")
+            reported_version = payload.version_info.get("version")
+            node.last_seen_version = reported_version
             node.install_mode = payload.version_info.get("install_mode")
             node.git_sha = payload.version_info.get("git_sha")
         if payload.is_busy is not None:
             node.is_busy = payload.is_busy
     db.commit()
 
-    # Step 3 wires the task dispatch and version-match reconciliation here.
-    return {"status": "ok"}
+    # If the node just reported its post-upgrade version, finalize any
+    # open update task that was waiting on that version.
+    reconcile_open_task(db, node, reported_version)
+
+    # If there's something queued for this node (and it's not busy), hand
+    # it over now — the node's update_service picks it up on the response.
+    response: dict = {"status": "ok"}
+    pending = dispatch_pending_task(db, node)
+    if pending is not None:
+        response["pending_update"] = pending
+    return response
 
 
 @router.post("/nodes", response_model=NodeCreateResponse, dependencies=[Depends(verify_admin_key)])

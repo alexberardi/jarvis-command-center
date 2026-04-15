@@ -341,6 +341,10 @@ app.include_router(oauth.router, prefix="/api/v0", tags=["oauth"])
 from app.api import agents
 app.include_router(agents.router, prefix="/api/v0", tags=["agents"])
 
+# Include node update router (mobile triggers update, CC dispatches via heartbeat)
+from app.api import node_updates
+app.include_router(node_updates.router, prefix="/api/v0", tags=["node-updates"])
+
 # Include mobile chat, audio, node tools, and routine builder endpoints (JWT auth)
 from app.api import mobile_chat, mobile_audio, node_tools, routine_builder
 app.include_router(mobile_chat.router, prefix="/api/v0/mobile", tags=["mobile-chat"])
