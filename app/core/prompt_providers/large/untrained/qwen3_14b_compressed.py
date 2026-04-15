@@ -1,25 +1,22 @@
 """
-Qwen3_8B_Compressed - Prompt provider for Qwen3-8B Instruct (Q4_K_M GGUF).
+Qwen3_14B_Compressed - Prompt provider for Qwen3-14B Instruct (Q4_K_M GGUF).
 
-8B dense model using ChatML format and <tool_call> tags like Qwen 2.5.
+14B dense model using ChatML format and <tool_call> tags like Qwen 2.5.
 Strips Qwen3's <think> blocks and injects /nothink in user messages to
 disable chain-of-thought reasoning on simple voice commands.
 
-Based on Qwen25_7B_Compressed (95%+ accuracy) — compressed tools block,
-4 rules, CRITICAL DT_KEYS, force_tool_calls. Adds Qwen3-specific thinking
-mode handling from Qwen3LargeUntrained.
-
-Inherits parse_response, build_tools, get_response_format, and
-build_training_completion from Qwen25MediumUntrained via Qwen25_7B_Compressed.
+Inherits from Qwen3LargeUntrained (30B MoE): compressed tools block WITH
+param descriptions (14B has capacity to use them for routing), 5 rules,
+CRITICAL DT_KEYS, aggregated Tool Guidance section from per-tool
+``included_system_prompt_text`` hints.
 """
 
 import logging
 import os
-import re
 from typing import Any, Dict, List, Optional
 
-from app.core.prompt_providers.medium.untrained.qwen25_7b_compressed import (
-    Qwen25_7B_Compressed,
+from app.core.prompt_providers.large.untrained.qwen3_large_untrained import (
+    Qwen3LargeUntrained,
 )
 from app.core.prompt_providers.shared.context_builders import (
     build_agent_context_summary,
@@ -28,41 +25,30 @@ from app.core.prompt_providers.shared.context_builders import (
 )
 from app.core.prompt_providers.shared.core_rules import (
     ANTI_HALLUCINATION_MANDATE,
+    RULE_BEST_MATCH_INTENT,
+    RULE_EXTRACT_PARAMS,
+    RULE_ONE_AT_A_TIME,
+    RULE_POPULATE_REQUIRED,
+    RULE_STT_AWARENESS,
     build_identity_header,
 )
 
 logger = logging.getLogger("uvicorn")
 
-# Strip <think>...</think> blocks (Qwen3 thinking mode output)
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
-
-class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
+class Qwen3_14B_Compressed(Qwen3LargeUntrained):
     """
-    Prompt provider for Qwen3-8B Instruct (Q4_K_M, untrained).
+    Prompt provider for Qwen3-14B Instruct (Q4_K_M, untrained).
 
-    Same compressed prompt as Qwen 2.5 7B Compressed (4 rules, stripped
-    param descriptions, Direct Answer section). Adds /nothink suffix
-    and <think> block stripping for Qwen3's thinking mode.
+    Same compressed-tools-with-descriptions pattern as the 30B MoE. Adds
+    a Tool Guidance section that aggregates per-tool
+    ``included_system_prompt_text`` hints so routing guidance lives with
+    the tool rather than in the prompt template.
     """
 
     @property
     def name(self) -> str:
-        return "Qwen3_8B_Compressed"
-
-    @property
-    def user_message_suffix(self) -> str:
-        """Append /nothink to user messages to disable Qwen3 thinking mode.
-
-        Qwen3 ignores /no_think in the system prompt — the model was
-        trained to recognize this token in user turns only.
-        """
-        return "/nothink"
-
-    def parse_response(self, raw_content: str) -> Optional[str]:
-        """Strip <think> blocks, then delegate to Qwen 2.5 parser."""
-        cleaned: str = _THINK_BLOCK_RE.sub("", raw_content)
-        return super().parse_response(cleaned)
+        return "Qwen3_14B_Compressed"
 
     def build_system_prompt(
         self,
@@ -71,8 +57,6 @@ class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
         tools: List[Dict[str, Any]],
         available_commands: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        """Same as Qwen25_7B_Compressed but injects a Tool Guidance section
-        aggregated from per-tool ``included_system_prompt_text`` hints."""
         available_commands = available_commands or []
         node_context = node_context or {}
 
@@ -83,11 +67,22 @@ class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
         date_keys: list[str] = node_context.get("date_keys", [])
 
         identity: str = build_identity_header(room, user, voice_mode, user_memories)
-        rules: str = self._build_rules_block()
         direct_answer_section: str = build_direct_answer_section(available_commands)
         agent_context_section: str = build_agent_context_summary(node_context)
         tool_guidance_section: str = build_tool_guidance_section(tools)
-        tools_block: str = self._build_compressed_tools_block(tools)
+
+        terminology: str = "function"
+
+        def _sub(r: str) -> str:
+            return r.replace("{terminology}", terminology)
+
+        rules_lines: list[str] = ["Rules:"]
+        rules_lines.append(f"- {_sub(RULE_POPULATE_REQUIRED)}")
+        rules_lines.append(f"- {_sub(RULE_ONE_AT_A_TIME)}")
+        rules_lines.append(f"- {_sub(RULE_BEST_MATCH_INTENT)}")
+        rules_lines.append(f"- {_sub(RULE_EXTRACT_PARAMS)}")
+        rules_lines.append(f"- {_sub(RULE_STT_AWARENESS)}")
+        rules: str = "\n".join(rules_lines)
 
         dt_keys_line: str = ""
         if date_keys:
@@ -99,9 +94,14 @@ class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
                 "If the user omits a date, pass [\"today\"].\n"
             )
 
+        tools_block: str = self._build_compressed_tools_block(tools)
+
         system_prompt: str = f"""{identity}
 
 You are a function calling AI model. You may call one or more functions to assist with the user query. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
+
+You are provided with function signatures within <tools></tools> XML tags:
+{tools_block}
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
@@ -111,12 +111,10 @@ For each function call, return a json object with function name and arguments wi
 {rules}
 {dt_keys_line}{tool_guidance_section}{direct_answer_section}
 {agent_context_section}
-You are provided with function signatures within <tools></tools> XML tags:
-{tools_block}
 """
 
         logger.info(
-            "Built Qwen3_8B_Compressed system prompt: %d chars, %d tools",
+            "Built Qwen3_14B_Compressed system prompt: %d chars, %d tools",
             len(system_prompt),
             len(tools),
         )
@@ -130,7 +128,7 @@ You are provided with function signatures within <tools></tools> XML tags:
         return {
             "provider_name": self.name,
             "model_family": "qwen",
-            "size_tier": "medium",
+            "size_tier": "large",
             "training_tier": "untrained",
             "use_tool_classifier": self.use_tool_classifier,
             "supports_native_tools": self.supports_native_tools,
