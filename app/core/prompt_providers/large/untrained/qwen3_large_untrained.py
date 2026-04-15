@@ -25,6 +25,7 @@ from app.core.tool_builder import ToolBuilder
 from app.core.prompt_providers.shared.context_builders import (
     build_agent_context_summary,
     build_direct_answer_section,
+    build_tool_guidance_section,
 )
 from app.core.prompt_providers.shared.core_rules import (
     ANTI_HALLUCINATION_MANDATE,
@@ -107,6 +108,7 @@ class Qwen3LargeUntrained(Qwen25_7B_Compressed):
         identity: str = build_identity_header(room, user, voice_mode, user_memories)
         direct_answer_section: str = build_direct_answer_section(available_commands)
         agent_context_section: str = build_agent_context_summary(node_context)
+        tool_guidance_section: str = build_tool_guidance_section(tools)
 
         # 5 rules (same as Mixtral large — proven at 94.9%)
         terminology: str = "function"
@@ -149,8 +151,7 @@ For each function call, return a json object with function name and arguments wi
 </tool_call>
 
 {rules}
-{dt_keys_line}
-{direct_answer_section}
+{dt_keys_line}{tool_guidance_section}{direct_answer_section}
 {agent_context_section}
 """
 

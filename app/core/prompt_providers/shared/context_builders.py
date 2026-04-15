@@ -9,6 +9,42 @@ across prompt providers.
 from typing import Any, Dict, List
 
 
+def build_tool_guidance_section(
+    tools: List[Dict[str, Any]],
+) -> str:
+    """
+    Aggregate per-tool ``included_system_prompt_text`` into a guidance section.
+
+    Each server tool may declare routing guidance that should live in the
+    system prompt rather than its description (e.g., "MUST call X when
+    user asks about current events"). This pulls those strings out and
+    renders them as a bulleted "Tool Guidance:" section.
+
+    Args:
+        tools: Tool definitions (post ``to_openai_format``). May contain
+            an ``included_system_prompt_text`` top-level key.
+
+    Returns:
+        Formatted section string, or empty string if no tools declare guidance.
+    """
+    hints: list[str] = []
+    seen: set[str] = set()
+    for tool in tools:
+        text = tool.get("included_system_prompt_text")
+        if not text:
+            continue
+        text = text.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        hints.append(text)
+
+    if not hints:
+        return ""
+
+    return "\nTool Guidance:\n" + "\n".join(f"- {h}" for h in hints) + "\n"
+
+
 def build_direct_answer_section(
     available_commands: List[Dict[str, Any]],
 ) -> str:

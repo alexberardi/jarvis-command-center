@@ -31,6 +31,13 @@ class Node(Base):
     room_id = Column(String(36), ForeignKey('rooms.id', ondelete='SET NULL', use_alter=True), nullable=True)
     household_id = Column(String(255), nullable=True, index=True)
 
+    # Reported via heartbeat; drives the mobile "update available" badge and
+    # the busy-lock that defers update dispatch while the node is in session.
+    last_seen_version = Column(String(64), nullable=True)
+    install_mode = Column(String(16), nullable=True)  # "tarball" | "docker" | "dev"
+    git_sha = Column(String(40), nullable=True)
+    is_busy = Column(Boolean, default=False, nullable=False)
+
     def is_online(self) -> bool:
         """Node is online if last_seen is within ONLINE_THRESHOLD_MINUTES."""
         if self.last_seen is None:
@@ -43,6 +50,28 @@ class Node(Base):
     settings_snapshots = relationship("SettingsSnapshot", back_populates="node", cascade="all, delete-orphan")
     room_ref = relationship("Room", back_populates="nodes", foreign_keys=[room_id])
     config_pushes = relationship("ConfigPush", back_populates="node", cascade="all, delete-orphan")
+    tasks = relationship("NodeTask", back_populates="node", cascade="all, delete-orphan")
+
+
+class NodeTask(Base):
+    """Long-running per-node operations (update, reconfig, etc.).
+
+    State machine: pending → dispatched → in_progress → success | failed.
+    The heartbeat handler dispatches pending tasks and the node reports
+    progress by re-heartbeating with a new version_info.
+    """
+    __tablename__ = 'node_tasks'
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False, index=True)
+    kind = Column(String(32), nullable=False)  # e.g. "update"
+    target_version = Column(String(64), nullable=True)
+    state = Column(String(32), nullable=False, default="pending")
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
+
+    node = relationship("Node", back_populates="tasks")
 
 
 class Room(Base):

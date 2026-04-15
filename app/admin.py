@@ -59,8 +59,23 @@ class NodeResponse(BaseModel):
     household_id: str | None = None
     online: bool = False
     last_seen: datetime | None = None
+    # Populated from heartbeat; all optional so pre-upgrade nodes stay valid.
+    last_seen_version: str | None = None
+    install_mode: str | None = None
+    git_sha: str | None = None
+    is_busy: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class HeartbeatPayload(BaseModel):
+    """POST body for /admin/nodes/heartbeat.
+
+    All fields optional so older node versions still heartbeat successfully.
+    """
+    thread_status: dict | None = None
+    version_info: dict | None = None
+    is_busy: bool | None = None
 
 
 class NodeCreateResponse(BaseModel):
@@ -236,16 +251,34 @@ def get_node(node_id: str, db: Session = Depends(get_db)):
 
 @router.post("/nodes/heartbeat")
 def node_heartbeat(
+    payload: HeartbeatPayload | None = None,
     node_context: NodeContextProvider = Depends(verify_api_key),
     db: Session = Depends(get_db),
 ):
-    """Receive heartbeat from a node, update last_seen timestamp."""
+    """Receive heartbeat from a node and update status fields.
+
+    Also the dispatch channel for pending node tasks — if there's one queued
+    and the node isn't busy, it's returned in `pending_update`. Tasks are
+    marked "dispatched" so we don't re-send on every heartbeat; the node's
+    post-upgrade heartbeat confirms success by reporting the new version.
+    """
     node = db.query(Node).filter(
         Node.node_id == node_context.node.node_id,
     ).first()
-    if node:
-        node.last_seen = datetime.utcnow()
-        db.commit()
+    if not node:
+        return {"status": "ok"}
+
+    node.last_seen = datetime.utcnow()
+    if payload is not None:
+        if payload.version_info:
+            node.last_seen_version = payload.version_info.get("version")
+            node.install_mode = payload.version_info.get("install_mode")
+            node.git_sha = payload.version_info.get("git_sha")
+        if payload.is_busy is not None:
+            node.is_busy = payload.is_busy
+    db.commit()
+
+    # Step 3 wires the task dispatch and version-match reconciliation here.
     return {"status": "ok"}
 
 
