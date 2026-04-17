@@ -1183,8 +1183,8 @@ def get_device_state(
     request_id = str(uuid4())
     result_file = _os.path.join(_RESULT_DIR, f"state-{request_id}.json")
 
-    # Determine domain from entity_id
-    domain = dev.entity_id.split(".", 1)[0] if "." in dev.entity_id else ""
+    # Prefer stored domain column, fall back to entity_id prefix
+    domain = dev.domain or (dev.entity_id.split(".", 1)[0] if "." in dev.entity_id else "")
 
     # Publish MQTT request to node
     service = get_node_command_service()
