@@ -388,9 +388,10 @@ from app.api import node_updates
 app.include_router(node_updates.router, prefix="/api/v0", tags=["node-updates"])
 
 # Include mobile chat, audio, node tools, and routine builder endpoints (JWT auth)
-from app.api import mobile_chat, mobile_audio, node_tools, routine_builder
+from app.api import mobile_chat, mobile_audio, mobile_voice_profiles, node_tools, routine_builder
 app.include_router(mobile_chat.router, prefix="/api/v0/mobile", tags=["mobile-chat"])
 app.include_router(mobile_audio.router, prefix="/api/v0/mobile", tags=["mobile-audio"])
+app.include_router(mobile_voice_profiles.router, prefix="/api/v0/mobile", tags=["mobile-voice-profiles"])
 app.include_router(node_tools.router, prefix="/api/v0/mobile", tags=["node-tools"])
 app.include_router(routine_builder.router, prefix="/api/v0/mobile/routines", tags=["routine-builder"])
 
