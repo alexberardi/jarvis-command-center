@@ -379,6 +379,10 @@ app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
 from app.api import oauth
 app.include_router(oauth.router, prefix="/api/v0", tags=["oauth"])
 
+# Include camera streaming router (go2rtc proxy)
+from app.api import cameras
+app.include_router(cameras.router, prefix="/api/v0", tags=["cameras"])
+
 # Include agent utility endpoints (news, calendar for node-side agents)
 from app.api import agents
 app.include_router(agents.router, prefix="/api/v0", tags=["agents"])

@@ -63,6 +63,7 @@ class AuthConfigPayload(BaseModel):
     extra_authorize_params: dict[str, str] = {}
     extra_exchange_params: dict[str, str] = {}
     send_redirect_uri_in_exchange: bool = True
+    client_secret: str | None = None
     supports_pkce: bool = False
     native_redirect_uri: str | None = None
 
@@ -317,6 +318,11 @@ def create_auth_session(
 
     full_authorize_url = f"{auth_url}?{urlencode(params)}"
 
+    # Encrypt client_secret if provided (Web Application OAuth)
+    client_secret_enc = None
+    if getattr(cfg, "client_secret", None):
+        client_secret_enc = _encrypt_value(cfg.client_secret)
+
     # Create session
     session = AuthSession(
         id=str(uuid4()),
@@ -329,6 +335,7 @@ def create_auth_session(
         authorize_url=full_authorize_url,
         exchange_url=exchange_endpoint,
         client_id=effective_client_id,
+        client_secret_enc=client_secret_enc,
         redirect_uri=redirect_uri,
         expires_at=datetime.utcnow() + timedelta(minutes=SESSION_TTL_MINUTES),
     )
@@ -387,6 +394,10 @@ async def oauth_callback(
         "code": code,
         "client_id": session.client_id,
     }
+
+    # Include client_secret for Web Application OAuth (server-side flow)
+    if session.client_secret_enc:
+        exchange_data["client_secret"] = _decrypt_value(session.client_secret_enc)
 
     # Include redirect_uri in exchange (most providers require it)
     exchange_data["redirect_uri"] = redirect_uri
@@ -486,6 +497,10 @@ async def exchange_code(
         "code": body.code,
         "client_id": session.client_id,
     }
+
+    # Include client_secret for Web Application OAuth (server-side flow)
+    if session.client_secret_enc:
+        exchange_data["client_secret"] = _decrypt_value(session.client_secret_enc)
 
     # Include redirect_uri (provider requires it to match the authorize request)
     if session.redirect_uri:

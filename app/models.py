@@ -333,6 +333,7 @@ class AuthSession(Base):
     authorize_url = Column(Text, nullable=True)              # Full URL mobile opens
     exchange_url = Column(Text, nullable=True)               # Token exchange endpoint
     client_id = Column(String(255), nullable=False)
+    client_secret_enc = Column(Text, nullable=True)         # Encrypted client_secret (Web Application OAuth)
     redirect_uri = Column(Text, nullable=True)              # Redirect URI used (needed for code exchange)
 
     # Result (populated after successful exchange, encrypted at rest)
