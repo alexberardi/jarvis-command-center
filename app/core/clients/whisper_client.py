@@ -200,3 +200,60 @@ class WhisperClient:
             )
             response.raise_for_status()
             return response.json()
+
+    async def check_voice_profile(
+        self,
+        user_id: int,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """Check whether a voice profile exists for a user.
+
+        Args:
+            user_id: The user to check
+            timeout: Request timeout in seconds
+
+        Returns:
+            Dict with ``exists`` boolean
+        """
+        url = f"{self.base_url.rstrip('/')}/voice-profiles/check"
+        params = {"user_id": str(user_id), "household_id": self.household_id}
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                url,
+                params=params,
+                headers=self._build_headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def verify_voice_profile(
+        self,
+        user_id: int,
+        audio: bytes,
+        filename: str,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Test whether an audio sample matches a user's voice profile.
+
+        Args:
+            user_id: The user to verify against
+            audio: WAV audio bytes
+            filename: Original filename
+            timeout: Request timeout in seconds
+
+        Returns:
+            Dict with ``matched`` boolean and ``confidence`` float
+        """
+        url = f"{self.base_url.rstrip('/')}/voice-profiles/verify"
+        params = {"user_id": str(user_id), "household_id": self.household_id}
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                url,
+                files={"file": (filename, audio)},
+                params=params,
+                headers=self._build_headers(),
+            )
+            response.raise_for_status()
+            return response.json()
