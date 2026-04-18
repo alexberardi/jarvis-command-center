@@ -33,3 +33,4 @@ class CommandDefinition(BaseModel):
 class VoiceCommandRequest(BaseModel):
     voice_command: str
     conversation_id: str  # Required in new architecture
+    speaker_user_id: Optional[int] = None  # Actual speaker from STT (for mismatch detection with warmup)
