@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "Central voice command API for the Jarvis ecosystem"
 requires-python = ">=3.11"
 dependencies = [
-    "jarvis-config-client @ git+https://github.com/alexberardi/jarvis-config-client.git@main",
-    "jarvis-log-client @ git+https://github.com/alexberardi/jarvis-log-client.git@main",
+    "jarvis-config-client @ git+https://github.com/alexberardi/jarvis-config-client.git@ea1c63a",
+    "jarvis-log-client @ git+https://github.com/alexberardi/jarvis-log-client.git@46aa757",
     "fastapi",
     "uvicorn",
     "python-multipart",
@@ -30,8 +30,8 @@ dependencies = [
     "paho-mqtt",
     "cryptography",
     "feedparser",
-    "jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@main",
-    "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@main",
+    "jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@9902feb",
+    "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@4549b23",
     "ddgs>=7.0.0",
 ]
 
