@@ -306,6 +306,7 @@ class ConversationHandler:
         self,
         voice_command: str,
         conversation_id: str,
+        speaker_user_id: int | None = None,
     ) -> Dict[str, Any]:
         """
         Process a voice command using tool-based architecture.
@@ -313,6 +314,8 @@ class ConversationHandler:
         Args:
             voice_command: The user's voice command text
             conversation_id: Conversation ID
+            speaker_user_id: Actual speaker from STT (for mismatch detection
+                            when warmup used a cached/predicted speaker ID)
 
         Returns:
             Response dict with:
@@ -334,6 +337,23 @@ class ConversationHandler:
             messages = conversation_cache.get_messages(conversation_id)
             tools = conversation_cache.get_tools(conversation_id)
             available_commands = conversation_cache.get_available_commands(conversation_id) or []
+
+        # --- Speaker mismatch detection (parallel warmup) ---
+        # Warmup may have used a cached/predicted speaker_user_id. If STT
+        # identified a different speaker, reload memories and rebuild the
+        # system prompt so the LLM sees the correct user context.
+        if speaker_user_id is not None and messages:
+            node_context = conversation_cache.get_node_context(conversation_id)
+            warmup_speaker = node_context.get("speaker_user_id") if node_context else None
+            if warmup_speaker != speaker_user_id:
+                logger.info(
+                    "Speaker mismatch detected, reloading memories",
+                    warmup_speaker=warmup_speaker,
+                    actual_speaker=speaker_user_id,
+                )
+                await self._reload_memories_for_speaker(
+                    conversation_id, speaker_user_id, node_context, messages,
+                )
 
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Cache lookups done")
 
@@ -431,6 +451,191 @@ class ConversationHandler:
         if result.get("stop_reason") == "error":
             logger.error("❌ Tool loop returned stop_reason=error: %s", result)
         return result
+
+    # --- Streaming-eligible server tools (bypass tool execution loop) ---
+    _STREAMING_ELIGIBLE_TOOLS: set[str] = {"answer_question", "quick_search"}
+    _STREAMING_MIN_CONFIDENCE: float = 0.8
+
+    async def stream_voice_response(
+        self,
+        conversation_id: str,
+        voice_command: str,
+        tts_client,
+        speaker_user_id: int | None = None,
+    ):
+        """Attempt to stream LLM tokens directly to TTS for eligible queries.
+
+        Uses the tool router to predict whether the command is conversational
+        (no tool execution needed). If so, streams LLM tokens → sentence
+        detection → TTS, yielding audio bytes as each sentence completes.
+
+        Returns:
+            An async generator of PCM audio bytes if streaming is eligible,
+            or ``None`` if the caller should fall back to the blocking pipeline.
+        """
+        import time as _time
+        from app.core.streaming_handler import extract_sentences
+
+        _t0 = _time.time()
+
+        # Get conversation state from cache
+        messages = conversation_cache.get_messages(conversation_id)
+        tools = conversation_cache.get_tools(conversation_id)
+        available_commands = conversation_cache.get_available_commands(conversation_id) or []
+
+        if not messages:
+            return None
+
+        # Apply tool filtering + routing (same as blocking path)
+        tools = self._apply_tool_filtering(voice_command, tools, available_commands)
+        router_decision = self._apply_tool_routing_with_cache(
+            voice_command, tools or [], conversation_id,
+        )
+
+        # Check if streaming-eligible
+        if not router_decision:
+            logger.debug("No router decision — falling back to blocking path")
+            return None
+
+        predicted_tool = router_decision.get("tool_name", "")
+        confidence = router_decision.get("score", 0.0)
+
+        if predicted_tool not in self._STREAMING_ELIGIBLE_TOOLS:
+            logger.debug(
+                "Router predicted %s (not streaming-eligible) — blocking path",
+                predicted_tool,
+            )
+            return None
+
+        if confidence < self._STREAMING_MIN_CONFIDENCE:
+            logger.debug(
+                "Router confidence %.2f < %.2f threshold — blocking path",
+                confidence, self._STREAMING_MIN_CONFIDENCE,
+            )
+            return None
+
+        logger.info(
+            "🚀 Streaming path: router=%s confidence=%.2f",
+            predicted_tool, confidence,
+        )
+
+        # Speaker mismatch detection (same as blocking path)
+        if speaker_user_id is not None:
+            node_context = conversation_cache.get_node_context(conversation_id)
+            warmup_speaker = node_context.get("speaker_user_id") if node_context else None
+            if warmup_speaker != speaker_user_id:
+                await self._reload_memories_for_speaker(
+                    conversation_id, speaker_user_id, node_context, messages,
+                )
+                # Re-fetch messages after reload
+                messages = conversation_cache.get_messages(conversation_id) or messages
+
+        # Pre-execute quick_search if applicable
+        search_results = await self._maybe_quick_search(voice_command)
+        if search_results:
+            messages.append({"role": "system", "content": search_results})
+
+        # Add user message
+        suffix: str = (
+            self.prompt_provider.user_message_suffix
+            if self.prompt_provider else ""
+        )
+        user_content: str = f"{voice_command}\n{suffix}" if suffix else voice_command
+        messages.append({"role": "user", "content": user_content})
+
+        # Override: tell the LLM to respond in plain text (no JSON, no tools)
+        messages.append({
+            "role": "system",
+            "content": (
+                "Respond naturally in plain text. Do not use JSON format "
+                "or call any tools. Answer the user's question directly."
+            ),
+        })
+
+        logger.info("🎙️ Starting streaming LLM → TTS (T+%dms)", (_time.time() - _t0) * 1000)
+
+        # Build adapter settings
+        node_context = conversation_cache.get_node_context(conversation_id) or {}
+        adapter_settings = None
+        adapter_hash = node_context.get("adapter_hash")
+        if adapter_hash:
+            adapter_settings = {"hash": adapter_hash, "enabled": True}
+
+        # Stream LLM tokens → accumulate sentences → TTS each sentence
+        #
+        # Sentence boundary heuristic: a period/question-mark/exclamation
+        # followed by whitespace indicates a complete sentence. We split
+        # on that boundary, send the complete part to TTS immediately, and
+        # keep the remainder in the buffer for the next sentence.
+        _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+        async def _audio_generator():
+            token_buffer = ""
+            full_response = ""
+            sentences_sent = 0
+
+            try:
+                async for event in self.llm_client.chat_completion_stream(
+                    messages=messages,
+                    adapter_settings=adapter_settings,
+                    max_tokens=512,
+                ):
+                    if event.get("done"):
+                        break
+
+                    delta = event.get("delta", "")
+                    if not delta:
+                        continue
+
+                    token_buffer += delta
+                    full_response += delta
+
+                    # Check for sentence boundaries in the buffer.
+                    # Split yields [complete1, complete2, ..., partial].
+                    # If there's at least one split point, everything before
+                    # the last element is a complete sentence.
+                    parts = _SENTENCE_BOUNDARY.split(token_buffer)
+                    if len(parts) >= 2:
+                        complete_parts = parts[:-1]
+                        token_buffer = parts[-1]
+
+                        for sentence in complete_parts:
+                            sentence = sentence.strip()
+                            if not sentence:
+                                continue
+                            sentences_sent += 1
+                            try:
+                                audio_iter, _meta = await tts_client.speak_stream(sentence)
+                                async for chunk in audio_iter:
+                                    yield chunk
+                            except Exception as e:
+                                logger.warning("TTS stream error for sentence %d: %s", sentences_sent, e)
+
+                # Flush remaining buffer
+                remaining_text = token_buffer.strip()
+                if remaining_text:
+                    sentences_sent += 1
+                    try:
+                        audio_iter, _meta = await tts_client.speak_stream(remaining_text)
+                        async for chunk in audio_iter:
+                            yield chunk
+                    except Exception as e:
+                        logger.warning("TTS stream error for final sentence: %s", e)
+
+            except Exception as e:
+                logger.error("Streaming LLM error: %s", e)
+                return
+
+            # Update conversation cache with the full response
+            messages.append({"role": "assistant", "content": full_response})
+            conversation_cache.update_messages(conversation_id, messages)
+
+            logger.info(
+                "✅ Streaming complete: %d sentences, %d chars (T+%dms)",
+                sentences_sent, len(full_response), (_time.time() - _t0) * 1000,
+            )
+
+        return _audio_generator()
 
     async def continue_conversation_with_tool_results(
         self,
@@ -1180,5 +1385,95 @@ class ConversationHandler:
         except Exception as e:
             logger.warning(f"⚠️ Failed to check memory settings, defaulting to enabled: {e}")
             return True, True
+
+    async def _reload_memories_for_speaker(
+        self,
+        conversation_id: str,
+        speaker_user_id: int,
+        node_context: Dict[str, Any] | None,
+        messages: list,
+    ) -> None:
+        """Reload user memories after a speaker mismatch from parallel warmup.
+
+        When warmup ran during recording, it used the last-known speaker's
+        memories.  If STT identified a different speaker, we swap the
+        memories in the system prompt and update the conversation cache so
+        the LLM sees the correct user context.
+        """
+        if node_context is None:
+            return
+
+        _memory_enabled, _ = self._get_memory_settings(node_context)
+        if not _memory_enabled:
+            return
+
+        household_id = node_context.get("household_id")
+        if not household_id:
+            return
+
+        # Update node_context with actual speaker
+        node_context["speaker_user_id"] = speaker_user_id
+
+        try:
+            from app.db import get_session_local
+            from app.services.memory_service import MemoryService
+
+            pinned_max_chars = 500
+            try:
+                from app.services.settings_service import get_settings_service
+                settings = get_settings_service()
+                val = settings.get("memory.pinned_max_chars")
+                if val is not None:
+                    pinned_max_chars = int(val)
+            except Exception:
+                pass
+
+            SessionLocal = get_session_local()
+            db = SessionLocal()
+            try:
+                svc = MemoryService(db)
+                memories_text = svc.get_memories_for_prompt(
+                    speaker_user_id, household_id, max_chars=pinned_max_chars
+                )
+                node_context["user_memories"] = memories_text or ""
+                logger.info(
+                    f"🔄 Reloaded {len(memories_text or '')} chars of memories for speaker {speaker_user_id}"
+                )
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to reload memories for speaker {speaker_user_id}: {e}")
+            return
+
+        # Rebuild system prompt with correct memories and replace in cache
+        tools = conversation_cache.get_tools(conversation_id)
+        timezone = node_context.get("timezone")
+        available_command_flags = ""
+        available_commands = conversation_cache.get_available_commands(conversation_id) or []
+        if available_commands:
+            from app.core.voice_command_helpers import build_available_command_flags
+            available_command_flags = build_available_command_flags(
+                [cmd for cmd in available_commands if cmd.get("command_name")]
+            )
+
+        new_system_prompt = self._get_system_prompt(
+            node_context, timezone, tools, available_command_flags
+        )
+
+        # Replace the system message in the conversation
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = new_system_prompt
+        else:
+            messages.insert(0, {"role": "system", "content": new_system_prompt})
+
+        # Update cache
+        conversation_cache.set(
+            conversation_id=conversation_id,
+            messages=messages,
+            available_commands=available_commands,
+            timezone=timezone,
+            tools=tools,
+            node_context=node_context,
+        )
 
 

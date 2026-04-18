@@ -338,6 +338,9 @@ v0_router = APIRouter()
 # Include admin router with versioning
 app.include_router(admin.router, prefix="/api/v0/admin", tags=["admin"])
 
+# Unauthenticated node endpoints (e.g. factory-reset verification)
+app.include_router(admin.node_public_router, prefix="/api/v0", tags=["node-public"])
+
 # Include provisioning router
 app.include_router(provisioning.router, prefix="/api/v0", tags=["provisioning"])
 
@@ -724,11 +727,51 @@ async def handle_voice_stream(
         )
 
     try:
-        # Run the full blocking pipeline (tool filtering, routing, server tools)
+        from app.core.clients.tts_client import TTSClient
+
+        tts_client = TTSClient(
+            household_id=node_context_provider.household_id,
+            node_id=node_context_provider.node.node_id,
+        )
+
+        # --- Fast path: router-gated streaming LLM → TTS ---
+        # For conversational/search queries the router predicts with high
+        # confidence, bypass the blocking tool loop entirely and stream
+        # LLM tokens → sentences → TTS audio in real time.
+        streaming_audio = await model_service.try_stream_voice_response(
+            conversation_id=request.conversation_id,
+            voice_command=request.voice_command,
+            tts_client=tts_client,
+            speaker_user_id=request.speaker_user_id,
+        )
+        if streaming_audio is not None:
+            try:
+                audio_fmt = await tts_client.get_audio_format()
+            except Exception:
+                audio_fmt = {"sample_rate": "16000", "channels": "1", "sample_width": "2"}
+
+            duration = time.time() - start_time
+            logger.info(f"🚀 Streaming LLM→TTS response in {duration:.2f}s")
+            latency_logger.end_request(request.conversation_id)
+
+            return StreamingResponse(
+                streaming_audio,
+                status_code=200,
+                media_type="audio/raw",
+                headers={
+                    "X-Audio-Sample-Rate": audio_fmt["sample_rate"],
+                    "X-Audio-Channels": audio_fmt["channels"],
+                    "X-Audio-Sample-Width": audio_fmt["sample_width"],
+                    "X-Assistant-Message": "",
+                },
+            )
+
+        # --- Standard path: blocking tool execution + TTS ---
         with timing.measure("process_voice_command_with_tools"):
             result = await model_service.process_voice_command_with_tools(
                 voice_command=request.voice_command,
                 conversation_id=request.conversation_id,
+                speaker_user_id=request.speaker_user_id,
             )
 
         stop_reason = result.get("stop_reason", "complete")
@@ -738,12 +781,6 @@ async def handle_voice_stream(
         # Use strip() to avoid treating whitespace-only as "has text"
         if stop_reason == "complete" and assistant_message and assistant_message.strip():
             from app.core.streaming_handler import stream_text_as_audio
-            from app.core.clients.tts_client import TTSClient
-
-            tts_client = TTSClient(
-                household_id=node_context_provider.household_id,
-                node_id=node_context_provider.node.node_id,
-            )
 
             # Get audio format for response headers
             try:

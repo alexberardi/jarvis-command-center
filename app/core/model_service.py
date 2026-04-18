@@ -287,6 +287,7 @@ class ModelService:
         self,
         voice_command: str,
         conversation_id: str,
+        speaker_user_id: int | None = None,
     ) -> Dict[str, Any]:
         """
         Process a voice command using tool-based architecture.
@@ -294,6 +295,8 @@ class ModelService:
         Args:
             voice_command: The user's voice command text
             conversation_id: Conversation ID
+            speaker_user_id: Actual speaker from STT (for mismatch detection
+                            when warmup used a cached/predicted speaker ID)
 
         Returns:
             Response dict with:
@@ -307,6 +310,26 @@ class ModelService:
         return await self._conversation_handler.process_voice_command_with_tools(
             voice_command=voice_command,
             conversation_id=conversation_id,
+            speaker_user_id=speaker_user_id,
+        )
+
+    async def try_stream_voice_response(
+        self,
+        conversation_id: str,
+        voice_command: str,
+        tts_client,
+        speaker_user_id: int | None = None,
+    ):
+        """Attempt router-gated streaming LLM → TTS.
+
+        Returns an async audio generator if the command is streaming-eligible,
+        or ``None`` to fall back to the blocking pipeline.
+        """
+        return await self._conversation_handler.stream_voice_response(
+            conversation_id=conversation_id,
+            voice_command=voice_command,
+            tts_client=tts_client,
+            speaker_user_id=speaker_user_id,
         )
 
     async def continue_conversation_with_tool_results(
