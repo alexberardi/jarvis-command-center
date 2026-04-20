@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from datetime import datetime
@@ -9,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from .core.conversation_cache import conversation_cache
+from .core.pending_resets import create_reset_token, verify_and_consume
 from .context_providers.node_context_provider import NodeContextProvider
 from .deps import (
     AuthenticatedUser,
@@ -23,6 +25,8 @@ from .models import AuthSession, ConfigPush, Node, SettingsRequest, SettingsSnap
 
 
 router = APIRouter()
+# Separate router for unauthenticated node endpoints (e.g. factory-reset verification)
+node_public_router = APIRouter()
 logger = logging.getLogger("uvicorn")
 
 
@@ -357,6 +361,23 @@ def delete_node(
             detail="Only superusers can delete nodes without a household",
         )
 
+    # Publish factory-reset MQTT BEFORE revoking auth, so the node can
+    # verify the reset token while (or shortly after) we delete records.
+    reset_token: str = create_reset_token()
+    try:
+        from .node_settings import get_mqtt_client
+        mqtt = get_mqtt_client()
+        if mqtt:
+            mqtt.publish(
+                f"jarvis/nodes/{node_id}/factory-reset",
+                json.dumps({"request_id": reset_token, "node_id": node_id}),
+            )
+            logger.info(f"Factory-reset MQTT published for node {node_id}")
+        else:
+            logger.warning(f"MQTT unavailable — node {node_id} will not auto-reset")
+    except Exception as e:
+        logger.warning(f"Failed to publish factory-reset MQTT: {e}")
+
     # Attempt to deactivate in jarvis-auth
     _deactivate_node_with_auth(node_id)
 
@@ -411,3 +432,124 @@ def remove_conversation(conversation_id: str):
     """Remove a specific conversation from the cache."""
     conversation_cache.remove(conversation_id)
     return {"message": f"Removed conversation {conversation_id[:8]}... from cache"}
+
+
+# ============================================================
+# Phase 5 — Adapter deployment admin endpoints
+# ============================================================
+
+
+class ActiveAdapterResponse(BaseModel):
+    household_id: str
+    adapter_hash: str
+    pass_rate: Optional[float] = None
+    trained_on_examples: Optional[int] = None
+    deployed_at: datetime
+
+
+class AdapterHistoryEntry(BaseModel):
+    id: int
+    adapter_hash: str
+    pass_rate: Optional[float] = None
+    trained_on_examples: Optional[int] = None
+    deployed_at: datetime
+    replaced_at: Optional[datetime] = None
+    trigger: str
+
+
+@router.get(
+    "/adapter/{household_id}",
+    response_model=Optional[ActiveAdapterResponse],
+    dependencies=[Depends(verify_admin_key)],
+)
+def get_active_adapter(household_id: str, db: Session = Depends(get_db)):
+    """Return the currently deployed adapter for a household, or null."""
+    from app.services.adapter_registry import AdapterRegistry
+
+    active = AdapterRegistry(db).get_active(household_id)
+    if active is None:
+        return None
+    return ActiveAdapterResponse(**active.__dict__)
+
+
+@router.get(
+    "/adapter/{household_id}/history",
+    response_model=List[AdapterHistoryEntry],
+    dependencies=[Depends(verify_admin_key)],
+)
+def get_adapter_history(household_id: str, limit: int = 20, db: Session = Depends(get_db)):
+    """Return recent adapter deployments for a household, most-recent first."""
+    from app.services.adapter_registry import AdapterRegistry
+
+    rows = AdapterRegistry(db).list_history(household_id, limit=limit)
+    return [
+        AdapterHistoryEntry(
+            id=r.id,
+            adapter_hash=r.adapter_hash,
+            pass_rate=r.pass_rate,
+            trained_on_examples=r.trained_on_examples,
+            deployed_at=r.deployed_at,
+            replaced_at=r.replaced_at,
+            trigger=r.trigger,
+        )
+        for r in rows
+    ]
+
+
+@router.post(
+    "/adapter/{household_id}/rollback",
+    response_model=Optional[ActiveAdapterResponse],
+    dependencies=[Depends(verify_admin_key)],
+)
+def rollback_adapter(household_id: str, db: Session = Depends(get_db)):
+    """Roll back the active adapter to the most recent prior entry.
+
+    404 if there is no history to roll back to.
+    """
+    from app.services.adapter_registry import AdapterRegistry
+
+    reg = AdapterRegistry(db)
+    restored = reg.rollback(household_id)
+    if restored is None:
+        raise HTTPException(status_code=404, detail="no prior adapter to roll back to")
+    db.commit()
+    logger.info(
+        "adapter rollback: household=%s restored hash=%s",
+        household_id, restored.adapter_hash[:12],
+    )
+    return ActiveAdapterResponse(**restored.__dict__)
+
+
+# ============================================================
+# Factory-Reset Verification (unauthenticated — node auth is
+# already revoked by the time it calls back)
+# ============================================================
+
+
+class VerifyResetRequest(BaseModel):
+    node_id: str
+    request_id: str
+
+
+@node_public_router.post("/nodes/verify-reset")
+def verify_reset(body: VerifyResetRequest):
+    """Verify a factory-reset token issued during node deletion.
+
+    The node receives a reset token via MQTT and calls this endpoint to
+    confirm it was actually issued by this CC instance. The token is
+    single-use and expires after 5 minutes.
+
+    This endpoint is intentionally unauthenticated because the node's
+    API key has already been revoked by the time it receives the MQTT
+    message. The token itself (UUID4, single-use, time-limited) serves
+    as proof of legitimacy.
+    """
+    if verify_and_consume(body.request_id):
+        logger.info(f"Factory-reset verified for node {body.node_id}")
+        return {"verified": True}
+
+    logger.warning(
+        f"Factory-reset verification REJECTED for node {body.node_id} "
+        f"(token={body.request_id[:8]}...)"
+    )
+    raise HTTPException(status_code=404, detail="Invalid or expired reset token")

@@ -69,10 +69,14 @@ def build_direct_answer_section(
         if not cmd_name:
             continue
         allow_direct = cmd.get("allow_direct_answer")
-        if allow_direct is False:
-            must_call_tools.append(cmd_name)
-        elif allow_direct is True:
+        # SDK default for allow_direct_answer is False. When upstream
+        # merge/filter layers lose track of the flag (None), treat as False
+        # so the command still ends up in MUST-call — matching the SDK
+        # default rather than silently dropping the command from the policy.
+        if allow_direct is True:
             direct_answer_allowed.append(cmd_name)
+        else:
+            must_call_tools.append(cmd_name)
 
     if not must_call_tools and not direct_answer_allowed:
         return ""
