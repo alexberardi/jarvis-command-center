@@ -145,3 +145,65 @@ class TranscriptService:
         if count:
             self.db.commit()
         return count
+
+    # ------------------------------------------------------------------
+    # Phase 1: user-facing rating API
+    # ------------------------------------------------------------------
+
+    def list_recent_for_user(
+        self,
+        user_id: int,
+        limit: int = 50,
+        since: datetime | None = None,
+    ) -> list[ConversationTranscript]:
+        """Return the user's most-recent transcripts, newest first.
+
+        Used by the mobile "Recent Commands" feedback screen. Caller is responsible
+        for authorizing the request (verify_user_jwt → user_id).
+        """
+        q = self.db.query(ConversationTranscript).filter(
+            ConversationTranscript.user_id == user_id
+        )
+        if since is not None:
+            q = q.filter(ConversationTranscript.created_at >= since)
+        return (
+            q.order_by(ConversationTranscript.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+    def rate_transcript(
+        self,
+        transcript_id: int,
+        user_id: int,
+        rating: int,
+        notes: str | None = None,
+    ) -> ConversationTranscript | None:
+        """Record an explicit rating on a transcript.
+
+        `rating` must be −1 / 0 / +1. Returns the updated row, or None if the
+        transcript doesn't exist or doesn't belong to `user_id` (opaque 404 at the
+        API layer — don't leak existence of other users' rows).
+        """
+        if rating not in (-1, 0, 1):
+            raise ValueError(f"rating must be -1, 0, or 1; got {rating!r}")
+
+        row = (
+            self.db.query(ConversationTranscript)
+            .filter(
+                and_(
+                    ConversationTranscript.id == transcript_id,
+                    ConversationTranscript.user_id == user_id,
+                )
+            )
+            .first()
+        )
+        if not row:
+            return None
+
+        row.user_rating = rating
+        row.rating_notes = notes
+        row.rated_at = datetime.utcnow()
+        self.db.commit()
+        self.db.refresh(row)
+        return row

@@ -121,6 +121,36 @@ def send_node_command(node_id: str, body: SendCommandRequest) -> SendCommandResp
     return SendCommandResponse(status="sent", request_id=request_id)
 
 
+class NodeConfigUpdateRequest(BaseModel):
+    """Update node config.json settings from mobile app."""
+    settings: dict[str, int | float | str | bool]
+    restart: bool = True  # restart node service to apply module-level settings
+
+
+@router.post(
+    "/nodes/{node_id}/node-config",
+    response_model=SendCommandResponse,
+)
+def update_node_config(
+    node_id: str,
+    body: NodeConfigUpdateRequest,
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+) -> SendCommandResponse:
+    """Update a node's config.json from the mobile app (JWT auth).
+
+    Publishes an MQTT command to the node with the settings to merge
+    into its config.json. If restart=True (default), the node restarts
+    its service after applying so module-level settings take effect.
+    """
+    service = get_node_command_service()
+    request_id = service.publish_command(
+        node_id,
+        "update_node_config",
+        {"settings": body.settings, "restart": body.restart},
+    )
+    return SendCommandResponse(status="sent", request_id=request_id)
+
+
 @router.post(
     "/commands/{request_id}/verify",
     response_model=VerifyResponse,

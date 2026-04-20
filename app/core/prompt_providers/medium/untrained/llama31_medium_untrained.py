@@ -48,6 +48,33 @@ _FUNCTION_CALL_SPACE_RE = re.compile(
 _FUNCTION_CALL_UNCLOSED_RE = re.compile(
     r"<function[=>](\w+)>(\{.*)", re.DOTALL
 )
+# Tolerant final fallback: handles adapter-induced drift where the model drops
+# the '>' after the name (<function>name{args}...) or the final '>' on the
+# closing tag (<function>name>{args}</function). Terminates the args at the
+# first balanced closing brace via non-greedy match; trailing </function(...)
+# is stripped downstream.
+_FUNCTION_CALL_TOLERANT_RE = re.compile(
+    r"<function[=>](\w+)>?\s*(\{.*?\})", re.DOTALL
+)
+# Observed drift variants: parens/brackets instead of angle brackets, e.g.
+# "<function)name>{...}", "(function)name{...}", "(function:name>{...}",
+# "{function=\"name\"}{...}". Single tolerant regex accepting common wrappers.
+_FUNCTION_CALL_DRIFT_RE = re.compile(
+    r"[<(\{]function[=>:)\"]?\s*(\w+)[>\"\}]?\s*(\{.*?\})", re.DOTALL
+)
+# Ultra-tolerant: <name>{args}... — model drops the "function=" prefix and
+# uses the tool name directly as the tag (e.g., <music>{...}[/music]). Accepts
+# any \w+ tag name and any closing delimiter style. Downstream validation
+# rejects non-registered names.
+_XML_WRAPPED_CALL_RE = re.compile(
+    r"<(\w+)>\s*(\{.*?\})", re.DOTALL
+)
+# Split-tag variant: <function>name</function> {args} — model closes the tag
+# before emitting arguments. Parser pairs the name from inside the tag with
+# the JSON object that follows.
+_SPLIT_TAG_CALL_RE = re.compile(
+    r"<function>(\w+)</function>\s*(\{.*?\})", re.DOTALL
+)
 
 # Parameters that are always arrays — normalize string values to single-element lists
 _ARRAY_PARAMS = frozenset({"resolved_datetimes"})
@@ -104,8 +131,21 @@ class Llama31MediumUntrained(IJarvisPromptProvider):
         user: str = node_context.get("user", "default")
         voice_mode: str = node_context.get("voice_mode", "brief")
 
-        # Shared sections
-        direct_answer_section: str = build_direct_answer_section(available_commands)
+        # Read Direct Answer Policy directly from the tools list (each tool
+        # has allow_direct_answer baked in via to_openai_tool_schema). This
+        # is more robust than reading from available_commands, which goes
+        # through an upstream merge that can drop flags for Pantry commands.
+        _tool_flags = []
+        for t in tools:
+            fn = t.get("function") if isinstance(t.get("function"), dict) else None
+            name = (fn.get("name") if fn else None) or t.get("name")
+            if not name:
+                continue
+            _tool_flags.append({
+                "command_name": name,
+                "allow_direct_answer": t.get("allow_direct_answer"),
+            })
+        direct_answer_section: str = build_direct_answer_section(_tool_flags)
         agent_context_section: str = build_agent_context_summary(node_context)
 
         # Tool descriptions with primary examples only (for intent guidance)
@@ -136,6 +176,8 @@ To call a function, respond with:
 <function=function_name>{{"arg_name": "value"}}</function>
 
 For example, to get weather: <function=get_weather>{{"city": "Miami"}}</function>
+
+CRITICAL: Use ONLY the exact function names from the "Available functions" list below. Do NOT invent names (e.g., "calendar_today", "check_calendar") or use dotted service paths (e.g., "light.turn_off", "climate.set_temperature"). Pick the single best-matching function by name from the list and pass its parameters.
 
 Available functions:
 {tool_json}
@@ -182,6 +224,10 @@ Tools:
         # Extract ALL <function=name>{...}</function> blocks
         function_matches = _FUNCTION_CALL_RE.findall(cleaned)
 
+        # Split-tag: <function>name</function> {args} (args outside closing tag)
+        if not function_matches:
+            function_matches = _SPLIT_TAG_CALL_RE.findall(cleaned)
+
         # Fallback: try <function=name {args}> variant (space between name and args)
         if not function_matches:
             function_matches = _FUNCTION_CALL_SPACE_RE.findall(cleaned)
@@ -192,12 +238,45 @@ Tools:
             if unclosed_match:
                 function_matches = [unclosed_match.groups()]
 
+        # Tolerant final fallback for adapter-induced drift (missing '>' chars)
+        if not function_matches:
+            function_matches = _FUNCTION_CALL_TOLERANT_RE.findall(cleaned)
+
+        # Drift fallback: paren/brace wrappers like <function)name> or (function)name
+        if not function_matches:
+            function_matches = _FUNCTION_CALL_DRIFT_RE.findall(cleaned)
+
+        # Ultra-tolerant: <name>{args}</name> — name-as-tag variant. Reject
+        # generic "function" matches (handled by the patterns above) to avoid
+        # false extraction of literal "function" as the tool name.
+        if not function_matches:
+            raw_matches = _XML_WRAPPED_CALL_RE.findall(cleaned)
+            function_matches = [(n, a) for (n, a) in raw_matches if n != "function"]
+
         if function_matches:
             parsed_calls: list[Dict[str, Any]] = []
             for func_name, args_str in function_matches:
                 try:
                     cleaned_args = args_str.strip().rstrip(">;\"'")
-                    arguments = json.loads(cleaned_args)
+                    # Strip trailing </function> or </function (partial/unclosed) —
+                    # the unclosed fallback captures everything after the args
+                    # including the stray closing tag.
+                    for tail in ("</function>", "</function", "</fn>", "</fn"):
+                        if cleaned_args.endswith(tail):
+                            cleaned_args = cleaned_args[: -len(tail)].rstrip()
+                            break
+                    # If the JSON is still truncated mid-object, try brace-matching
+                    # to the last closing brace.
+                    if cleaned_args.startswith("{") and not cleaned_args.endswith("}"):
+                        last = cleaned_args.rfind("}")
+                        if last > 0:
+                            cleaned_args = cleaned_args[: last + 1]
+                    try:
+                        arguments = json.loads(cleaned_args)
+                    except json.JSONDecodeError:
+                        # Over-escaped JSON: model emits {\"key\": \"val\"} with
+                        # literal backslash-quote. Strip and retry.
+                        arguments = json.loads(cleaned_args.replace('\\"', '"'))
                 except json.JSONDecodeError:
                     logger.warning(
                         "Failed to parse function args for %s: %s",

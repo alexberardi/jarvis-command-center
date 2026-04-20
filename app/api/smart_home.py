@@ -956,6 +956,8 @@ def control_device(
         "action_name": body.action,
         "context": {
             "entity_id": dev.entity_id,
+            "domain": dev.domain,
+            "name": dev.name,
             "protocol": dev.protocol,
             "cloud_id": dev.cloud_id,
             "model": dev.model,
