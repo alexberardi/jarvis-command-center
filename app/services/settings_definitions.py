@@ -172,6 +172,110 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Days to retain conversation transcripts before cleanup",
     ),
 
+    # Phase 5 — Auto-deploy LoRA adapter loop
+    SettingDefinition(
+        key="adapter.auto_train_enabled",
+        category="adapter",
+        value_type="bool",
+        default=False,
+        description="Run the periodic adapter-training loop (scheduler + auto-deploy)",
+    ),
+    SettingDefinition(
+        key="adapter.auto_train_interval_seconds",
+        category="adapter",
+        value_type="int",
+        default=3600,
+        description="Interval between scheduler ticks that check whether training should fire",
+    ),
+    SettingDefinition(
+        key="adapter.auto_train_min_examples",
+        category="adapter",
+        value_type="int",
+        default=50,
+        description="Minimum new positive examples since last training before a new run is triggered",
+    ),
+    SettingDefinition(
+        key="adapter.auto_train_min_interval_hours",
+        category="adapter",
+        value_type="int",
+        default=6,
+        description="Minimum hours between successful training runs per household (rate limiter)",
+    ),
+    SettingDefinition(
+        key="adapter.base_model_id",
+        category="adapter",
+        value_type="string",
+        default="",
+        description="Base model id/path passed to llm-proxy when the scheduler enqueues training",
+    ),
+    SettingDefinition(
+        key="adapter.commands_spec_path",
+        category="adapter",
+        value_type="string",
+        default="",
+        description="Filesystem path to the commands spec JSON used for synthetic expansion + prompt variants",
+    ),
+    SettingDefinition(
+        key="adapter.llm_proxy_url",
+        category="adapter",
+        value_type="string",
+        default="",
+        description="LLM proxy base URL for training enqueue (leave blank to use service discovery)",
+        env_fallback="JARVIS_LLM_PROXY_API_URL",
+    ),
+    SettingDefinition(
+        key="adapter.eval_container",
+        category="adapter",
+        value_type="string",
+        default="jarvis-node",
+        description="Docker container name for docker-exec eval gate",
+    ),
+    SettingDefinition(
+        key="adapter.expansion_enabled",
+        category="adapter",
+        value_type="bool",
+        default=False,
+        description="Expand each baked adapter example via llm-proxy before training (Phase 3.5)",
+    ),
+    SettingDefinition(
+        key="adapter.expansion_count_per_canonical",
+        category="adapter",
+        value_type="int",
+        default=2,
+        description="Number of rephrasings to generate per baked canonical example when expansion is enabled",
+    ),
+    SettingDefinition(
+        key="adapter.expansion_max_canonicals",
+        category="adapter",
+        value_type="int",
+        default=10,
+        description="Cap on canonical examples used as expansion seeds per command",
+    ),
+
+    # Phase 7 — User-approved adapter deployment
+    SettingDefinition(
+        key="adapter.auto_approve_deployments",
+        category="adapter",
+        value_type="bool",
+        default=False,
+        description=(
+            "Bypass the proposal flow and deploy new adapters automatically "
+            "on eval PASS (Phase 5 behavior). Default off — the scheduler "
+            "posts a proposal to the inbox instead."
+        ),
+    ),
+    SettingDefinition(
+        key="adapter.proposal_expiry_days",
+        category="adapter",
+        value_type="int",
+        default=7,
+        description=(
+            "How long a pending adapter proposal stays valid before the "
+            "janitor flips it to expired. Users can still apply up until "
+            "this cutoff."
+        ),
+    ),
+
     # Network / callback settings
     SettingDefinition(
         key="network.public_url",
