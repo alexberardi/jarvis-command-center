@@ -1,7 +1,7 @@
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, Column, String, DateTime, Integer, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, Float, String, DateTime, Integer, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import backref, declarative_base, relationship
 from datetime import datetime, timedelta
 
@@ -394,6 +394,12 @@ class ConversationTranscript(Base):
     processed_at = Column(DateTime, nullable=True)
     extraction_job_id = Column(String(36), nullable=True)
 
+    # Phase 1 feedback: user rates the parsed command (−1 / 0 / +1).
+    # Feeds the Phase 3 training-data extractor as explicit positive/negative signal.
+    user_rating = Column(Integer, nullable=True)
+    rating_notes = Column(Text, nullable=True)
+    rated_at = Column(DateTime, nullable=True)
+
 
 class PackageInstallRequest(Base):
     """Package install request: mobile -> CC -> MQTT -> node -> CC -> mobile.
@@ -495,3 +501,78 @@ class ProvisioningToken(Base):
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     consumed_at = Column(DateTime, nullable=True)
+
+
+class ActiveAdapter(Base):
+    """Currently-deployed LoRA adapter for a household. One row per household."""
+    __tablename__ = "active_adapter"
+
+    household_id = Column(String(255), primary_key=True)
+    adapter_hash = Column(String(128), nullable=False)
+    pass_rate = Column(Float, nullable=True)
+    trained_on_examples = Column(Integer, nullable=True)
+    deployed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AdapterTrainingState(Base):
+    """Scheduler bookkeeping for per-household adapter training.
+
+    One row per household. Tracks the cutoff of the last training window,
+    how many examples that window contained, and a lock flag so overlapping
+    scheduler ticks don't double-enqueue.
+    """
+    __tablename__ = "adapter_training_state"
+
+    household_id = Column(String(255), primary_key=True)
+    last_trained_at = Column(DateTime, nullable=True)
+    last_cutoff_at = Column(DateTime, nullable=True)
+    last_example_count = Column(Integer, nullable=False, default=0)
+    is_training = Column(Boolean, nullable=False, default=False, index=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AdapterHistory(Base):
+    """Append-only audit log of adapter deployments.
+
+    Rollback works by selecting the most recent prior row for a household
+    and upserting it back into active_adapter.
+    """
+    __tablename__ = "adapter_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    household_id = Column(String(255), nullable=False, index=True)
+    adapter_hash = Column(String(128), nullable=False)
+    pass_rate = Column(Float, nullable=True)
+    trained_on_examples = Column(Integer, nullable=True)
+    deployed_at = Column(DateTime, nullable=False)
+    replaced_at = Column(DateTime, nullable=True)
+    trigger = Column(String(32), nullable=False, default="scheduler")
+
+
+class AdapterProposal(Base):
+    """User-approval queue for trained adapters (Phase 7.1).
+
+    Scheduler writes pending rows on eval PASS; the mobile app renders them as
+    inbox items; apply/dismiss/revert API endpoints mutate status. One row per
+    training run; the paired provider_name_after is the prompt-provider the
+    adapter was trained against.
+    """
+    __tablename__ = "adapter_proposals"
+
+    id = Column(String(36), primary_key=True)
+    household_id = Column(String(255), nullable=False, index=True)
+    adapter_hash = Column(String(128), nullable=False)
+    provider_name_before = Column(String(255), nullable=True)
+    provider_name_after = Column(String(255), nullable=True)
+    pass_rate_before = Column(Float, nullable=True)
+    pass_rate_after = Column(Float, nullable=True)
+    latency_before_s = Column(Float, nullable=True)
+    latency_after_s = Column(Float, nullable=True)
+    per_command_delta_json = Column(Text, nullable=True)
+    trained_on_examples = Column(Integer, nullable=True)
+    # pending | applied | dismissed | expired | superseded
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    inbox_item_id = Column(String(36), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    decided_at = Column(DateTime, nullable=True)

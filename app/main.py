@@ -1,3 +1,4 @@
+import asyncio
 import time
 import logging
 import os
@@ -270,6 +271,32 @@ async def startup_event():
 
     asyncio.create_task(_periodic_node_task_timeout())
 
+    # Phase 5 — adapter auto-training loop. Off by default; flip
+    # `adapter.auto_train_enabled` in settings to activate. Tick interval,
+    # example threshold, and cooldown all settings-driven.
+    async def _periodic_adapter_training() -> None:
+        while True:
+            try:
+                interval = int(settings_service.get("adapter.auto_train_interval_seconds") or 3600)
+            except (TypeError, ValueError):
+                interval = 3600
+            await asyncio.sleep(max(60, interval))
+            try:
+                enabled = settings_service.get("adapter.auto_train_enabled")
+                if enabled is False or str(enabled).lower() in ("false", "0", "no", "none"):
+                    continue
+                from app.services.adapter_scheduler import run_scheduled_training
+                result = await asyncio.to_thread(run_scheduled_training, settings_service)
+                logger.info(
+                    "adapter scheduler tick: considered=%d skipped=%s deployed=%s eval_failed=%s errored=%s",
+                    len(result.considered), result.skipped, result.deployed,
+                    result.eval_failed, list(result.errored.keys()),
+                )
+            except Exception as e:
+                logger.warning("Adapter scheduler tick failed: %s", e)
+
+    asyncio.create_task(_periodic_adapter_training())
+
     # Enrich llm.interface with available prompt providers dynamically
     if "llm.interface" in settings_service.definitions:
         from app.core.prompt_provider_factory import PromptProviderFactory
@@ -378,6 +405,14 @@ app.include_router(test_install.router, prefix="/api/v0", tags=["test-install"])
 from app.api import memories
 app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
 
+# Include transcript feedback router (Phase 1 — mobile rating UI)
+from app.api import transcripts
+app.include_router(transcripts.router, prefix="/api/v0", tags=["transcripts"])
+
+# Include adapter proposal router (Phase 7.1 — user-approved deploy flow)
+from app.api import adapters as adapters_api
+app.include_router(adapters_api.router, prefix="/api/v0", tags=["adapters"])
+
 # Include OAuth session management router
 from app.api import oauth
 app.include_router(oauth.router, prefix="/api/v0", tags=["oauth"])
@@ -435,6 +470,51 @@ async def start_conversation(
             "adapter_hash": node_context_provider.node.adapter_hash,
             "household_id": node_context_provider.household_id,
         }
+
+        # Phase 5: household-level adapter deployment takes precedence over the
+        # legacy per-node adapter_hash column. A household-active adapter wins
+        # because it's the one gated by the scheduler's eval run.
+        if node_context.get("household_id"):
+            try:
+                from app.services.adapter_registry import AdapterRegistry
+                from app.db import get_session_local
+                _s = get_session_local()()
+                try:
+                    _reg = AdapterRegistry(_s)
+                    _active = _reg.get_active(node_context["household_id"])
+                    if _active is not None:
+                        node_context["adapter_hash"] = _active.adapter_hash
+                        logger.info(
+                            "🎯 Applied household adapter: hash=%s… pass_rate=%s trained_on=%s",
+                            _active.adapter_hash[:12],
+                            _active.pass_rate,
+                            _active.trained_on_examples,
+                        )
+                finally:
+                    _s.close()
+            except Exception as e:
+                logger.warning("active_adapter lookup failed: %s", e)
+
+        # Phase 2 eval gate: test-mode adapter override. Only honored when the
+        # server was started with JARVIS_TEST_MODE=1 — otherwise ignored entirely.
+        # Overrides both the Phase 5 household value and the per-node fallback.
+        # enabled=False forces a baseline run (no adapter at all) for A/B eval.
+        if request.adapter_settings and os.getenv("JARVIS_TEST_MODE") == "1":
+            override = request.adapter_settings
+            if override.enabled and override.hash:
+                node_context["adapter_hash"] = override.hash
+                logger.info(
+                    f"🧪 Test-mode adapter override applied: hash={override.hash[:12]}… "
+                    f"scale={override.scale} enabled={override.enabled}"
+                )
+            else:
+                node_context["adapter_hash"] = None
+                logger.info("🧪 Test-mode adapter override: BASELINE (no adapter)")
+        elif request.adapter_settings:
+            logger.warning(
+                "adapter_settings on /conversation/start ignored "
+                "(JARVIS_TEST_MODE not enabled)"
+            )
 
         # Inject room hierarchy from CC database for LLM prompt context
         if node_context.get("household_id"):
@@ -898,13 +978,20 @@ async def train_tool_router(
     }
 
 
-@v0_router.post("/adapters/train")
+@v0_router.post("/adapters/train", status_code=202)
 async def train_adapter(
     request: AdapterTrainingRequest,
     request_context: Request,
     node_context_provider: NodeContextProvider = Depends(verify_api_key)
 ):
-    """Queue an adapter training job on llm-proxy for this node."""
+    """Accept an adapter training job and run expansion/enqueue in background.
+
+    Returns 202 immediately with a job_id. The actual work (LLM-example
+    expansion + provider formatting + llm-proxy enqueue) runs as an
+    asyncio task so large expansions don't hold the HTTP connection.
+    Caller polls llm-proxy's /v1/training/status/{job_id} for progress,
+    or receives the completion callback configured below.
+    """
     def _write_training_jsonl(dataset: dict, job_id: str) -> Optional[Path]:
         try:
             temp_dir = Path("/app/temp")
@@ -960,81 +1047,121 @@ async def train_adapter(
             )
         return {"commands": dataset_commands}
 
-    # Resolve the active prompt provider to format training data correctly
-    from app.core.prompt_provider_factory import PromptProviderFactory
-    provider = PromptProviderFactory.create_provider()
-
-    dataset_payload = _build_dataset(request.available_commands, provider=provider)
-    dataset_ref = {"format": "inline-json", "data": dataset_payload}
-    if request.dataset_hash:
-        dataset_hash = request.dataset_hash
-    else:
-        hash_input = {
-            "base_model_id": request.base_model_id,
-            "dataset": dataset_ref,
-            "params": request.params.model_dump(exclude_none=True) if request.params else None,
-        }
-        payload_bytes = json.dumps(hash_input, sort_keys=True).encode("utf-8")
-        dataset_hash = hashlib.sha256(payload_bytes).hexdigest()
-
+    # Generate job_id up front so we can return it immediately — the rest
+    # of the work (expansion, dataset build, llm-proxy enqueue) runs in
+    # a background task because expansion can take minutes.
     job_id = str(uuid4())
-    training_jsonl_path = _write_training_jsonl(dataset_payload, job_id)
     callback_url = str(request_context.url_for("adapter_training_callback"))
+    node_id_snapshot = node_context_provider.node.node_id
 
-    callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
-    callback = {"url": callback_url}
-    if callback_token:
-        callback["auth_type"] = "bearer"
-        callback["token"] = callback_token
+    async def _run_training_pipeline() -> None:
+        """Background: expand → format → enqueue.
 
-    queue_payload = {
-        "job_id": job_id,
-        "job_type": "adapter_train",
-        "created_at": datetime.utcnow().isoformat() + "Z",
-        "priority": request.priority or "normal",
-        "trace_id": job_id,
-        "idempotency_key": dataset_hash,
-        "job_type_version": "v1",
-        "ttl_seconds": 86400,
-        "metadata": {
-            "node_id": node_context_provider.node.node_id,
-            "provider_name": provider.name if provider else "",
-        },
-        "request": {
-            "node_id": node_context_provider.node.node_id,
-            "base_model_id": request.base_model_id,
-            "dataset_ref": dataset_ref,
-            "dataset_hash": dataset_hash,
-            "provider_name": provider.name if provider else "",
-            "params": request.params.model_dump(exclude_none=True) if request.params else None,
-        },
-        "callback": callback,
-    }
+        Errors are logged and surfaced via the llm-proxy job-status
+        endpoint (node polls /v1/training/status/{job_id}). If enqueue
+        itself fails, we write the failure to adapter_history so Phase 5's
+        rollback logic remains self-consistent.
+        """
+        # 1) Optional LLM expansion (Phase 3.5) — gated by setting.
+        try:
+            from app.services.adapter_example_expansion import (
+                ExpansionConfig,
+                expand_examples,
+            )
+            from app.services.settings_service import get_settings_service
+            _s = get_settings_service()
+            expansion_cfg = ExpansionConfig(
+                enabled=bool(_s.get("adapter.expansion_enabled") or False),
+                expand_n=int(_s.get("adapter.expansion_count_per_canonical") or 2),
+                max_canonicals=int(_s.get("adapter.expansion_max_canonicals") or 10),
+            )
+            if expansion_cfg.enabled:
+                expansion_stats = await expand_examples(request.available_commands, expansion_cfg)
+                total_baked = sum(s.baked_count for s in expansion_stats)
+                total_expanded = sum(s.expanded_count for s in expansion_stats)
+                logger.info(
+                    "adapter training %s expansion: baked=%d expanded=%d total=%d across %d commands",
+                    job_id[:8], total_baked, total_expanded,
+                    total_baked + total_expanded, len(expansion_stats),
+                )
+        except Exception as e:
+            logger.warning("adapter expansion failed (falling back to baked): %s", e)
 
-    # Get LLM proxy URL from service discovery or fallback to env var
-    from app.core import service_config
-    if service_config.is_initialized():
-        llm_proxy_base_url = service_config.get_llm_proxy_url()
-    else:
-        llm_proxy_base_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:7704")
-    queue_url = f"{llm_proxy_base_url.rstrip('/')}/internal/queue/enqueue"
-    headers = {}
-    internal_token = os.getenv("LLM_PROXY_INTERNAL_TOKEN")
-    if internal_token:
-        headers["X-Internal-Token"] = internal_token
+        # 2) Resolve active provider + format dataset.
+        from app.core.prompt_provider_factory import PromptProviderFactory
+        provider = PromptProviderFactory.create_provider()
 
-    try:
-        result = await post(url=queue_url, json_data=queue_payload, headers=headers)
-    except Exception as e:
-        logger.error("❌ Failed to enqueue adapter training job: %s", e)
-        raise HTTPException(status_code=502, detail="Failed to enqueue adapter training job")
+        dataset_payload = _build_dataset(request.available_commands, provider=provider)
+        dataset_ref = {"format": "inline-json", "data": dataset_payload}
+        if request.dataset_hash:
+            dataset_hash = request.dataset_hash
+        else:
+            hash_input = {
+                "base_model_id": request.base_model_id,
+                "dataset": dataset_ref,
+                "params": request.params.model_dump(exclude_none=True) if request.params else None,
+            }
+            payload_bytes = json.dumps(hash_input, sort_keys=True).encode("utf-8")
+            dataset_hash = hashlib.sha256(payload_bytes).hexdigest()
+
+        _write_training_jsonl(dataset_payload, job_id)
+
+        # 3) Build + send the queue payload.
+        callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
+        callback = {"url": callback_url}
+        if callback_token:
+            callback["auth_type"] = "bearer"
+            callback["token"] = callback_token
+
+        queue_payload = {
+            "job_id": job_id,
+            "job_type": "adapter_train",
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "priority": request.priority or "normal",
+            "trace_id": job_id,
+            "idempotency_key": dataset_hash,
+            "job_type_version": "v1",
+            "ttl_seconds": 86400,
+            "metadata": {
+                "node_id": node_id_snapshot,
+                "provider_name": provider.name if provider else "",
+            },
+            "request": {
+                "node_id": node_id_snapshot,
+                "base_model_id": request.base_model_id,
+                "dataset_ref": dataset_ref,
+                "dataset_hash": dataset_hash,
+                "provider_name": provider.name if provider else "",
+                "params": request.params.model_dump(exclude_none=True) if request.params else None,
+            },
+            "callback": callback,
+        }
+
+        from app.core import service_config
+        if service_config.is_initialized():
+            llm_proxy_base_url = service_config.get_llm_proxy_url()
+        else:
+            llm_proxy_base_url = os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:7704")
+        queue_url = f"{llm_proxy_base_url.rstrip('/')}/internal/queue/enqueue"
+        headers = {}
+        internal_token = os.getenv("LLM_PROXY_INTERNAL_TOKEN")
+        if internal_token:
+            headers["X-Internal-Token"] = internal_token
+
+        try:
+            result = await post(url=queue_url, json_data=queue_payload, headers=headers)
+            logger.info("✅ Adapter training enqueued job_id=%s dataset_hash=%s response=%s",
+                        job_id, dataset_hash[:12], result)
+        except Exception as e:
+            logger.error("❌ Failed to enqueue adapter training job %s: %s", job_id, e)
+
+    # Fire-and-forget — caller gets 202 immediately.
+    asyncio.create_task(_run_training_pipeline())
 
     return {
-        "status": "queued",
+        "status": "accepted",
         "job_id": job_id,
-        "dataset_hash": dataset_hash,
-        "training_jsonl_path": str(training_jsonl_path) if training_jsonl_path else None,
-        "llm_proxy_response": result,
+        "poll_url": f"/v1/training/status/{job_id}",
     }
 
 
