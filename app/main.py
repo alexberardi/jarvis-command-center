@@ -229,12 +229,19 @@ async def startup_event():
 
     asyncio.create_task(_periodic_transcript_cleanup())
 
-    # Node-update task sweeper — fails any update task that's been
-    # in_progress/dispatched longer than 10 minutes (dead node, botched
-    # upgrade, etc.). Keeps the mobile UI from getting stuck showing
-    # "installing…" forever.
+    # Node-update task sweeper — fails any update task that's still not
+    # succeeded NODE_TASK_TIMEOUT after creation. Covers the full failure
+    # surface:
+    #   - pending:    node never came back to claim the task (offline)
+    #   - dispatched: node picked it up but installer died before first
+    #                 progress heartbeat
+    #   - in_progress: installer died silently mid-run (e.g. OOM on Pi Zero)
+    # Threshold is by created_at so that noisy heartbeats can't indefinitely
+    # refresh a stuck task — reconcile_open_task no longer bumps updated_at
+    # on no-progress heartbeats either, but created_at is the hard ceiling
+    # regardless.
     from datetime import datetime, timedelta
-    NODE_TASK_TIMEOUT = timedelta(minutes=10)
+    NODE_TASK_TIMEOUT = timedelta(minutes=30)
 
     async def _periodic_node_task_timeout():
         while True:
@@ -248,8 +255,8 @@ async def startup_event():
                     stale = (
                         db.query(NodeTask)
                         .filter(
-                            NodeTask.state.in_(["dispatched", "in_progress"]),
-                            NodeTask.updated_at < cutoff,
+                            NodeTask.state.in_(["pending", "dispatched", "in_progress"]),
+                            NodeTask.created_at < cutoff,
                         )
                         .all()
                     )

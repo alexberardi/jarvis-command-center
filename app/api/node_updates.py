@@ -212,10 +212,17 @@ def dispatch_pending_task(db: Session, node: Node) -> dict | None:
 def reconcile_open_task(db: Session, node: Node, reported_version: Optional[str]) -> None:
     """Match post-upgrade heartbeat to any open task for this node.
 
-    If an update was dispatched and the node now reports the target version
-    (or at least a different version from before), mark it complete. Tasks
-    stuck in `dispatched` / `in_progress` for more than TASK_TIMEOUT are
-    marked failed by the background sweeper, not here.
+    Three outcomes:
+      - Node reports the target version → mark task success.
+      - Node has been in `dispatched` state for >30s and is heartbeating
+        with the OLD version → transition to `in_progress` (one-time state
+        change, signals to the mobile app that the install is underway).
+      - Already `in_progress` and still reporting the OLD version → do
+        nothing. Critically, this path does NOT bump updated_at: if the
+        installer has died silently (OOM, power loss, ...) the node keeps
+        heartbeating with the old version indefinitely, and we need the
+        sweeper's staleness check to be able to see that nothing is
+        actually progressing.
     """
     if reported_version is None:
         return
@@ -240,12 +247,18 @@ def reconcile_open_task(db: Session, node: Node, reported_version: Optional[str]
         db.commit()
         return
 
-    # Node has come back online but not at the expected version yet — keep
-    # the task open. If it stays in this state past the timeout, the
-    # sweeper marks it failed.
-    if (datetime.utcnow() - open_task.updated_at) < timedelta(seconds=30):
-        # Very recent dispatch: the node may still be mid-upgrade, do nothing.
+    # Node is heartbeating with the old version. Only transition the state
+    # machine on the first such heartbeat after dispatch; every subsequent
+    # heartbeat that reports the same old version is a non-event.
+    if open_task.state == "dispatched":
+        if (datetime.utcnow() - open_task.updated_at) < timedelta(seconds=30):
+            # Very recent dispatch: node may still be stopping the old
+            # service before the installer starts — do nothing.
+            return
+        open_task.state = "in_progress"
+        open_task.updated_at = datetime.utcnow()
+        db.commit()
         return
-    open_task.state = "in_progress"
-    open_task.updated_at = datetime.utcnow()
-    db.commit()
+
+    # Already in_progress, still reporting old version — no state change,
+    # no updated_at bump. Sweeper decides when this counts as stale.
