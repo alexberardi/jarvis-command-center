@@ -162,24 +162,8 @@ async def whisper_list_voice_profiles(
     return await client.list_voice_profiles()
 
 
-@router.post("/tts/generate-wake-response")
-async def tts_generate_wake_response(
-    node_context: NodeContextProvider = Depends(verify_api_key),
-) -> dict[str, str]:
-    """Generate a dynamic wake response greeting.
-
-    Proxies the request to the TTS service's generate-wake-response endpoint
-    with app-to-app auth and context headers.
-
-    Args:
-        node_context: Authenticated node context (from verify_api_key)
-
-    Returns:
-        Dict with "text" key containing the greeting
-    """
-    client = TTSClient(
-        household_id=node_context.household_id,
-        node_id=node_context.node.node_id,
-    )
-    text = await client.generate_wake_response()
-    return {"text": text}
+# The former /tts/generate-wake-response proxy lived here. Removed in favor
+# of /api/v0/wake-response (see app/api/wake_response.py) which talks to
+# llm-proxy directly and runs the active prompt provider's sanitize_text,
+# so model-specific artifacts (Qwen3 <think> blocks, etc.) never reach
+# jarvis-tts or the node.

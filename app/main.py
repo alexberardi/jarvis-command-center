@@ -420,6 +420,12 @@ app.include_router(transcripts.router, prefix="/api/v0", tags=["transcripts"])
 from app.api import adapters as adapters_api
 app.include_router(adapters_api.router, prefix="/api/v0", tags=["adapters"])
 
+# Wake-response text generator — moved out of jarvis-tts so provider-aware
+# sanitation (think-block stripping, etc.) happens at the only layer that
+# owns the prompt provider.
+from app.api import wake_response as wake_response_api
+app.include_router(wake_response_api.router, prefix="/api/v0", tags=["wake-response"])
+
 # Include OAuth session management router
 from app.api import oauth
 app.include_router(oauth.router, prefix="/api/v0", tags=["oauth"])
