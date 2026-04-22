@@ -2,8 +2,9 @@
 Qwen3_14B_Compressed - Prompt provider for Qwen3-14B Instruct (Q4_K_M GGUF).
 
 14B dense model using ChatML format and <tool_call> tags like Qwen 2.5.
-Strips Qwen3's <think> blocks and injects /nothink in user messages to
-disable chain-of-thought reasoning on simple voice commands.
+Inherits /no_think injection and <think>-block stripping from
+Qwen3LargeUntrained so chain-of-thought reasoning stays off for voice
+commands (no per-subclass work needed).
 
 Inherits from Qwen3LargeUntrained (30B MoE): compressed tools block WITH
 param descriptions (14B has capacity to use them for routing), 5 rules,
