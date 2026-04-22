@@ -569,6 +569,13 @@ class ConversationHandler:
         # keep the remainder in the buffer for the next sentence.
         _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 
+        # Strip model-specific scaffolding (Qwen3's <think>...</think>
+        # blocks most notably) from the stream before it reaches TTS.
+        # The /no_think control token usually prevents thinking mode from
+        # firing, but empty <think></think> wrappers still come through on
+        # Qwen3 and get spoken as "think slash think" if we don't strip.
+        _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
         async def _audio_generator():
             token_buffer = ""
             full_response = ""
@@ -589,6 +596,19 @@ class ConversationHandler:
 
                     token_buffer += delta
                     full_response += delta
+
+                    # Strip any complete <think>...</think> spans from the
+                    # buffer. DOTALL so the regex spans newlines (Qwen3
+                    # emits `<think>\n\n</think>\n\n...` even under
+                    # /no_think). Incomplete opens are left intact for
+                    # the next iteration when </think> arrives.
+                    token_buffer = _THINK_BLOCK_RE.sub("", token_buffer)
+
+                    # If there's an unclosed <think> in the buffer, pause
+                    # sentence emission until </think> arrives. Otherwise
+                    # anything we flush now would speak raw XML tags.
+                    if "<think>" in token_buffer:
+                        continue
 
                     # Check for sentence boundaries in the buffer.
                     # Split yields [complete1, complete2, ..., partial].
@@ -611,8 +631,10 @@ class ConversationHandler:
                             except Exception as e:
                                 logger.warning("TTS stream error for sentence %d: %s", sentences_sent, e)
 
-                # Flush remaining buffer
-                remaining_text = token_buffer.strip()
+                # Flush remaining buffer — strip any lingering complete
+                # think block one more time (in case the whole response
+                # came back as a single final chunk).
+                remaining_text = _THINK_BLOCK_RE.sub("", token_buffer).strip()
                 if remaining_text:
                     sentences_sent += 1
                     try:
@@ -626,8 +648,11 @@ class ConversationHandler:
                 logger.error("Streaming LLM error: %s", e)
                 return
 
-            # Update conversation cache with the full response
-            messages.append({"role": "assistant", "content": full_response})
+            # Update conversation cache with the full response — strip
+            # think blocks so context windows don't accumulate scaffolding
+            # that the model didn't actually "say".
+            clean_response = _THINK_BLOCK_RE.sub("", full_response).strip()
+            messages.append({"role": "assistant", "content": clean_response})
             conversation_cache.update_messages(conversation_id, messages)
 
             logger.info(
