@@ -52,17 +52,30 @@ class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
 
     @property
     def user_message_suffix(self) -> str:
-        """Append /nothink to user messages to disable Qwen3 thinking mode.
+        """Append /no_think to user messages to disable Qwen3 thinking mode.
 
-        Qwen3 ignores /no_think in the system prompt — the model was
-        trained to recognize this token in user turns only.
+        Qwen3's documented control tokens are /think and /no_think
+        (underscore-separated). /nothink (without the underscore) is
+        unrecognized and silently ignored — the model emits full thinking
+        blocks, adding ~500 tokens and ~8-10s of decode per voice response.
+
+        /no_think must land in a USER turn; /system prompt placement is
+        ignored by Qwen3's training.
         """
-        return "/nothink"
+        return "/no_think"
 
     def parse_response(self, raw_content: str) -> Optional[str]:
         """Strip <think> blocks, then delegate to Qwen 2.5 parser."""
         cleaned: str = _THINK_BLOCK_RE.sub("", raw_content)
         return super().parse_response(cleaned)
+
+    def sanitize_text(self, text: str) -> str:
+        """Strip Qwen3 think blocks from user-facing text.
+
+        See Qwen3LargeUntrained.sanitize_text for the full rationale —
+        same defense-in-depth for wake/chat/direct-answer paths.
+        """
+        return _THINK_BLOCK_RE.sub("", text).strip()
 
     def build_system_prompt(
         self,

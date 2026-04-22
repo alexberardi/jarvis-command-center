@@ -97,6 +97,25 @@ class IJarvisPromptProvider(ABC):
         """
         return None
 
+    def sanitize_text(self, text: str) -> str:
+        """Clean text emitted to the user (wake responses, direct answers, TTS).
+
+        Separate from parse_response (which only runs on tool-calling paths):
+        this runs on ANY user-facing string the provider produces, so think
+        blocks, XML artifacts, or control tokens don't leak into TTS.
+
+        Default is identity. Models with thinking modes (Qwen3) or other
+        scaffolding override this to strip before the text hits the TTS
+        pipeline.
+
+        Args:
+            text: Raw text destined for the user.
+
+        Returns:
+            Cleaned text safe to speak.
+        """
+        return text
+
     @property
     def user_message_suffix(self) -> str:
         """Optional suffix appended to every user message.
