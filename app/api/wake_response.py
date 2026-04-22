@@ -95,6 +95,11 @@ async def generate_wake_response(
     if prompt_provider:
         content = prompt_provider.sanitize_text(content)
 
+    # Universal TTS-safe scrub — emojis specifically, since the wake
+    # greeting is going straight to the speech engine.
+    from app.core.tts_text import clean_for_tts
+    content = clean_for_tts(content)
+
     text = content.strip()
     if not text:
         return WakeResponseReply(text=_WAKE_RESPONSE_FALLBACK)
