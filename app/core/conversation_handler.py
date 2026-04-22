@@ -15,6 +15,7 @@ from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Set
 
 from app.core.conversation_cache import conversation_cache
+from app.core.tts_text import clean_for_tts
 from app.services.settings_service import get_settings_service
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.interfaces.imodel_interface import IModelInterface
@@ -620,7 +621,7 @@ class ConversationHandler:
                         token_buffer = parts[-1]
 
                         for sentence in complete_parts:
-                            sentence = sentence.strip()
+                            sentence = clean_for_tts(sentence.strip())
                             if not sentence:
                                 continue
                             sentences_sent += 1
@@ -633,8 +634,9 @@ class ConversationHandler:
 
                 # Flush remaining buffer — strip any lingering complete
                 # think block one more time (in case the whole response
-                # came back as a single final chunk).
-                remaining_text = _THINK_BLOCK_RE.sub("", token_buffer).strip()
+                # came back as a single final chunk), then run the
+                # universal TTS-safe scrub.
+                remaining_text = clean_for_tts(_THINK_BLOCK_RE.sub("", token_buffer).strip())
                 if remaining_text:
                     sentences_sent += 1
                     try:
