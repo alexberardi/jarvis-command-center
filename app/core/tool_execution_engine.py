@@ -677,7 +677,18 @@ class ToolExecutionEngine:
                     messages.append({"role": "system", "content": retry_message})
                     logger.info("Must-call guard triggered; retrying tool selection")
                     continue
-                # Conversation complete
+                # Conversation complete — run provider.sanitize_text on the
+                # direct-answer content so model-specific artifacts (Qwen3
+                # <think> blocks, etc.) don't reach TTS.
+                if self.prompt_provider and isinstance(assistant_message.get("content"), str):
+                    original: str = assistant_message["content"]
+                    cleaned: str = self.prompt_provider.sanitize_text(original)
+                    if cleaned != original:
+                        assistant_message["content"] = cleaned
+                        logger.debug(
+                            "sanitize_text trimmed %d chars off response",
+                            len(original) - len(cleaned),
+                        )
                 _log_usage(iteration + 1, "complete")
                 return {
                     "stop_reason": "complete",
