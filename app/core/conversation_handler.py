@@ -791,11 +791,24 @@ class ConversationHandler:
             max_tokens=256,
         )
 
+        # Defensive content extraction — llm-proxy can return either
+        #   {"choices": [{"message": {"content": "..."}}]}  (OpenAI-ish)
+        #   {"choices": [{"message": "..."}]}               (plain string)
+        #   {"content": "..."}                               (flat fallback)
+        # and we must not crash on any of them, since this path runs on
+        # every text-based tool-result formatting (i.e. every Qwen3 turn).
         content: str = ""
         try:
-            content = response["choices"][0]["message"].get("content", "")
-        except (KeyError, IndexError):
-            content = str(response.get("content", ""))
+            choice = response["choices"][0]
+            msg = choice.get("message") if isinstance(choice, dict) else None
+            if isinstance(msg, dict):
+                content = msg.get("content", "") or ""
+            elif isinstance(msg, str):
+                content = msg
+            else:
+                content = str(choice.get("content", "") if isinstance(choice, dict) else "") or ""
+        except (KeyError, IndexError, TypeError, AttributeError):
+            content = str(response.get("content", "") if isinstance(response, dict) else "")
 
         # Clean up tool_call tags that text-based models emit
         content = re.sub(r"</?tool_call>", "", content).strip()
