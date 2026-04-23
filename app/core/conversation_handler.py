@@ -798,8 +798,15 @@ class ConversationHandler:
             content = str(response.get("content", ""))
 
         # Clean up tool_call tags that text-based models emit
-        import re
         content = re.sub(r"</?tool_call>", "", content).strip()
+
+        # Provider-specific scrub (Qwen3 <think> blocks etc.), then
+        # universal TTS-safe scrub (emojis). Without this, tool-result
+        # responses from text-based models bypass the tool_execution_engine
+        # sanitize pass and leak scaffolding into TTS.
+        if self.prompt_provider:
+            content = self.prompt_provider.sanitize_text(content)
+        content = clean_for_tts(content)
 
         # Update cache
         if content:
@@ -1019,6 +1026,12 @@ class ConversationHandler:
 
         format_conv_id: str = f"fmt-{uuid.uuid4().hex[:12]}"
 
+        # Buffer tokens so we can strip complete <think>...</think> spans
+        # (Qwen3 etc.) before they reach TTS. Emits whenever the buffer is
+        # "safe" (no unclosed <think>); holds otherwise. Also runs the
+        # universal TTS-safe scrub (emojis).
+        _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+        token_buffer = ""
         full_text = ""
         async for event in self.llm_client.chat_completion_stream(
             messages=formatting_messages,
@@ -1028,12 +1041,27 @@ class ConversationHandler:
             if event.get("done"):
                 break
             delta = event.get("delta", "")
-            if delta:
-                # Strip tool_call tags from streaming output
-                cleaned = re.sub(r"</?tool_call>", "", delta)
-                if cleaned:
-                    full_text += cleaned
-                    yield cleaned
+            if not delta:
+                continue
+            token_buffer += delta
+            token_buffer = _THINK_BLOCK_RE.sub("", token_buffer)
+            if "<think>" in token_buffer:
+                continue  # wait for </think> before emitting anything
+            cleaned = clean_for_tts(re.sub(r"</?tool_call>", "", token_buffer))
+            if cleaned:
+                full_text += cleaned
+                yield cleaned
+            token_buffer = ""
+
+        # Flush any trailing buffer (handles final chunk case where all
+        # tokens arrived before the loop had a chance to emit).
+        if token_buffer:
+            remaining = clean_for_tts(
+                re.sub(r"</?tool_call>", "", _THINK_BLOCK_RE.sub("", token_buffer))
+            )
+            if remaining:
+                full_text += remaining
+                yield remaining
 
         # Update conversation history with the formatted response
         self._replace_tool_exchange_in_history(
