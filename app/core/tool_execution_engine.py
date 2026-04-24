@@ -695,8 +695,18 @@ class ToolExecutionEngine:
                 # Conversation complete — run provider.sanitize_text on the
                 # direct-answer content so model-specific artifacts (Qwen3
                 # <think> blocks, etc.) don't reach TTS.
-                if isinstance(assistant_message.get("content"), str):
-                    original: str = assistant_message["content"]
+                # assistant_message may be a dict {"content": "..."} (native
+                # tool-calling path) or a bare string (text-model path) —
+                # blindly calling .get() on the latter raises AttributeError
+                # and crashes the whole stream with a 500.
+                if isinstance(assistant_message, dict):
+                    original_opt = assistant_message.get("content")
+                    original: str | None = original_opt if isinstance(original_opt, str) else None
+                elif isinstance(assistant_message, str):
+                    original = assistant_message
+                else:
+                    original = None
+                if original:
                     # Provider-specific scrub (model artifacts: think blocks
                     # on Qwen3, etc.), then universal TTS-safe scrub
                     # (emojis — no provider should bypass this).
@@ -707,7 +717,10 @@ class ToolExecutionEngine:
                     from app.core.tts_text import clean_for_tts
                     cleaned = clean_for_tts(cleaned)
                     if cleaned != original:
-                        assistant_message["content"] = cleaned
+                        if isinstance(assistant_message, dict):
+                            assistant_message["content"] = cleaned
+                        else:
+                            assistant_message = cleaned
                         logger.debug(
                             "tts sanitize trimmed %d chars off response",
                             len(original) - len(cleaned),
