@@ -579,14 +579,28 @@ class ToolExecutionEngine:
             # Parse response
             logger.info(f"Full LLM proxy response structure: {list(response.keys())}")
 
+            # Defensive extraction — llm-proxy can return 'message' as a bare
+            # string in some response shapes; .get() on a string raises
+            # AttributeError, which wasn't in the previous except clause.
+            # Result: 500 on /voice/command/stream for any text-model turn.
+            msg: Any = None
             try:
-                raw_content = response["choices"][0]["message"].get("content") or ""
-                finish_reason_raw = response["choices"][0].get("finish_reason", "stop")
+                choice = response["choices"][0] if isinstance(response, dict) else None
+                msg = choice.get("message") if isinstance(choice, dict) else None
+                if isinstance(msg, dict):
+                    raw_content = msg.get("content") or ""
+                elif isinstance(msg, str):
+                    raw_content = msg
+                else:
+                    raw_content = ""
+                finish_reason_raw = choice.get("finish_reason", "stop") if isinstance(choice, dict) else "stop"
                 logger.info(f"Extracted content length: {len(raw_content)}, finish_reason: {finish_reason_raw}")
-            except (KeyError, IndexError, TypeError) as e:
+            except (KeyError, IndexError, TypeError, AttributeError) as e:
                 logger.error(f"Failed to extract content from response: {e}")
                 logger.error(f"Response structure: {response}")
                 raw_content = ""
+                finish_reason_raw = "stop"
+                msg = None
 
             # Extract date_keys
             date_keys: List[str] = []
@@ -610,8 +624,9 @@ class ToolExecutionEngine:
 
             # Dual path: extract tool calls
             if use_native_tools:
-                # Native path: read structured tool_calls directly from response
-                tool_calls_raw = response["choices"][0]["message"].get("tool_calls")
+                # Native path: tool_calls live on the message dict extracted above.
+                # Only dicts carry tool_calls; bare-string messages have none.
+                tool_calls_raw = msg.get("tool_calls") if isinstance(msg, dict) else None
                 if finish_reason_raw == "tool_calls" and tool_calls_raw:
                     tool_calls = _normalize_native_tool_calls(tool_calls_raw)
                     finish_reason = "tool_calls"
