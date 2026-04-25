@@ -42,6 +42,14 @@ logger = logging.getLogger("uvicorn")
 # Strip <think>...</think> blocks (Qwen3 thinking mode output)
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
+# Strip <message>...</message> wrappers — Qwen3 sometimes wraps its direct
+# answer text in these tags by overgeneralizing from the <tool_call> format
+# it sees in the system prompt. If we don't strip them, TTS ends up speaking
+# "message, hello how can i assist you today, slash message", and the tool
+# loop's malformed-response heuristic treats the output as invalid and
+# retries — producing duplicate tool calls that execute twice.
+_MESSAGE_WRAP_RE = re.compile(r"<message>\s*(.*?)\s*</message>", re.DOTALL)
+
 
 class Qwen3LargeUntrained(Qwen25_7B_Compressed):
     """
@@ -90,21 +98,28 @@ class Qwen3LargeUntrained(Qwen25_7B_Compressed):
         return "<tools>\n" + "\n".join(lines) + "\n</tools>"
 
     def parse_response(self, raw_content: str) -> Optional[str]:
-        """Strip <think> blocks, then delegate to Qwen 2.5 parser."""
+        """Strip <think> and <message> wrappers, then delegate to Qwen 2.5 parser."""
         cleaned: str = _THINK_BLOCK_RE.sub("", raw_content)
+        cleaned = _MESSAGE_WRAP_RE.sub(lambda m: m.group(1), cleaned)
         return super().parse_response(cleaned)
 
     def sanitize_text(self, text: str) -> str:
-        """Strip Qwen3 think blocks from user-facing text (direct answers,
-        wake responses, chat replies).
+        """Strip Qwen3 think blocks and <message>…</message> wrappers from
+        user-facing text (direct answers, wake responses, chat replies).
 
         Defense-in-depth: the /no_think control token in user_message_suffix
         should prevent think blocks from ever being generated, but if the
         model ignores it on any path (jarvis-tts wake-response generation
         has historically bypassed user_message_suffix, for instance), this
         keeps the blocks out of TTS.
+
+        The <message> wrapper strip catches Qwen3's occasional habit of
+        wrapping direct answers in XML — overgeneralized from the
+        <tool_call> tag format in the system prompt.
         """
-        return _THINK_BLOCK_RE.sub("", text).strip()
+        cleaned = _THINK_BLOCK_RE.sub("", text)
+        cleaned = _MESSAGE_WRAP_RE.sub(lambda m: m.group(1), cleaned)
+        return cleaned.strip()
 
     def build_system_prompt(
         self,
