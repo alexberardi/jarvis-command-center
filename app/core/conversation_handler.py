@@ -1079,6 +1079,7 @@ class ConversationHandler:
                     messages=llm_messages,
                     adapter_settings=adapter_settings,
                     max_tokens=512,
+                    temperature=0.7,
                 ):
                     if event.get("done"):
                         break
@@ -1270,6 +1271,7 @@ class ConversationHandler:
             include_date_context=True,
             adapter_settings=adapter_settings,
             max_tokens=256,
+            temperature=0.7,
         )
 
         # Defensive content extraction — llm-proxy can return either
