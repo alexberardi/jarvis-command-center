@@ -674,6 +674,29 @@ def list_devices(
     return result
 
 
+def _broadcast_device_cache_invalidate(db: Session, household_id: str) -> None:
+    """Tell every node in the household to drop its DirectDeviceService cache.
+
+    Why: each node holds a local cache of the household's devices that was
+    seeded by ``GET /api/v0/node/devices`` and only refreshed every 5 min
+    by DeviceDiscoveryAgent. Without this signal, a device added or
+    removed via the mobile app is invisible to ``control_device`` on a
+    given node until that node's next periodic refresh — up to 5 min of
+    "device not found" errors after a successful add. Best-effort: if
+    MQTT is down, the next periodic refresh still picks up the change.
+    """
+    try:
+        from app.services.node_command_service import get_node_command_service
+        nodes = db.query(Node).filter(Node.household_id == household_id).all()
+        if not nodes:
+            return
+        service = get_node_command_service()
+        for node in nodes:
+            service.publish_command(str(node.node_id), "invalidate_device_cache", {})
+    except Exception as e:
+        logger.warning("Failed to broadcast device-cache invalidate: %s", e)
+
+
 @router.post("/households/{household_id}/devices/import", status_code=201)
 def import_devices(
     household_id: str,
@@ -731,6 +754,8 @@ def import_devices(
 
     db.commit()
     logger.info("Device import: %d created, %d updated in household %s", created, updated, household_id)
+    if created or updated:
+        _broadcast_device_cache_invalidate(db, household_id)
     return {"created": created, "updated": updated}
 
 
@@ -752,6 +777,7 @@ def update_device(
 
     db.commit()
     db.refresh(dev)
+    _broadcast_device_cache_invalidate(db, household_id)
 
     room_name = dev.room.name if dev.room else None
     return DeviceResponse(
@@ -790,6 +816,7 @@ def delete_device(
         raise HTTPException(status_code=404, detail="Device not found")
     db.delete(dev)
     db.commit()
+    _broadcast_device_cache_invalidate(db, household_id)
 
 
 @router.post("/households/{household_id}/devices/assign-rooms")
