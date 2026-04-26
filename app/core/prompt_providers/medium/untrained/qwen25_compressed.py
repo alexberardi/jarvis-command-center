@@ -3,7 +3,7 @@ Qwen25Compressed - Token-optimized prompt provider for Qwen 2.5 3B/7B.
 
 DEPRECATED for 7B use — use Qwen25_7B_Compressed instead (fewer rules,
 Direct Answer section, KV-cache-optimized layout). This class is kept as the
-base for Qwen25_3B_Compressed and Qwen25LargeUntrained.
+base for Qwen25_3B_Compressed.
 
 Minimizes system prompt tokens to reduce prefill latency while maintaining
 command parsing accuracy. The <tools> JSON block carries all schema info;
