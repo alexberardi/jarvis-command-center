@@ -843,7 +843,11 @@ def list_devices_for_node(
     if not household_id:
         return []
 
-    devices = db.query(Device).filter(
+    from sqlalchemy.orm import joinedload
+
+    devices = db.query(Device).options(
+        joinedload(Device.room),
+    ).filter(
         Device.household_id == household_id,
         Device.is_active == True,  # noqa: E712
     ).all()
@@ -859,6 +863,7 @@ def list_devices_for_node(
             "mac_address": d.mac_address or "",
             "cloud_id": d.cloud_id or "",
             "model": d.model or "",
+            "room_name": d.room.name if d.room else "",
         }
         for d in devices
     ]
