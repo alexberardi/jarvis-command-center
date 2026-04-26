@@ -332,6 +332,46 @@ class ModelService:
             speaker_user_id=speaker_user_id,
         )
 
+    async def try_stream_voice_response_with_tools(
+        self,
+        conversation_id: str,
+        voice_command: str,
+        tts_client,
+        speaker_user_id: int | None = None,
+    ):
+        """Attempt streaming LLM → TTS for commands needing server-side tools.
+
+        Runs iter 1 (tool decision) and tool execution blocking, then streams
+        iter 2 (final natural-language response) sentence-by-sentence to TTS.
+        Falls back (returns None) for client tools, validation requests, and
+        cases where iter 1 didn't actually produce a tool call.
+
+        Gated by JARVIS_STREAM_TOOL_RESPONSES env flag.
+        """
+        return await self._conversation_handler.stream_voice_response_with_tools(
+            conversation_id=conversation_id,
+            voice_command=voice_command,
+            tts_client=tts_client,
+            speaker_user_id=speaker_user_id,
+        )
+
+    async def try_stream_continue_with_tool_results(
+        self,
+        conversation_id: str,
+        tool_results: List[Dict[str, Any]],
+        tts_client,
+    ):
+        """Attempt streaming LLM → TTS for the post-tool-results iteration.
+
+        Returns an async generator of PCM bytes when applicable, or None
+        to fall back to the blocking continue path (which returns JSON).
+        """
+        return await self._conversation_handler.stream_continue_with_tool_results(
+            conversation_id=conversation_id,
+            tool_results=tool_results,
+            tts_client=tts_client,
+        )
+
     async def continue_conversation_with_tool_results(
         self,
         conversation_id: str,

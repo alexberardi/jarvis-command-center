@@ -228,11 +228,24 @@ class ConversationHandler:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to load user memories: {e}")
 
-        # Fetch date keys for prompt providers that need them
+        # Fetch date keys for prompt providers that need them.
+        # We INTENTIONALLY trim to a small high-frequency subset before
+        # injecting into the prompt — the full list is ~60 keys (~250 prompt
+        # tokens). The backend resolver still accepts the full list, so any
+        # less-common key the model emits ("next_friday" etc.) still
+        # resolves; the trim just stops sending all 60 as a hint every call.
         try:
             date_keys = await self.llm_client.get_date_keys()
             if date_keys:
-                node_context["date_keys"] = date_keys
+                _COMMON_DATE_KEYS = {
+                    "today", "tomorrow", "yesterday",
+                    "tonight", "this_weekend", "last_weekend", "next_weekend",
+                    "morning", "afternoon", "evening", "night",
+                    "this_week", "last_week", "next_week",
+                    "this_month", "last_month",
+                }
+                trimmed = [k for k in date_keys if k in _COMMON_DATE_KEYS]
+                node_context["date_keys"] = trimmed if trimmed else date_keys
         except Exception as e:
             logger.warning("Failed to fetch date keys for prompt: %s", e)
 
@@ -348,9 +361,8 @@ class ConversationHandler:
             warmup_speaker = node_context.get("speaker_user_id") if node_context else None
             if warmup_speaker != speaker_user_id:
                 logger.info(
-                    "Speaker mismatch detected, reloading memories",
-                    warmup_speaker=warmup_speaker,
-                    actual_speaker=speaker_user_id,
+                    "Speaker mismatch detected, reloading memories: warmup=%s actual=%s",
+                    warmup_speaker, speaker_user_id,
                 )
                 await self._reload_memories_for_speaker(
                     conversation_id, speaker_user_id, node_context, messages,
@@ -659,6 +671,475 @@ class ConversationHandler:
 
             logger.info(
                 "✅ Streaming complete: %d sentences, %d chars (T+%dms)",
+                sentences_sent, len(full_response), (_time.time() - _t0) * 1000,
+            )
+
+        return _audio_generator()
+
+    async def stream_voice_response_with_tools(
+        self,
+        conversation_id: str,
+        voice_command: str,
+        tts_client,
+        speaker_user_id: int | None = None,
+    ):
+        """Stream LLM → TTS for commands that need server-side tool execution.
+
+        Strategy: blocking iter 1 (tool decision + server-tool execution),
+        then streaming iter 2 (final natural-language response, sentence
+        by sentence to TTS). Saves ~2-3s of perceived latency on chatty
+        answers (news, weather summaries, etc.) by overlapping LLM
+        generation with TTS synthesis.
+
+        Returns an async generator of PCM bytes when applicable, or None
+        to signal the caller should fall through to the blocking pipeline.
+        """
+        # Gate behind env flag; default off until validated under load.
+        if os.getenv("JARVIS_STREAM_TOOL_RESPONSES", "false").lower() != "true":
+            return None
+
+        import time as _time
+        from app.core.tool_executor import tool_executor
+        from app.core.tool_execution_engine import _normalize_native_tool_calls
+        from app.core.tool_builder import ToolBuilder
+        from app.core.tool_registry import tool_registry
+
+        _t0 = _time.time()
+
+        # Get conversation state — work on a COPY so fall-back doesn't
+        # pollute the cache (blocking path appends its own user message).
+        cached_messages = conversation_cache.get_messages(conversation_id)
+        tools = conversation_cache.get_tools(conversation_id)
+        available_commands = conversation_cache.get_available_commands(conversation_id) or []
+
+        if not cached_messages or not tools:
+            return None
+
+        # Native tool calling required for this path
+        if (
+            self.prompt_provider is None
+            or not self.prompt_provider.supports_native_tools
+        ):
+            return None
+
+        # Apply tool filtering + routing
+        tools = self._apply_tool_filtering(voice_command, tools, available_commands)
+        router_decision = self._apply_tool_routing_with_cache(
+            voice_command, tools or [], conversation_id,
+        )
+
+        if not router_decision:
+            return None  # No confident prediction
+
+        predicted_tool = router_decision.get("tool_name", "")
+        try:
+            min_conf = float(os.getenv("JARVIS_STREAM_TOOL_MIN_CONFIDENCE", "0.85"))
+        except ValueError:
+            min_conf = 0.85
+        confidence = router_decision.get("score", 0.0)
+
+        if confidence < min_conf:
+            return None
+
+        # Streaming-eligible tools have their own (faster, no-tool) path.
+        if predicted_tool in self._STREAMING_ELIGIBLE_TOOLS:
+            return None
+
+        # Server-side tool only — client tools need a node round-trip
+        # which the blocking path handles via 202 JSON.
+        if not tool_registry.has_tool(predicted_tool):
+            logger.debug(
+                "Tool-stream: predicted tool '%s' is client-side — fall back",
+                predicted_tool,
+            )
+            return None
+
+        logger.info(
+            "🚀 Tool-streaming path: router=%s confidence=%.2f",
+            predicted_tool, confidence,
+        )
+
+        # Speaker mismatch handling (mirrors blocking path)
+        if speaker_user_id is not None:
+            node_context = conversation_cache.get_node_context(conversation_id)
+            warmup_speaker = node_context.get("speaker_user_id") if node_context else None
+            if warmup_speaker != speaker_user_id:
+                await self._reload_memories_for_speaker(
+                    conversation_id, speaker_user_id, node_context, cached_messages,
+                )
+                cached_messages = conversation_cache.get_messages(conversation_id) or cached_messages
+
+        # Work on a copy so fall-back doesn't pollute the cache.
+        messages = list(cached_messages)
+
+        # Adapter settings
+        node_context = conversation_cache.get_node_context(conversation_id) or {}
+        adapter_settings: Optional[Dict[str, Any]] = None
+        adapter_hash = node_context.get("adapter_hash")
+        if adapter_hash:
+            adapter_settings = {"hash": adapter_hash, "enabled": True}
+
+        # Build native tool definitions for iter 1
+        native_tools = self.prompt_provider.build_tools(
+            ToolBuilder.strip_jarvis_extensions(tools or [])
+        )
+
+        # Append user message
+        suffix = self.prompt_provider.user_message_suffix or ""
+        user_content = f"{voice_command}\n{suffix}" if suffix else voice_command
+        messages.append({"role": "user", "content": user_content})
+
+        # === Iter 1: blocking tool call decision ===
+        try:
+            response = await self.llm_client.chat_completion(
+                messages=messages,
+                conversation_id=conversation_id,
+                tools=native_tools,
+                tool_choice="auto",
+                include_date_context=True,
+                adapter_settings=adapter_settings,
+                max_tokens=256,
+            )
+        except Exception as e:
+            logger.warning("Tool-stream iter 1 failed: %s — fall back", e)
+            return None
+
+        try:
+            choice = response["choices"][0]
+            msg = choice.get("message")
+            finish_reason = choice.get("finish_reason", "stop")
+            raw_content = (
+                msg.get("content") if isinstance(msg, dict) else msg
+            ) or ""
+            tool_calls_raw = msg.get("tool_calls") if isinstance(msg, dict) else None
+        except (KeyError, IndexError, TypeError, AttributeError) as e:
+            logger.warning("Tool-stream iter 1 parse failed: %s — fall back", e)
+            return None
+
+        # If no tool calls came back, the LLM gave a direct answer in iter 1.
+        # Fall back so the blocking path returns it without re-invoking.
+        if finish_reason != "tool_calls" or not tool_calls_raw:
+            logger.debug("Tool-stream: iter 1 returned no tool calls — fall back")
+            return None
+
+        tool_calls = _normalize_native_tool_calls(tool_calls_raw)
+
+        # Append assistant message with tool calls
+        messages.append({
+            "role": "assistant",
+            "content": raw_content,
+            "tool_calls": tool_calls,
+        })
+
+        # === Execute server tools synchronously ===
+        try:
+            server_results, client_calls = tool_executor.execute_tool_calls(
+                tool_calls,
+                conversation_id=conversation_id,
+                user_utterance=voice_command,
+            )
+        except Exception as e:
+            logger.warning("Tool-stream tool exec failed: %s — fall back", e)
+            return None
+
+        # Client tools need a node round-trip — fall back so blocking
+        # path returns 202 with the tool calls.
+        if client_calls:
+            logger.debug("Tool-stream: client tools needed — fall back")
+            return None
+
+        # Validation requests need special handling — fall back.
+        if any(
+            tc.get("function", {}).get("name") == "request_validation"
+            for tc in tool_calls
+        ):
+            return None
+
+        if not server_results:
+            # Tool returned nothing — let blocking path handle it.
+            logger.debug("Tool-stream: no server results — fall back")
+            return None
+
+        messages.extend(server_results)
+
+        logger.info(
+            "🎙️ Tool-stream iter 1+exec done at T+%dms; starting streaming iter 2",
+            (_time.time() - _t0) * 1000,
+        )
+
+        # === Iter 2: streaming response ===
+        # Reuse the same regexes / pattern as stream_voice_response so behavior
+        # matches (think-block strip, sentence detection, etc.).
+        _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+        _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+        _TOOL_CALL_TAG_RE = re.compile(r"</?tool_call>")
+
+        async def _audio_generator():
+            token_buffer = ""
+            full_response = ""
+            sentences_sent = 0
+
+            try:
+                async for event in self.llm_client.chat_completion_stream(
+                    messages=messages,
+                    adapter_settings=adapter_settings,
+                    max_tokens=512,
+                ):
+                    if event.get("done"):
+                        break
+                    delta = event.get("delta", "")
+                    if not delta:
+                        continue
+                    token_buffer += delta
+                    full_response += delta
+
+                    token_buffer = _THINK_BLOCK_RE.sub("", token_buffer)
+                    if "<think>" in token_buffer:
+                        continue
+
+                    parts = _SENTENCE_BOUNDARY.split(token_buffer)
+                    if len(parts) >= 2:
+                        complete_parts = parts[:-1]
+                        token_buffer = parts[-1]
+                        for sentence in complete_parts:
+                            sentence = clean_for_tts(sentence.strip())
+                            if not sentence:
+                                continue
+                            sentences_sent += 1
+                            try:
+                                audio_iter, _meta = await tts_client.speak_stream(sentence)
+                                async for chunk in audio_iter:
+                                    yield chunk
+                            except Exception as e:
+                                logger.warning(
+                                    "TTS error sentence %d: %s", sentences_sent, e,
+                                )
+
+                # Flush trailing partial
+                remaining_text = clean_for_tts(
+                    _THINK_BLOCK_RE.sub("", token_buffer).strip()
+                )
+                if remaining_text:
+                    sentences_sent += 1
+                    try:
+                        audio_iter, _meta = await tts_client.speak_stream(remaining_text)
+                        async for chunk in audio_iter:
+                            yield chunk
+                    except Exception as e:
+                        logger.warning("TTS error final sentence: %s", e)
+
+            except Exception as e:
+                logger.error("Tool-stream iter 2 error: %s", e)
+                return
+
+            # Commit the full conversation (iter 1 user/assistant/tool +
+            # iter 2 final assistant) to the cache. Strip think blocks from
+            # the recorded assistant message so future turns don't see
+            # accumulated scaffolding.
+            clean_response = _THINK_BLOCK_RE.sub("", full_response).strip()
+            if clean_response:
+                messages.append({"role": "assistant", "content": clean_response})
+                conversation_cache.update_messages(conversation_id, messages)
+
+            logger.info(
+                "✅ Tool-stream complete: %d sentences, %d chars (T+%dms)",
+                sentences_sent, len(full_response), (_time.time() - _t0) * 1000,
+            )
+
+        return _audio_generator()
+
+    async def stream_continue_with_tool_results(
+        self,
+        conversation_id: str,
+        tool_results: List[Dict[str, Any]],
+        tts_client,
+    ):
+        """Continue a conversation with tool results, streaming the LLM
+        response sentence-by-sentence to TTS.
+
+        This is the streaming twin of continue_conversation_with_tool_results
+        for the case where the post-tool-results LLM call will produce a
+        natural-language response (the common case after a single client tool
+        like get_news / get_weather / get_sports / set_timer).
+
+        Compared to the blocking variant, this overlaps LLM token generation
+        with TTS synthesis: audio starts ~700ms into iter 2 instead of after
+        the full ~3s completion.
+
+        Returns:
+            An async generator of PCM audio bytes if the streaming path is
+            applicable, or ``None`` to signal the caller should fall back to
+            the blocking continue endpoint (which returns JSON text).
+        """
+        import time as _time
+
+        _t0 = _time.time()
+
+        cached_messages = conversation_cache.get_messages(conversation_id)
+        if not cached_messages:
+            logger.info("Continue-stream skip: no cached messages for %s", conversation_id[:8])
+            return None
+
+        # Work on a copy so fall-back doesn't pollute the cache.
+        messages = list(cached_messages)
+
+        # Two modes for adding tool results to the prompt:
+        # - Native tools (Qwen3 with proper chat template): role="tool"
+        #   messages keyed by tool_call_id.
+        # - Text-based (most local models): role="tool" gets dropped by the
+        #   chat template, so we strip any existing tool messages and inject
+        #   the results as a single user message instead.
+        use_native_continue: bool = (
+            self.prompt_provider is not None
+            and self.prompt_provider.supports_native_tools
+        )
+
+        # Two parallel lists:
+        # - `messages` is what we COMMIT to the conversation cache (must
+        #   reflect the conversation as a future turn would understand it).
+        # - `llm_messages` is what we send to the LLM for THIS call only;
+        #   it can include transient overrides (e.g. "respond in plain text")
+        #   that we don't want to poison the cache.
+        if use_native_continue:
+            for result in tool_results:
+                output = result["output"]
+                if not isinstance(output, str):
+                    output = json.dumps(output)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": result["tool_call_id"],
+                    "content": output,
+                })
+            llm_messages = list(messages)
+        else:
+            # Text-based: collect outputs, drop existing role="tool", inject
+            # as user message. Mirrors _format_tool_result_text_mode.
+            result_parts: List[str] = []
+            for tr in tool_results:
+                output = tr["output"]
+                if not isinstance(output, str):
+                    output = json.dumps(output)
+                result_parts.append(output)
+            tool_context = "\n".join(result_parts)
+
+            messages = [m for m in messages if m.get("role") != "tool"]
+
+            is_knowledge_query = self._is_knowledge_delegation(tool_context)
+            if is_knowledge_query:
+                messages.append({
+                    "role": "user",
+                    "content": "Answer the question from your own knowledge. Be brief and conversational.",
+                })
+            else:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Here are the tool results. Craft a natural response using the "
+                        f"ACTUAL values — never use placeholders. Be brief and conversational.\n\n"
+                        f"{tool_context}"
+                    ),
+                })
+
+            # Override the JSON-only constraint from the warmup system prompt
+            # so the model emits plain text for the streaming TTS path. Add
+            # to llm_messages ONLY — caching this would block tools on every
+            # subsequent turn (broke "turn them back off" follow-ups).
+            llm_messages = list(messages)
+            llm_messages.append({
+                "role": "system",
+                "content": (
+                    "Respond naturally in plain text. Do not use JSON format "
+                    "or call any tools. Use the tool results above to answer."
+                ),
+            })
+
+        # Adapter settings
+        node_context = conversation_cache.get_node_context(conversation_id) or {}
+        adapter_settings: Optional[Dict[str, Any]] = None
+        adapter_hash = node_context.get("adapter_hash")
+        if adapter_hash:
+            adapter_settings = {"hash": adapter_hash, "enabled": True}
+
+        logger.info(
+            "🎙️ Streaming continue: %d tool results, starting LLM stream",
+            len(tool_results),
+        )
+
+        _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+        _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+        _TOOL_CALL_TAG_RE = re.compile(r"</?tool_call>")
+
+        async def _audio_generator():
+            token_buffer = ""
+            full_response = ""
+            sentences_sent = 0
+
+            try:
+                async for event in self.llm_client.chat_completion_stream(
+                    messages=llm_messages,
+                    adapter_settings=adapter_settings,
+                    max_tokens=512,
+                ):
+                    if event.get("done"):
+                        break
+                    delta = event.get("delta", "")
+                    if not delta:
+                        continue
+                    token_buffer += delta
+                    full_response += delta
+
+                    token_buffer = _THINK_BLOCK_RE.sub("", token_buffer)
+                    if "<think>" in token_buffer:
+                        continue
+
+                    parts = _SENTENCE_BOUNDARY.split(token_buffer)
+                    if len(parts) >= 2:
+                        complete_parts = parts[:-1]
+                        token_buffer = parts[-1]
+                        for sentence in complete_parts:
+                            sentence = clean_for_tts(sentence.strip())
+                            if not sentence:
+                                continue
+                            sentences_sent += 1
+                            try:
+                                audio_iter, _meta = await tts_client.speak_stream(sentence)
+                                async for chunk in audio_iter:
+                                    yield chunk
+                            except Exception as e:
+                                logger.warning(
+                                    "TTS error sentence %d: %s", sentences_sent, e,
+                                )
+
+                # Flush trailing partial
+                remaining_text = clean_for_tts(
+                    _TOOL_CALL_TAG_RE.sub(
+                        "", _THINK_BLOCK_RE.sub("", token_buffer)
+                    ).strip()
+                )
+                if remaining_text:
+                    sentences_sent += 1
+                    try:
+                        audio_iter, _meta = await tts_client.speak_stream(remaining_text)
+                        async for chunk in audio_iter:
+                            yield chunk
+                    except Exception as e:
+                        logger.warning("TTS error final sentence: %s", e)
+
+            except Exception as e:
+                logger.error("Streaming continue iter error: %s", e)
+                return
+
+            # Commit the conversation (tool results + final assistant message)
+            # to the cache, with scaffolding scrubbed.
+            clean_response = _TOOL_CALL_TAG_RE.sub(
+                "", _THINK_BLOCK_RE.sub("", full_response)
+            ).strip()
+            if clean_response:
+                messages.append({"role": "assistant", "content": clean_response})
+                conversation_cache.update_messages(conversation_id, messages)
+
+            logger.info(
+                "✅ Streaming continue complete: %d sentences, %d chars (T+%dms)",
                 sentences_sent, len(full_response), (_time.time() - _t0) * 1000,
             )
 

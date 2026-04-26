@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
 
-from app.core.utils.rest_client import post, get, build_jarvis_app_headers
+from app.core.utils.rest_client import post, get, build_jarvis_app_headers, _get_shared_client
 
 logger = logging.getLogger("uvicorn")
 
@@ -142,30 +142,31 @@ class LLMProxyClient:
 
         logger.debug(f"Starting streaming chat completion to {url}")
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream(
-                "POST", url, json=payload, headers=self._build_headers()
-            ) as resp:
-                if resp.status_code != 200:
-                    logger.error(f"Streaming request failed: {resp.status_code}")
-                    raise httpx.HTTPStatusError(
-                        f"Streaming failed: {resp.status_code}",
-                        request=resp.request,
-                        response=resp,
-                    )
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data_str = line[6:]  # strip "data: " prefix
-                    try:
-                        event = json.loads(data_str)
-                        yield event
-                        if event.get("done"):
-                            return
-                    except json.JSONDecodeError:
-                        logger.debug(f"Failed to parse SSE data: {data_str[:100]}")
-                        continue
+        client = _get_shared_client()
+        async with client.stream(
+            "POST", url, json=payload, headers=self._build_headers(),
+            timeout=httpx.Timeout(60.0),
+        ) as resp:
+            if resp.status_code != 200:
+                logger.error(f"Streaming request failed: {resp.status_code}")
+                raise httpx.HTTPStatusError(
+                    f"Streaming failed: {resp.status_code}",
+                    request=resp.request,
+                    response=resp,
+                )
+            async for line in resp.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[6:]  # strip "data: " prefix
+                try:
+                    event = json.loads(data_str)
+                    yield event
+                    if event.get("done"):
+                        return
+                except json.JSONDecodeError:
+                    logger.debug(f"Failed to parse SSE data: {data_str[:100]}")
+                    continue
 
     async def lightweight_chat(
         self, 

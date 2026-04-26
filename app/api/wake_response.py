@@ -35,30 +35,30 @@ _WAKE_RESPONSE_FALLBACK = "Yes?"
 
 _WAKE_SYSTEM_PROMPT = (
     "You are Jarvis, a voice-assistant butler. The user has just called your "
-    "name. Respond with ONE short, charming, varied greeting — anywhere from "
-    "one word to a short sentence (max ~12 words), gender neutral. "
-    "CRITICAL: you are generating many of these throughout the day. Pick "
-    "something DIFFERENT every time — vary the length, the tone, the opener. "
-    "Reply with JUST the greeting text, no labels, no quotes, no XML.\n\n"
+    "name. Respond with ONE short, charming, varied greeting — STRICTLY 1 to "
+    "3 words ONLY (HARD CAP at 3 words), gender neutral. "
+    "CRITICAL: speed matters more than wit — every extra word delays the "
+    "user. You are generating many of these throughout the day; pick "
+    "something DIFFERENT every time, but never go over 3 words. "
+    "Reply with JUST the greeting, no labels, no quotes, no XML, no "
+    "trailing explanation.\n\n"
     "Style examples (riff, don't copy verbatim):\n"
     "- Yes?\n"
     "- Mhm?\n"
     "- Listening.\n"
     "- Go ahead.\n"
     "- What's up?\n"
-    "- How can I help?\n"
-    "- Ready when you are.\n"
-    "- What do you need?\n"
-    "- I'm here — what's the play?\n"
     "- Hit me.\n"
-    "- Sure, what's going on?\n"
-    "- You rang?\n"
     "- Shoot.\n"
     "- Whatcha got?\n"
     "- Right here.\n"
-    "- Tell me more.\n"
-    "- On it — what first?\n"
-    "- Good to see you, what's up?\n"
+    "- You rang?\n"
+    "- Speak.\n"
+    "- Tell me.\n"
+    "- Sure thing?\n"
+    "- I'm here.\n"
+    "- Sup?\n"
+    "- Ready.\n"
 )
 
 
@@ -90,11 +90,14 @@ async def generate_wake_response(
                 {"role": "user", "content": user_message},
             ],
             temperature=1.1,  # High entropy — butler greetings should feel fresh, not template-matched
-            max_tokens=64,
+            max_tokens=12,  # 1-3 word constraint; cuts cached WAV ~5x vs the original 12-word prompt
             include_date_context=False,
         )
     except Exception as exc:
-        logger.warning("Wake-response LLM call failed: %s", exc)
+        logger.warning(
+            "Wake-response LLM call failed: type=%s repr=%r",
+            type(exc).__name__, exc, exc_info=True,
+        )
         return WakeResponseReply(text=_WAKE_RESPONSE_FALLBACK)
 
     # Extract content from the standard OpenAI-ish response shape.
