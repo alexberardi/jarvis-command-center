@@ -480,14 +480,19 @@ async def start_conversation(
             "node_id": node_context_provider.node.node_id,
             "user": node_context_provider.node.user,
             "voice_mode": node_context_provider.node.voice_mode,
-            "adapter_hash": node_context_provider.node.adapter_hash,
+            # Adapters orphaned 2026-04-25: training delivered marginal gains
+            # and the per-call resolution (incompatibility check + S3 head)
+            # was costing ~80-150ms on every LLM call. Leave the field for
+            # schema compatibility but never populate it.
+            "adapter_hash": None,
             "household_id": node_context_provider.household_id,
         }
 
         # Phase 5: household-level adapter deployment takes precedence over the
         # legacy per-node adapter_hash column. A household-active adapter wins
         # because it's the one gated by the scheduler's eval run.
-        if node_context.get("household_id"):
+        # ORPHANED — see adapter_hash comment above.
+        if False and node_context.get("household_id"):
             try:
                 from app.services.adapter_registry import AdapterRegistry
                 from app.db import get_session_local
@@ -845,6 +850,40 @@ async def handle_voice_stream(
 
             duration = time.time() - start_time
             logger.info(f"🚀 Streaming LLM→TTS response in {duration:.2f}s")
+            latency_logger.end_request(request.conversation_id)
+
+            return StreamingResponse(
+                streaming_audio,
+                status_code=200,
+                media_type="audio/raw",
+                headers={
+                    "X-Audio-Sample-Rate": audio_fmt["sample_rate"],
+                    "X-Audio-Channels": audio_fmt["channels"],
+                    "X-Audio-Sample-Width": audio_fmt["sample_width"],
+                    "X-Assistant-Message": "",
+                },
+            )
+
+        # --- Tool-streaming path: server-side tool then streamed final answer ---
+        # For commands the router predicts will need server-side tool execution
+        # (news, weather summaries, etc.), run iter 1 + tool exec blocking and
+        # stream iter 2's prose response to TTS as sentences complete. Saves
+        # 2-3s perceived latency on chatty answers vs the blocking path.
+        # Gated by JARVIS_STREAM_TOOL_RESPONSES env flag (default off).
+        streaming_audio = await model_service.try_stream_voice_response_with_tools(
+            conversation_id=request.conversation_id,
+            voice_command=request.voice_command,
+            tts_client=tts_client,
+            speaker_user_id=request.speaker_user_id,
+        )
+        if streaming_audio is not None:
+            try:
+                audio_fmt = await tts_client.get_audio_format()
+            except Exception:
+                audio_fmt = {"sample_rate": "16000", "channels": "1", "sample_width": "2"}
+
+            duration = time.time() - start_time
+            logger.info(f"🚀 Tool-stream LLM→TTS response in {duration:.2f}s")
             latency_logger.end_request(request.conversation_id)
 
             return StreamingResponse(
@@ -1334,6 +1373,91 @@ async def _maybe_push_actions_to_inbox(
             )
         except Exception as e:
             logger.warning("Failed to push actions to inbox: %s", e)
+
+
+@v0_router.post("/voice/command/continue/stream")
+async def continue_voice_command_stream(
+    request: ToolResultRequest,
+    node_context_provider: NodeContextProvider = Depends(verify_api_key),
+    model_service: ModelService = Depends(get_model_service),
+):
+    """Streaming twin of /voice/command/continue.
+
+    Runs the post-tool-results LLM call as a stream and pipes sentences to
+    TTS, returning audio/raw PCM. The user hears the first sentence within
+    ~700ms instead of waiting for the full ~3s completion. Falls back to
+    202 JSON when streaming isn't applicable so callers can retry against
+    the blocking endpoint.
+    """
+    start_time = time.time()
+
+    logger.info(
+        f"Continue (stream) from node: {node_context_provider.node.node_id} "
+        f"conversation={request.conversation_id}, tool_results={len(request.tool_results)}"
+    )
+
+    try:
+        from app.core.clients.tts_client import TTSClient
+
+        tts_client = TTSClient(
+            household_id=node_context_provider.household_id,
+            node_id=node_context_provider.node.node_id,
+        )
+
+        tool_results = [
+            {"tool_call_id": tr.tool_call_id, "output": tr.output}
+            for tr in request.tool_results
+        ]
+
+        # Push actions to inbox in parallel with the stream — same as the
+        # blocking endpoint. Fire-and-forget so it doesn't block audio.
+        await _maybe_push_actions_to_inbox(
+            tool_results=tool_results,
+            node_context_provider=node_context_provider,
+        )
+
+        streaming_audio = await model_service.try_stream_continue_with_tool_results(
+            conversation_id=request.conversation_id,
+            tool_results=tool_results,
+            tts_client=tts_client,
+        )
+
+        if streaming_audio is None:
+            # Streaming path not applicable — return 202 JSON so the node
+            # falls back to calling /voice/command/continue (blocking).
+            logger.info("Continue-stream: not applicable, signaling fallback")
+            return JSONResponse(
+                status_code=202,
+                content={"fallback": "use_blocking_continue"},
+            )
+
+        try:
+            audio_fmt = await tts_client.get_audio_format()
+        except Exception:
+            audio_fmt = {"sample_rate": "16000", "channels": "1", "sample_width": "2"}
+
+        duration = time.time() - start_time
+        logger.info(f"🚀 Continue-stream LLM→TTS dispatched in {duration:.2f}s")
+
+        return StreamingResponse(
+            streaming_audio,
+            status_code=200,
+            media_type="audio/raw",
+            headers={
+                "X-Audio-Sample-Rate": audio_fmt["sample_rate"],
+                "X-Audio-Channels": audio_fmt["channels"],
+                "X-Audio-Sample-Width": audio_fmt["sample_width"],
+                "X-Assistant-Message": "",
+            },
+        )
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(f"❌ Continue-stream failed after {duration:.2f}s: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to stream continuation: {str(e)}",
+        )
 
 
 @v0_router.post("/voice/command/continue", response_model=VoiceCommandResponse)
