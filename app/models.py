@@ -38,6 +38,11 @@ class Node(Base):
     git_sha = Column(String(40), nullable=True)
     is_busy = Column(Boolean, default=False, nullable=False)
 
+    # Soft-delete flag. False after a successful factory reset — the row
+    # is kept so node_tasks FKs remain valid, but list queries should
+    # filter on is_active=True.
+    is_active = Column(Boolean, default=True, nullable=False)
+
     def is_online(self) -> bool:
         """Node is online if last_seen is within ONLINE_THRESHOLD_MINUTES."""
         if self.last_seen is None:

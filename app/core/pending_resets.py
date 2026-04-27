@@ -50,6 +50,24 @@ def verify_and_consume(token: str) -> bool:
     return time.time() < expiry
 
 
+def verify_token(token: str) -> bool:
+    """Verify a reset token is valid WITHOUT consuming it.
+
+    Used by status-update endpoints during a factory reset, where the node
+    needs to PATCH the task multiple times (in_progress, success). The token
+    expires naturally after RESET_TOKEN_TTL_SECONDS — no need to consume on
+    each call.
+    """
+    with _lock:
+        _cleanup_expired()
+        expiry = _pending.get(token)
+
+    if expiry is None:
+        return False
+
+    return time.time() < expiry
+
+
 def _cleanup_expired() -> None:
     """Remove expired tokens. Must be called under _lock."""
     now: float = time.time()
