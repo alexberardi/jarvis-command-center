@@ -5,12 +5,12 @@ from datetime import datetime
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from .core.conversation_cache import conversation_cache
-from .core.pending_resets import create_reset_token, verify_and_consume
+from .core.pending_resets import create_reset_token, verify_and_consume, verify_token
 from .context_providers.node_context_provider import NodeContextProvider
 from .deps import (
     AuthenticatedUser,
@@ -20,8 +20,12 @@ from .deps import (
     verify_household_role,
     verify_user_jwt,
 )
-from .api.node_updates import dispatch_pending_task, reconcile_open_task
-from .models import AuthSession, ConfigPush, Node, SettingsRequest, SettingsSnapshot
+from .api.node_updates import (
+    NodeTaskResponse,
+    dispatch_pending_task,
+    reconcile_open_task,
+)
+from .models import AuthSession, ConfigPush, Node, NodeTask, SettingsRequest, SettingsSnapshot
 
 
 router = APIRouter()
@@ -224,13 +228,23 @@ def _deactivate_node_with_auth(node_id: str) -> bool:
 
 
 @router.get("/nodes", response_model=List[NodeResponse])
-def list_nodes(household_id: str | None = None, db: Session = Depends(get_db)):
+def list_nodes(
+    household_id: str | None = None,
+    include_inactive: bool = False,
+    db: Session = Depends(get_db),
+):
     """List nodes registered with this command center.
 
     Args:
         household_id: Optional filter by household UUID.
+        include_inactive: Include rows with is_active=False (default: hide them).
+            Soft-deleted nodes (e.g. after a successful factory reset) are
+            preserved for audit + foreign-key integrity but should not appear
+            in operator-facing lists.
     """
     query = db.query(Node)
+    if not include_inactive:
+        query = query.filter(Node.is_active.is_(True))
     if household_id:
         query = query.filter(Node.household_id == household_id)
     nodes = query.all()
@@ -390,6 +404,187 @@ def delete_node(
     db.commit()
     logger.info(f"Node deleted: {node.node_id} by user {user.user_id}")
     return {"message": "Deleted"}
+
+
+# ============================================================
+# Factory Reset
+# ============================================================
+#
+# Replaces the old fire-and-forget DELETE flow as the user-facing way to
+# wipe a node. Mobile creates a tracked task, CC publishes MQTT, the node
+# reports progress (in_progress → success/failed) via the status endpoint
+# below. On success the node row is marked inactive (kept for audit + FK
+# integrity) and deactivated in jarvis-auth.
+#
+# DELETE /admin/nodes/{id} stays as an internal hard-delete path (no UI
+# exposes it) — useful only when an inactive row genuinely needs to go.
+
+
+class FactoryResetCreateResponse(BaseModel):
+    task_id: str
+    reset_token: str
+
+
+class FactoryResetStatusUpdate(BaseModel):
+    state: str  # "in_progress" | "success" | "failed"
+    error_message: str | None = None
+
+
+@router.post(
+    "/nodes/{node_id}/factory-reset",
+    response_model=FactoryResetCreateResponse,
+)
+def create_factory_reset(
+    node_id: str,
+    db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+):
+    """Begin a factory reset for a node.
+
+    Creates a tracked NodeTask (kind="factory_reset"), generates a single
+    reset token (also serves as auth for the node's status callbacks),
+    publishes the MQTT trigger, and returns the task id so the caller can
+    poll progress.
+    """
+    node = db.query(Node).filter(Node.node_id == node_id).first()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    if node.household_id:
+        verify_household_role(user.user_id, node.household_id, required_role="power_user")
+    elif not user.is_superuser:
+        raise HTTPException(
+            status_code=403,
+            detail="Only superusers can factory-reset nodes without a household",
+        )
+
+    # Reject if a factory reset is already in flight for this node.
+    existing = (
+        db.query(NodeTask)
+        .filter(
+            NodeTask.node_id == node_id,
+            NodeTask.kind == "factory_reset",
+            NodeTask.state.in_(["pending", "dispatched", "in_progress"]),
+        )
+        .order_by(NodeTask.created_at.desc())
+        .first()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "A factory reset is already in flight for this node.",
+                "task_id": existing.id,
+                "state": existing.state,
+            },
+        )
+
+    task = NodeTask(
+        node_id=node_id,
+        kind="factory_reset",
+        state="pending",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    reset_token: str = create_reset_token()
+
+    # Publish MQTT. If the broker is unreachable we still return the task —
+    # it'll sit in "pending" until something times it out. The mobile UI
+    # can show "node didn't respond" after its own polling timeout.
+    try:
+        from .node_settings import get_mqtt_client
+        mqtt = get_mqtt_client()
+        if mqtt:
+            mqtt.publish(
+                f"jarvis/nodes/{node_id}/factory-reset",
+                json.dumps(
+                    {
+                        "request_id": reset_token,
+                        "node_id": node_id,
+                        "task_id": task.id,
+                    }
+                ),
+            )
+            task.state = "dispatched"
+            db.commit()
+            db.refresh(task)
+            logger.info(
+                f"Factory-reset MQTT published for node {node_id} "
+                f"(task={task.id})"
+            )
+        else:
+            logger.warning(
+                f"MQTT unavailable — node {node_id} reset task {task.id} "
+                f"will stay pending"
+            )
+    except Exception as e:
+        logger.warning(f"Failed to publish factory-reset MQTT: {e}")
+
+    return FactoryResetCreateResponse(task_id=task.id, reset_token=reset_token)
+
+
+@node_public_router.post(
+    "/nodes/factory-reset/{task_id}/status",
+    response_model=NodeTaskResponse,
+)
+def update_factory_reset_status(
+    task_id: str,
+    body: FactoryResetStatusUpdate,
+    x_reset_token: str | None = Header(default=None, alias="X-Reset-Token"),
+    db: Session = Depends(get_db),
+):
+    """Node-callable status endpoint for an in-flight factory reset.
+
+    Authenticated by the reset token (the node's API key has been wiped by
+    the time it makes the final "success" call). The token is verified
+    without consuming so the node can PATCH multiple times — first
+    "in_progress" before it wipes config, then "success" after the wipe
+    completes using a value it cached just before clearing config.json.
+
+    On a "success" transition the node is marked inactive locally and
+    deactivated in jarvis-auth.
+
+    The token must be provided via the `X-Reset-Token` header.
+    """
+    if not x_reset_token or not verify_token(x_reset_token):
+        logger.warning(
+            f"Factory-reset status REJECTED for task {task_id} "
+            f"(token={'(missing)' if not x_reset_token else x_reset_token[:8] + '...'})"
+        )
+        raise HTTPException(status_code=401, detail="Invalid or expired reset token")
+
+    if body.state not in ("in_progress", "success", "failed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"state must be one of: in_progress, success, failed (got {body.state!r})",
+        )
+
+    task = db.query(NodeTask).filter(NodeTask.id == task_id).first()
+    if not task or task.kind != "factory_reset":
+        raise HTTPException(status_code=404, detail="Factory-reset task not found")
+
+    if task.state in ("success", "failed"):
+        # Idempotent: late-arriving status from a flaky network.
+        return task
+
+    task.state = body.state
+    task.error_message = body.error_message
+    if body.state in ("success", "failed"):
+        task.finished_at = datetime.utcnow()
+    db.commit()
+    db.refresh(task)
+
+    if body.state == "success":
+        node = db.query(Node).filter(Node.node_id == task.node_id).first()
+        if node is not None:
+            node.is_active = False
+            db.commit()
+            logger.info(f"Node {task.node_id} marked inactive after factory reset")
+        _deactivate_node_with_auth(task.node_id)
+
+    return task
 
 
 @router.patch("/nodes/{node_id}", response_model=NodeResponse, dependencies=[Depends(verify_admin_key)])
