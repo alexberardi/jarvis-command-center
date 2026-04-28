@@ -237,15 +237,8 @@ class ConversationHandler:
         try:
             date_keys = await self.llm_client.get_date_keys()
             if date_keys:
-                _COMMON_DATE_KEYS = {
-                    "today", "tomorrow", "yesterday",
-                    "tonight", "this_weekend", "last_weekend", "next_weekend",
-                    "morning", "afternoon", "evening", "night",
-                    "this_week", "last_week", "next_week",
-                    "this_month", "last_month",
-                }
-                trimmed = [k for k in date_keys if k in _COMMON_DATE_KEYS]
-                node_context["date_keys"] = trimmed if trimmed else date_keys
+                # Send all date keys — the model can't emit keys it doesn't know about
+                node_context["date_keys"] = date_keys
         except Exception as e:
             logger.warning("Failed to fetch date keys for prompt: %s", e)
 
