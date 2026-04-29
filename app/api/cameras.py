@@ -97,10 +97,10 @@ def _fetch_credentials_from_node(
             Node.node_id == primary_node_id, Node.household_id == household_id,
         ).first()
     if not node:
-        nodes = db.query(Node).filter(Node.household_id == household_id).all()
+        nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
         node = nodes[-1] if nodes else None
     if not node:
-        raise HTTPException(status_code=400, detail="No node available in household")
+        raise HTTPException(status_code=400, detail="No active node available in household")
 
     from app.node_settings import get_mqtt_client
 

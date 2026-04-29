@@ -118,8 +118,8 @@ class ControlDeviceTool(IServerTool):
             if not dev.is_controllable:
                 return {"error": f"Device '{dev.name}' is not controllable."}
 
-            # Find a node in this household
-            nodes = db.query(Node).filter(Node.household_id == household_id).all()
+            # Find an active node in this household
+            nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
             node = nodes[-1] if nodes else None
             if not node:
                 return {"error": "No node available in this household."}
