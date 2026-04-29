@@ -70,8 +70,8 @@ def get_smart_home_config(
     primary_node_id: str = settings.get("smart_home.primary_node_id", household_id=household_id) or ""
     use_external_devices: bool = settings.get("smart_home.use_external_devices", household_id=household_id) or False
 
-    # Get all nodes in this household for the dropdown
-    nodes = db.query(Node).filter(Node.household_id == household_id).all()
+    # Get active nodes in this household for the dropdown
+    nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
     node_options = [
         NodeOption(node_id=n.node_id, room=n.room, online=n.is_online(), last_seen=n.last_seen)
         for n in nodes
@@ -142,7 +142,7 @@ def _toggle_builtin_control_device(household_id: str, *, enabled: bool, db: Sess
     """
     from app.services.node_command_service import get_node_command_service
 
-    nodes = db.query(Node).filter(Node.household_id == household_id).all()
+    nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
     if not nodes:
         return
 
@@ -687,7 +687,7 @@ def _broadcast_device_cache_invalidate(db: Session, household_id: str) -> None:
     """
     try:
         from app.services.node_command_service import get_node_command_service
-        nodes = db.query(Node).filter(Node.household_id == household_id).all()
+        nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
         if not nodes:
             return
         service = get_node_command_service()
@@ -966,11 +966,11 @@ def control_device(
     if not dev.is_controllable:
         raise HTTPException(status_code=400, detail="Device is not controllable")
 
-    # Find a node for this household
-    nodes = db.query(Node).filter(Node.household_id == household_id).all()
+    # Find an active node for this household
+    nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
     node = nodes[-1] if nodes else None
     if not node:
-        raise HTTPException(status_code=400, detail="No node available in household")
+        raise HTTPException(status_code=400, detail="No active node available in household")
 
     from app.node_settings import get_mqtt_client
     from app.services.node_command_service import get_node_command_service
@@ -1098,12 +1098,13 @@ def control_external_device(
     if primary_node_id:
         node = db.query(Node).filter(
             Node.node_id == primary_node_id, Node.household_id == household_id,
+            Node.is_active.is_(True),
         ).first()
     if not node:
-        nodes = db.query(Node).filter(Node.household_id == household_id).all()
+        nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
         node = nodes[-1] if nodes else None
     if not node:
-        raise HTTPException(status_code=400, detail="No node available in household")
+        raise HTTPException(status_code=400, detail="No active node available in household")
 
     from app.node_settings import get_mqtt_client
     from app.services.node_command_service import get_node_command_service
@@ -1202,10 +1203,10 @@ def get_device_state(
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    nodes = db.query(Node).filter(Node.household_id == household_id).all()
+    nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
     node = nodes[-1] if nodes else None
     if not node:
-        raise HTTPException(status_code=400, detail="No node available in household")
+        raise HTTPException(status_code=400, detail="No active node available in household")
 
     from app.node_settings import get_mqtt_client
     from app.services.node_command_service import get_node_command_service
