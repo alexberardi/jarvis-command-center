@@ -43,6 +43,11 @@ class Node(Base):
     # filter on is_active=True.
     is_active = Column(Boolean, default=True, nullable=False)
 
+    # JSON list of protocol names installed on this node, e.g. '["homeconnect","govee"]'.
+    # Populated from heartbeat. Used to route device commands to a node that
+    # has the required protocol adapter.
+    protocols = Column(Text, nullable=True)
+
     def is_online(self) -> bool:
         """Node is online if last_seen is within ONLINE_THRESHOLD_MINUTES."""
         if self.last_seen is None:
