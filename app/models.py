@@ -48,6 +48,12 @@ class Node(Base):
     # has the required protocol adapter.
     protocols = Column(Text, nullable=True)
 
+    # Reported via heartbeat: True when the node has no K2 secrets-encryption
+    # key. Mobile uses this to show the settings gear so the user can pair K2
+    # — without it, container nodes (which never go through AP provisioning)
+    # are stuck with no way to add K2.
+    needs_k2 = Column(Boolean, default=True, nullable=False)
+
     def is_online(self) -> bool:
         """Node is online if last_seen is within ONLINE_THRESHOLD_MINUTES."""
         if self.last_seen is None:
