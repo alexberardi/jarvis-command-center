@@ -85,6 +85,7 @@ class HeartbeatPayload(BaseModel):
     thread_status: dict | None = None
     version_info: dict | None = None
     is_busy: bool | None = None
+    protocols: list[str] | None = None
 
 
 class NodeCreateResponse(BaseModel):
@@ -297,6 +298,9 @@ def node_heartbeat(
             node.git_sha = payload.version_info.get("git_sha")
         if payload.is_busy is not None:
             node.is_busy = payload.is_busy
+        if payload.protocols is not None:
+            import json
+            node.protocols = json.dumps(payload.protocols)
     db.commit()
 
     # If the node just reported its post-upgrade version, finalize any

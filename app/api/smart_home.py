@@ -329,6 +329,14 @@ _PROTOCOL_ACTIONS: dict[str, list[dict[str, str]]] = {
         {"button_text": "Vol Up", "button_action": "volume_up", "button_type": "secondary", "button_icon": "volume-plus"},
         {"button_text": "Vol Down", "button_action": "volume_down", "button_type": "secondary", "button_icon": "volume-minus"},
     ],
+    "homeconnect": [
+        {"button_text": "Auto Wash", "button_action": "start_auto", "button_type": "primary", "button_icon": "dishwasher"},
+        {"button_text": "Eco 50\u00b0", "button_action": "start_eco", "button_type": "primary", "button_icon": "leaf"},
+        {"button_text": "Quick 65\u00b0", "button_action": "start_quick", "button_type": "secondary", "button_icon": "lightning-bolt"},
+        {"button_text": "Glass 40\u00b0", "button_action": "start_glass", "button_type": "secondary", "button_icon": "glass-fragile"},
+        {"button_text": "Pre-Rinse", "button_action": "start_prerinse", "button_type": "secondary", "button_icon": "water"},
+        {"button_text": "Stop", "button_action": "stop", "button_type": "destructive", "button_icon": "stop"},
+    ],
 }
 
 # Domain-based fallback actions for HA devices without a specific protocol.
@@ -398,6 +406,51 @@ def _get_actions_for_raw(
 def _get_device_actions(dev: "Device") -> list[JarvisButtonResponse] | None:
     """Resolve supported actions for a DB device."""
     return _get_actions_for_raw(dev.domain, dev.protocol, dev.is_controllable)
+
+
+def _pick_node_for_protocol(
+    db: Session,
+    household_id: str,
+    protocol: str | None,
+    primary_node_id: str = "",
+) -> Node | None:
+    """Pick the best active node for a device control command.
+
+    Priority:
+    1. Node that reports having the device's protocol installed.
+    2. primary_node_id (if set and active).
+    3. Any active node (fallback for old nodes with protocols=NULL).
+    """
+    nodes = db.query(Node).filter(
+        Node.household_id == household_id,
+        Node.is_active.is_(True),
+    ).all()
+    if not nodes:
+        return None
+
+    if protocol:
+        matching: list[Node] = []
+        for n in nodes:
+            if n.protocols:
+                try:
+                    node_protocols = json.loads(n.protocols)
+                    if protocol in node_protocols:
+                        matching.append(n)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        if matching:
+            if primary_node_id:
+                for n in matching:
+                    if n.node_id == primary_node_id:
+                        return n
+            return max(matching, key=lambda n: n.last_seen or datetime.min)
+
+    # Fallback: prefer primary_node_id, then any node
+    if primary_node_id:
+        for n in nodes:
+            if n.node_id == primary_node_id:
+                return n
+    return nodes[-1]
 
 
 # =============================================================================
@@ -966,9 +1019,8 @@ def control_device(
     if not dev.is_controllable:
         raise HTTPException(status_code=400, detail="Device is not controllable")
 
-    # Find an active node for this household
-    nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
-    node = nodes[-1] if nodes else None
+    # Pick a node that has the device's protocol installed
+    node = _pick_node_for_protocol(db, household_id, dev.protocol)
     if not node:
         raise HTTPException(status_code=400, detail="No active node available in household")
 
@@ -1093,16 +1145,8 @@ def control_external_device(
     settings = get_settings_service()
     primary_node_id: str = settings.get("smart_home.primary_node_id", household_id=household_id) or ""
 
-    # Find node: prefer primary, fall back to any household node
-    node = None
-    if primary_node_id:
-        node = db.query(Node).filter(
-            Node.node_id == primary_node_id, Node.household_id == household_id,
-            Node.is_active.is_(True),
-        ).first()
-    if not node:
-        nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
-        node = nodes[-1] if nodes else None
+    # Pick a node that has the device's protocol installed
+    node = _pick_node_for_protocol(db, household_id, body.protocol, primary_node_id)
     if not node:
         raise HTTPException(status_code=400, detail="No active node available in household")
 
@@ -1203,8 +1247,7 @@ def get_device_state(
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
-    node = nodes[-1] if nodes else None
+    node = _pick_node_for_protocol(db, household_id, dev.protocol)
     if not node:
         raise HTTPException(status_code=400, detail="No active node available in household")
 
