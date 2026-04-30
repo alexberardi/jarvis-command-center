@@ -215,6 +215,7 @@ def poll_package_install(
 
 class PackageUninstallBody(BaseModel):
     command_name: str
+    component_type: str
 
 
 @router.post(
@@ -253,7 +254,7 @@ def request_package_uninstall(
         node_id, body.command_name, uninstall_request.id[:8],
     )
 
-    _publish_package_uninstall_mqtt(node_id, uninstall_request)
+    _publish_package_uninstall_mqtt(node_id, uninstall_request, component_type=body.component_type)
 
     return PackageInstallResponse(
         id=uninstall_request.id,
@@ -334,7 +335,11 @@ def poll_package_uninstall(
     )
 
 
-def _publish_package_uninstall_mqtt(node_id: str, request: PackageInstallRequest) -> None:
+def _publish_package_uninstall_mqtt(
+    node_id: str,
+    request: PackageInstallRequest,
+    component_type: str | None = None,
+) -> None:
     """Publish MQTT message to tell node to uninstall a package."""
     from app.node_settings import get_mqtt_client
 
@@ -344,10 +349,13 @@ def _publish_package_uninstall_mqtt(node_id: str, request: PackageInstallRequest
         return
 
     topic = f"jarvis/nodes/{node_id}/package-uninstall"
-    payload = json.dumps({
+    mqtt_payload: dict[str, str] = {
         "request_id": request.id,
         "command_name": request.command_name,
-    })
+    }
+    if component_type:
+        mqtt_payload["component_type"] = component_type
+    payload = json.dumps(mqtt_payload)
 
     try:
         client.publish(topic, payload)
