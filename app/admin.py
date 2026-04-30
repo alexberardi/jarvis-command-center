@@ -73,6 +73,7 @@ class NodeResponse(BaseModel):
     install_mode: str | None = None
     git_sha: str | None = None
     is_busy: bool = False
+    needs_k2: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -86,6 +87,7 @@ class HeartbeatPayload(BaseModel):
     version_info: dict | None = None
     is_busy: bool | None = None
     protocols: list[str] | None = None
+    needs_k2: bool | None = None
 
 
 class NodeCreateResponse(BaseModel):
@@ -301,6 +303,8 @@ def node_heartbeat(
         if payload.protocols is not None:
             import json
             node.protocols = json.dumps(payload.protocols)
+        if payload.needs_k2 is not None:
+            node.needs_k2 = payload.needs_k2
     db.commit()
 
     # If the node just reported its post-upgrade version, finalize any
