@@ -36,23 +36,37 @@ def get_mqtt_broker_url() -> Optional[str]:
     return os.getenv("JARVIS_MQTT_BROKER_URL", "mqtt://localhost:1883")
 
 
-def parse_mqtt_url(url: str) -> tuple[str, int]:
+def parse_mqtt_url(url: str) -> tuple[str, int, str]:
     """
-    Parse MQTT URL into host and port.
+    Parse MQTT URL into host, port, and transport.
 
     Supports formats:
-    - mqtt://host:port
-    - host:port
-    - host (defaults to port 1883)
+    - mqtt://host:port   → TCP transport
+    - mqtts://host:port  → TCP + TLS
+    - ws://host:port     → WebSocket transport
+    - wss://host:port    → WebSocket + TLS
+    - host:port          → TCP transport (default)
+    - host               → TCP transport, port 1883
+
+    Returns:
+        (host, port, transport) where transport is "tcp" or "websockets"
     """
-    if url.startswith("mqtt://"):
-        url = url[7:]  # Remove mqtt:// prefix
+    scheme = "mqtt"
+    for prefix in ("wss://", "ws://", "mqtts://", "mqtt://"):
+        if url.startswith(prefix):
+            scheme = prefix.rstrip(":/")
+            url = url[len(prefix):]
+            break
 
     if ":" in url:
         host, port_str = url.rsplit(":", 1)
-        return host, int(port_str)
+        port = int(port_str)
     else:
-        return url, 1883  # Default MQTT port
+        host = url
+        port = 443 if scheme in ("wss", "mqtts") else 1883
+
+    transport = "websockets" if scheme in ("ws", "wss") else "tcp"
+    return host, port, transport
 
 
 class MQTTClient:
@@ -64,7 +78,8 @@ class MQTTClient:
 
     def __init__(self, broker_url: str):
         self.broker_url = broker_url
-        self.host, self.port = parse_mqtt_url(broker_url)
+        self.host, self.port, self.transport = parse_mqtt_url(broker_url)
+        self._use_tls = broker_url.startswith("wss://") or broker_url.startswith("mqtts://")
         self.client: Optional[mqtt.Client] = None
         self._connected = False
 
@@ -76,7 +91,12 @@ class MQTTClient:
         self.client = mqtt.Client(
             client_id=f"jarvis-cc-{os.getpid()}-{uuid.uuid4().hex[:8]}",
             protocol=mqtt.MQTTv311,
+            transport=self.transport,
         )
+
+        if self._use_tls:
+            import ssl
+            self.client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
 
         # Set up callbacks
         self.client.on_connect = self._on_connect
@@ -86,7 +106,7 @@ class MQTTClient:
         try:
             self.client.connect(self.host, self.port, keepalive=60)
             self.client.loop_start()  # Start background thread
-            logger.info(f"✅ MQTT client connecting to {self.host}:{self.port}")
+            logger.info(f"✅ MQTT client connecting to {self.host}:{self.port} ({self.transport})")
         except Exception as e:
             logger.error(f"❌ Failed to connect to MQTT broker: {e}")
             self.client = None
