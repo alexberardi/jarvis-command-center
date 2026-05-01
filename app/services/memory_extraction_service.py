@@ -307,9 +307,11 @@ def _get_command_center_url() -> str:
 
 
 def _get_llm_proxy_url() -> str:
-    """Get the LLM proxy URL."""
-    from app.services.settings_service import get_settings_service
-    url = get_settings_service().get("llm.proxy.url")
-    if url:
-        return url.rstrip("/")
+    """Get LLM proxy URL from service discovery or env."""
+    try:
+        from app.core import service_config
+        if service_config.is_initialized():
+            return service_config.get_llm_proxy_url()
+    except (ImportError, AttributeError):
+        pass
     return os.getenv("JARVIS_LLM_PROXY_API_URL", "http://localhost:7704")
