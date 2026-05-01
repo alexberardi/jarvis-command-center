@@ -32,7 +32,6 @@ from app.core.prompt_providers.shared.core_rules import (
     RULE_POPULATE_REQUIRED,
     RULE_STT_AWARENESS,
     RULE_USE_ACTUAL_PARAM_NAMES,
-    build_identity_header,
 )
 
 logger = logging.getLogger("uvicorn")
@@ -108,14 +107,10 @@ class Qwen25Compressed(Qwen25MediumUntrained):
         available_commands = available_commands or []
         node_context = node_context or {}
 
-        room: str = node_context.get("room", "unknown")
-        user: str = node_context.get("speaker_name") or node_context.get("user", "default")
-        voice_mode: str = node_context.get("voice_mode", "brief")
-        user_memories: str = node_context.get("user_memories", "")
         date_keys: list[str] = node_context.get("date_keys", [])
 
         # Shared builders
-        identity: str = build_identity_header(room, user, voice_mode, user_memories)
+        identity: str = self.build_context_header(node_context)
         rules: str = self._build_rules_block_no_date_params()
         agent_context_section: str = build_agent_context_summary(node_context)
 

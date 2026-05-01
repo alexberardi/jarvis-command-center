@@ -95,9 +95,7 @@ class Gemma2MediumUntrained(IJarvisPromptProvider):
         available_commands = available_commands or []
         node_context = node_context or {}
 
-        room: str = node_context.get("room", "unknown")
-        user: str = node_context.get("user", "default")
-        voice_mode: str = node_context.get("voice_mode", "brief")
+        identity: str = self.build_context_header(node_context)
 
         # Shared sections
         direct_answer_section: str = build_direct_answer_section(available_commands)
@@ -111,8 +109,7 @@ class Gemma2MediumUntrained(IJarvisPromptProvider):
         # Build <tools> XML block (same format Hermes uses)
         tools_xml: str = Gemma2MediumUntrained._build_tools_xml(tools)
 
-        system_prompt: str = f"""You are Jarvis, a function calling voice assistant.
-Context: room={room}, user={user}, style={voice_mode}
+        system_prompt: str = f"""{identity}
 
 You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You MUST call a function for any request that matches an available tool. Do not make assumptions about what values to plug into functions.
 

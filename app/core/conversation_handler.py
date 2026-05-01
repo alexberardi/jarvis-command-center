@@ -1958,6 +1958,21 @@ class ConversationHandler:
         # Update node_context with actual speaker
         node_context["speaker_user_id"] = speaker_user_id
 
+        # Resolve display name so the prompt says "user=alex" not "user=default"
+        try:
+            from app.core import service_config
+            from app.core.utils.speaker_resolver import resolve_speaker_name
+            auth_url = service_config.get_auth_url()
+            speaker_name = await resolve_speaker_name(auth_url, speaker_user_id)
+            if speaker_name:
+                node_context["speaker_name"] = speaker_name
+                logger.info(
+                    "🔄 Speaker name resolved for mismatch reload: %s (user_id=%s)",
+                    speaker_name, speaker_user_id,
+                )
+        except Exception as e:
+            logger.warning("⚠️ Failed to resolve speaker name during reload: %s", e)
+
         try:
             from app.db import get_session_local
             from app.services.memory_service import MemoryService

@@ -24,6 +24,36 @@ class IJarvisPromptProvider(ABC):
     app/core/prompt_providers/ and matching by the `name` property.
     """
 
+    # ── Shared context builders ──────────────────────────────────────
+    # Room and user context are automatically extracted from node_context
+    # and injected into the prompt. Providers call these helpers instead
+    # of manually pulling fields out of node_context.
+
+    def build_context_header(self, node_context: Dict[str, Any]) -> str:
+        """Build the identity + room + user context header from node_context.
+
+        Extracts room, speaker name, voice mode, and user memories from the
+        node context dict and returns a formatted header block. This is the
+        single source of truth for how context reaches the prompt — providers
+        should call this instead of manually extracting fields.
+
+        Returns a string like::
+
+            You are Jarvis, a function calling voice assistant.
+            Context: room=kitchen, user=alex, style=brief
+
+            About alex:
+            - Likes coffee black
+        """
+        from app.core.prompt_providers.shared.core_rules import build_identity_header
+
+        ctx = node_context or {}
+        room: str = ctx.get("room", "unknown")
+        user: str = ctx.get("speaker_name") or ctx.get("user", "default")
+        voice_mode: str = ctx.get("voice_mode", "brief")
+        user_memories: str = ctx.get("user_memories", "")
+        return build_identity_header(room, user, voice_mode, user_memories)
+
     @property
     @abstractmethod
     def name(self) -> str:
