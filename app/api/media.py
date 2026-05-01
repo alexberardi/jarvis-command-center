@@ -137,6 +137,26 @@ async def whisper_enroll_voice_profile(
     return await client.enroll_voice_profile(user_id, audio_bytes, filename)
 
 
+@router.post("/whisper/voice-profiles/verify")
+async def whisper_verify_voice_profile(
+    user_id: int,
+    household_id: str,
+    file: UploadFile = File(...),
+    node_context: NodeContextProvider = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Verify a voice sample against an enrolled profile.
+
+    Proxies the request to the Whisper service with app-to-app auth.
+    """
+    client = WhisperClient(
+        household_id=household_id,
+        node_id=node_context.node.node_id,
+    )
+    audio_bytes = await file.read()
+    filename = file.filename or "verify.wav"
+    return await client.verify_voice_profile(user_id, audio_bytes, filename)
+
+
 @router.delete("/whisper/voice-profiles/{user_id}")
 async def whisper_delete_voice_profile(
     user_id: int,

@@ -26,7 +26,6 @@ from app.core.prompt_providers.shared.context_builders import (
 from app.core.prompt_providers.shared.core_rules import (
     ANTI_HALLUCINATION_MANDATE,
     build_fallback_line,
-    build_identity_header,
     build_rules_block,
 )
 from app.core.prompt_providers.shared.tool_formatters import format_tools_for_prompt
@@ -103,11 +102,6 @@ class Qwen25MediumUntrained(IJarvisPromptProvider):
         available_commands = available_commands or []
         node_context = node_context or {}
 
-        room: str = node_context.get("room", "unknown")
-        user: str = node_context.get("speaker_name") or node_context.get("user", "default")
-        voice_mode: str = node_context.get("voice_mode", "brief")
-        user_memories: str = node_context.get("user_memories", "")
-
         # Shared sections
         direct_answer_section: str = build_direct_answer_section(available_commands)
         agent_context_section: str = build_agent_context_summary(node_context)
@@ -120,8 +114,8 @@ class Qwen25MediumUntrained(IJarvisPromptProvider):
         # Build <tools> block matching Qwen 2.5's chat template
         tools_block: str = Qwen25MediumUntrained._build_tools_block(tools)
 
-        # Shared header (includes user memories if present)
-        identity: str = build_identity_header(room, user, voice_mode, user_memories)
+        # Shared header (includes room, speaker name, memories)
+        identity: str = self.build_context_header(node_context)
 
         # Shared rules (Qwen25: default param_names_rule, default terminology)
         rules: str = build_rules_block()

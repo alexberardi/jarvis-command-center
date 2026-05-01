@@ -28,7 +28,6 @@ from app.core.prompt_providers.shared.context_builders import (
 )
 from app.core.prompt_providers.shared.core_rules import (
     ANTI_HALLUCINATION_MANDATE,
-    build_identity_header,
 )
 
 logger = logging.getLogger("uvicorn")
@@ -89,13 +88,9 @@ class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
         available_commands = available_commands or []
         node_context = node_context or {}
 
-        room: str = node_context.get("room", "unknown")
-        user: str = node_context.get("speaker_name") or node_context.get("user", "default")
-        voice_mode: str = node_context.get("voice_mode", "brief")
-        user_memories: str = node_context.get("user_memories", "")
         date_keys: list[str] = node_context.get("date_keys", [])
 
-        identity: str = build_identity_header(room, user, voice_mode, user_memories)
+        identity: str = self.build_context_header(node_context)
         rules: str = self._build_rules_block()
         direct_answer_section: str = build_direct_answer_section(available_commands)
         agent_context_section: str = build_agent_context_summary(node_context)

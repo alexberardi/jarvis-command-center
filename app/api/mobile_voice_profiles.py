@@ -111,12 +111,12 @@ async def voice_profile_delete(
 
 
 # ---------------------------------------------------------------------------
-# Node-mediated enrollment
+# Node-mediated enrollment & verification
 #
 # Phone-mic enrollment produces embeddings tied to the phone's acoustics,
-# and recognition on the node's mic then scores poorly. This endpoint
-# triggers enrollment ON the target node so the same mic captures the
-# sample at enrollment time as at runtime.
+# and recognition on the node's mic then scores poorly. These endpoints
+# trigger enrollment/verification ON the target node so the same mic
+# captures the sample at enrollment time as at runtime.
 # ---------------------------------------------------------------------------
 
 
@@ -168,6 +168,62 @@ async def start_node_enrollment(
     )
     logger.info(
         "Node enrollment requested",
+        extra={
+            "request_id": request_id,
+            "node_id": node.node_id,
+            "user_id": user.user_id,
+        },
+    )
+    return {"request_id": request_id}
+
+
+class StartNodeVerificationBody(BaseModel):
+    node_id: str
+    prompt_text: str | None = None
+    duration_secs: float | None = None
+
+
+@router.post("/voice-profile/start-node-verification")
+async def start_node_verification(
+    body: StartNodeVerificationBody,
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Tell ``node_id`` to record a voice sample on its own mic and verify it.
+
+    Same flow as start-node-enrollment but hits the verify endpoint.
+    Returns a ``request_id`` the mobile app polls on
+    ``/voice-profile-results/{request_id}``.
+    """
+    node = db.query(Node).filter(Node.node_id == body.node_id).first()
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    if not node.is_online():
+        raise HTTPException(status_code=409, detail="Node is offline")
+    if node.household_id:
+        verify_household_role(
+            user.user_id, node.household_id, required_role="member",
+        )
+
+    request_id = str(uuid4())
+
+    from app.services.node_command_service import get_node_command_service
+
+    service = get_node_command_service()
+    service.publish_command_with_id(
+        node.node_id,
+        "verify_voice",
+        {
+            "request_id": request_id,
+            "user_id": user.user_id,
+            "household_id": node.household_id,
+            "prompt_text": body.prompt_text or "",
+            "duration_secs": body.duration_secs or 5.0,
+        },
+        request_id,
+    )
+    logger.info(
+        "Node verification requested",
         extra={
             "request_id": request_id,
             "node_id": node.node_id,

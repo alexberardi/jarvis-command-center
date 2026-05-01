@@ -26,7 +26,6 @@ from app.core.prompt_providers.shared.context_builders import (
 from app.core.prompt_providers.shared.core_rules import (
     ANTI_HALLUCINATION_MANDATE,
     build_fallback_line,
-    build_identity_header,
     build_rules_block,
 )
 from app.core.prompt_providers.shared.tool_formatters import format_tools_for_prompt
@@ -127,10 +126,6 @@ class Llama31MediumUntrained(IJarvisPromptProvider):
         available_commands = available_commands or []
         node_context = node_context or {}
 
-        room: str = node_context.get("room", "unknown")
-        user: str = node_context.get("user", "default")
-        voice_mode: str = node_context.get("voice_mode", "brief")
-
         # Read Direct Answer Policy directly from the tools list (each tool
         # has allow_direct_answer baked in via to_openai_tool_schema). This
         # is more robust than reading from available_commands, which goes
@@ -158,7 +153,7 @@ class Llama31MediumUntrained(IJarvisPromptProvider):
         tool_json: str = json.dumps(clean_tools, indent=2) if clean_tools else "[]"
 
         # Shared header
-        identity: str = build_identity_header(room, user, voice_mode)
+        identity: str = self.build_context_header(node_context)
 
         # Shared rules (Llama31: custom param_names_rule with NOT "param")
         rules: str = build_rules_block(

@@ -114,8 +114,10 @@ def build_identity_header(
     """
     header = (
         "You are Jarvis, a function calling voice assistant.\n"
-        f"Context: room={room}, user={user}, style={voice_mode}"
+        f"Context: room={room}, style={voice_mode}"
     )
+    if user and user != "default":
+        header += f"\nYou are speaking with {user}."
     if user_memories:
         header += f"\n\nAbout {user}:\n{user_memories}"
     return header

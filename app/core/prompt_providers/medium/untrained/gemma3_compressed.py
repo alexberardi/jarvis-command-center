@@ -78,11 +78,9 @@ class Gemma3Compressed(Gemma3MediumUntrained):
         available_commands = available_commands or []
         node_context = node_context or {}
 
-        room: str = node_context.get("room", "unknown")
-        user: str = node_context.get("speaker_name") or node_context.get("user", "default")
-        voice_mode: str = node_context.get("voice_mode", "brief")
-        user_memories: str = node_context.get("user_memories", "")
         date_keys: list[str] = node_context.get("date_keys", [])
+
+        identity: str = self.build_context_header(node_context)
 
         # Shared sections
         direct_answer_section: str = build_direct_answer_section(available_commands)
@@ -94,11 +92,6 @@ class Gemma3Compressed(Gemma3MediumUntrained):
         # Compact tools summary: name + first-sentence description, no params
         compact_tools: str = self._build_compact_tools_section(tools)
 
-        # Build memory block
-        memory_block: str = ""
-        if user_memories:
-            memory_block = f"\nAbout {user}:\n{user_memories}\n"
-
         # Build DT_KEYS line from llm-proxy date keys
         dt_keys_line: str = ""
         if date_keys:
@@ -108,9 +101,8 @@ class Gemma3Compressed(Gemma3MediumUntrained):
                 "If the user omits a date, you MUST still pass [\"today\"].\n"
             )
 
-        system_prompt: str = f"""You are Jarvis, a function calling voice assistant.
-Context: room={room}, user={user}, style={voice_mode}
-{memory_block}
+        system_prompt: str = f"""{identity}
+
 You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You MUST call a function for any request that matches an available tool. Do not make assumptions about what values to plug into functions.
 
 {tools_xml}

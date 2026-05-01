@@ -19,7 +19,6 @@ from app.core.prompt_providers.shared.context_builders import (
     build_agent_context_summary,
     build_direct_answer_section,
 )
-from app.core.prompt_providers.shared.core_rules import build_identity_header
 
 
 def _minify_tool(tool: Dict[str, Any]) -> Dict[str, Any]:
@@ -57,10 +56,6 @@ class Llama31Stripped_20260420(Llama31MediumUntrained):
         available_commands = available_commands or []
         node_context = node_context or {}
 
-        room: str = node_context.get("room", "unknown")
-        user: str = node_context.get("user", "default")
-        voice_mode: str = node_context.get("voice_mode", "brief")
-
         _tool_flags = []
         for t in tools:
             fn = t.get("function") if isinstance(t.get("function"), dict) else None
@@ -77,7 +72,7 @@ class Llama31Stripped_20260420(Llama31MediumUntrained):
         minified_tools = [_minify_tool(t) for t in tools]
         tool_json: str = json.dumps(minified_tools, indent=2) if minified_tools else "[]"
 
-        identity: str = build_identity_header(room, user, voice_mode)
+        identity: str = self.build_context_header(node_context)
 
         system_prompt: str = f"""{identity}
 

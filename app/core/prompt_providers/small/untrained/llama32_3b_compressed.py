@@ -85,11 +85,9 @@ class Llama32_3B_Compressed(Llama31MediumUntrained):
         available_commands = available_commands or []
         node_context = node_context or {}
 
-        room: str = node_context.get("room", "unknown")
-        user: str = node_context.get("speaker_name") or node_context.get("user", "default")
-        voice_mode: str = node_context.get("voice_mode", "brief")
-        user_memories: str = node_context.get("user_memories", "")
         date_keys: list[str] = node_context.get("date_keys", [])
+
+        identity: str = self.build_context_header(node_context)
 
         # Compact tools with param names
         compact_tools: str = self._build_compact_tools_with_params(tools)
@@ -100,11 +98,6 @@ class Llama32_3B_Compressed(Llama31MediumUntrained):
         # HA summary (compact ~50 tokens)
         agent_context: str = build_agent_context_summary(node_context)
 
-        # Memory block
-        memory_block: str = ""
-        if user_memories:
-            memory_block = f"\nAbout {user}:\n{user_memories}\n"
-
         # DT_KEYS
         dt_keys_line: str = ""
         if date_keys:
@@ -114,8 +107,8 @@ class Llama32_3B_Compressed(Llama31MediumUntrained):
                 "If no date is mentioned, use [\"today\"].\n"
             )
 
-        system_prompt: str = f"""You are Jarvis, a voice assistant. room={room}, user={user}, style={voice_mode}
-{memory_block}
+        system_prompt: str = f"""{identity}
+
 You MUST call functions using EXACTLY this format — no variations:
 <function=FUNCTION_NAME>{{"param": "value"}}</function>
 

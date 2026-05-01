@@ -57,15 +57,12 @@ class LlamaSmallUntrained(IJarvisPromptProvider):
         available_commands = available_commands or []
         node_context = node_context or {}
 
-        room = node_context.get("room", "unknown")
-        user = node_context.get("user", "default")
-        voice_mode = node_context.get("voice_mode", "brief")
+        identity: str = self.build_context_header(node_context)
 
         direct_answer_section = build_direct_answer_section(available_commands)
         tools_section = format_tools_for_prompt(tools, available_commands)
 
-        system_prompt = f"""You are Jarvis, a voice assistant that uses tools.
-Context: room={room}, user={user}, style={voice_mode}
+        system_prompt = f"""{identity}
 
 Rules:
 - Use tools to fulfill requests. Call ONE tool at a time.
