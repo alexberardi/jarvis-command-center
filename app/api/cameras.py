@@ -12,6 +12,7 @@ go2rtc runs on the Docker network with no exposed ports. CC is the only
 path to camera streams, providing JWT auth on every request.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -79,7 +80,7 @@ class StartStreamResponse(BaseModel):
 # =============================================================================
 
 
-def _fetch_credentials_from_node(
+async def _fetch_credentials_from_node(
     household_id: str, protocol: str, db: Session,
 ) -> dict[str, str]:
     """Request camera credentials from the node via MQTT and wait for response."""
@@ -95,6 +96,7 @@ def _fetch_credentials_from_node(
     if primary_node_id:
         node = db.query(Node).filter(
             Node.node_id == primary_node_id, Node.household_id == household_id,
+            Node.is_active.is_(True),
         ).first()
     if not node:
         nodes = db.query(Node).filter(Node.household_id == household_id, Node.is_active.is_(True)).all()
@@ -136,7 +138,7 @@ def _fetch_credentials_from_node(
                 break
             except (json.JSONDecodeError, OSError):
                 pass
-        time.sleep(0.1)
+        await asyncio.sleep(0.1)
 
     if result is None:
         try:
@@ -243,7 +245,7 @@ async def start_camera_stream(
         }
     else:
         protocol: str = device.protocol or "nest"
-        creds = _fetch_credentials_from_node(household_id, protocol, db)
+        creds = await _fetch_credentials_from_node(household_id, protocol, db)
 
     # Build go2rtc nest stream URL
     stream_name: str = f"cam_{device.entity_id}"
