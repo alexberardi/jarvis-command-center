@@ -172,6 +172,80 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Days to retain conversation transcripts before cleanup",
     ),
 
+    # Agent context injection settings (background agents → prompt)
+    SettingDefinition(
+        key="memory.agent_context_enabled",
+        category="memory",
+        value_type="bool",
+        default=True,
+        description="Enable agent-injected context retrieval during voice commands",
+    ),
+    SettingDefinition(
+        key="memory.agent_context_max_results",
+        category="memory",
+        value_type="int",
+        default=5,
+        description="Maximum number of agent context items to inject into the prompt",
+    ),
+    SettingDefinition(
+        key="memory.agent_context_max_chars",
+        category="memory",
+        value_type="int",
+        default=500,
+        description="Maximum characters for agent context in the system prompt",
+    ),
+    SettingDefinition(
+        key="memory.agent_context_similarity_threshold",
+        category="memory",
+        value_type="float",
+        default=0.25,
+        description="Minimum cosine similarity for agent context vector search (0-1)",
+    ),
+
+    # Background agent settings (news, calendar)
+    SettingDefinition(
+        key="agents.news_enabled",
+        category="agents",
+        value_type="bool",
+        default=True,
+        description="Enable periodic news headline injection into memory",
+    ),
+    SettingDefinition(
+        key="agents.news_interval_seconds",
+        category="agents",
+        value_type="int",
+        default=1800,
+        description="Interval in seconds between news refresh cycles (default: 30 min)",
+    ),
+    SettingDefinition(
+        key="agents.news_categories",
+        category="agents",
+        value_type="str",
+        default="general",
+        description="Comma-separated RSS categories to fetch (general, tech, sports, business, science, health)",
+    ),
+    SettingDefinition(
+        key="agents.news_headline_count",
+        category="agents",
+        value_type="int",
+        default=5,
+        description="Number of headlines to fetch per category",
+    ),
+    SettingDefinition(
+        key="agents.calendar_enabled",
+        category="agents",
+        value_type="bool",
+        default=True,
+        description="Enable periodic Google Calendar event injection into memory",
+    ),
+    SettingDefinition(
+        key="agents.calendar_interval_seconds",
+        category="agents",
+        value_type="int",
+        default=900,
+        description="Interval in seconds between calendar refresh cycles (default: 15 min)",
+    ),
+
     # Phase 5 — Auto-deploy LoRA adapter loop
     SettingDefinition(
         key="adapter.auto_train_enabled",

@@ -374,7 +374,7 @@ class UserMemory(Base):
     __tablename__ = 'user_memories'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=True)  # NULL = household-wide (agent context)
     household_id = Column(String(255), nullable=False)
     category = Column(String(100), nullable=False, default='general')  # preference, fact, note
     key = Column(String(255), nullable=True)  # optional structured key for upsert
