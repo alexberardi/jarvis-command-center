@@ -87,7 +87,7 @@ class MemoryService:
 
     def save_memory(
         self,
-        user_id: int,
+        user_id: int | None,
         household_id: str,
         content: str,
         category: str = "general",
@@ -99,12 +99,12 @@ class MemoryService:
         """Save a memory, upserting if a matching key exists.
 
         Args:
-            user_id: The user's ID
+            user_id: The user's ID, or None for household-wide memories
             household_id: The household scope
             content: The memory text
-            category: Category (preference, fact, note, general)
+            category: Category (preference, fact, note, general, agent_context)
             key: Optional structured key for upsert matching
-            source: Origin (voice, ui, system)
+            source: Origin (voice, ui, system, agent)
             is_pinned: Whether this is a pinned identity fact
             expires_at: Optional expiration (memory auto-excluded after this date)
 
@@ -113,12 +113,17 @@ class MemoryService:
         """
         # Upsert: if key is provided, check for existing entry
         if key:
-            existing = self.db.query(UserMemory).filter(
-                UserMemory.user_id == user_id,
+            filters = [
                 UserMemory.household_id == household_id,
                 UserMemory.key == key,
                 UserMemory.is_active == True,  # noqa: E712
-            ).first()
+            ]
+            # SQL NULL semantics: = NULL never matches, must use IS NULL
+            if user_id is not None:
+                filters.append(UserMemory.user_id == user_id)
+            else:
+                filters.append(UserMemory.user_id.is_(None))
+            existing = self.db.query(UserMemory).filter(*filters).first()
 
             if existing:
                 existing.content = content
@@ -327,6 +332,159 @@ class MemoryService:
         scored = [(m, score(m)) for m in memories]
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:limit]
+
+    # ------------------------------------------------------------------
+    # Household-wide memory search (agent-injected context, user_id NULL)
+    # ------------------------------------------------------------------
+
+    def search_household_memories(
+        self,
+        household_id: str,
+        query_embedding: list[float],
+        limit: int = 5,
+        similarity_threshold: float = 0.25,
+    ) -> list[tuple[UserMemory, float]]:
+        """Search household-wide memories by cosine similarity.
+
+        Searches memories where user_id IS NULL (agent-injected context
+        like news, calendar, weather that applies to all speakers).
+
+        Args:
+            household_id: The household scope
+            query_embedding: The query vector (384 floats)
+            limit: Maximum number of results
+            similarity_threshold: Minimum cosine similarity (0-1)
+
+        Returns:
+            List of (memory, similarity_score) tuples, highest first
+        """
+        sql = """
+            SELECT id, 1 - (embedding <=> :query_vec::vector) AS similarity
+            FROM user_memories
+            WHERE user_id IS NULL
+              AND household_id = :hid
+              AND is_active = true
+              AND embedding IS NOT NULL
+              AND (expires_at IS NULL OR expires_at > NOW())
+              AND 1 - (embedding <=> :query_vec::vector) >= :threshold
+            ORDER BY similarity DESC
+            LIMIT :lim
+        """
+        params: dict = {
+            "query_vec": str(query_embedding),
+            "hid": household_id,
+            "threshold": similarity_threshold,
+            "lim": limit,
+        }
+
+        rows = self.db.execute(text(sql), params).fetchall()
+
+        if not rows:
+            return []
+
+        memory_ids = [row[0] for row in rows]
+        similarity_map = {row[0]: row[1] for row in rows}
+
+        memories = self.db.query(UserMemory).filter(
+            UserMemory.id.in_(memory_ids)
+        ).all()
+
+        results = [(m, similarity_map[m.id]) for m in memories]
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results
+
+    def search_household_memories_substring(
+        self,
+        household_id: str,
+        query: str,
+        limit: int = 5,
+    ) -> list[tuple[UserMemory, float]]:
+        """Fallback substring search for household-wide memories.
+
+        Uses ILIKE matching with word-overlap scoring against memories
+        where user_id IS NULL (agent-injected context).
+
+        Args:
+            household_id: The household scope
+            query: Search text
+            limit: Maximum number of results
+
+        Returns:
+            List of (memory, score) tuples
+        """
+        from sqlalchemy import or_
+
+        db_query = self.db.query(UserMemory).filter(
+            UserMemory.user_id.is_(None),
+            UserMemory.household_id == household_id,
+            UserMemory.is_active == True,  # noqa: E712
+        )
+
+        # Exclude expired
+        db_query = db_query.filter(
+            (UserMemory.expires_at == None) | (UserMemory.expires_at > datetime.utcnow())  # noqa: E711
+        )
+
+        words = [w.strip() for w in query.lower().split() if len(w.strip()) > 2]
+        if not words:
+            return []
+
+        conditions = [UserMemory.content.ilike(f"%{w}%") for w in words]
+        db_query = db_query.filter(or_(*conditions))
+
+        memories = db_query.all()
+
+        def score(memory: UserMemory) -> float:
+            content_lower = memory.content.lower()
+            matches = sum(1 for w in words if w in content_lower)
+            return matches / len(words) if words else 0.0
+
+        scored = [(m, score(m)) for m in memories]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:limit]
+
+    def check_content_similarity(
+        self,
+        household_id: str,
+        query_embedding: list[float],
+        threshold: float = 0.9,
+    ) -> UserMemory | None:
+        """Check if a very similar memory already exists (content dedup).
+
+        Used at inject time to prevent near-duplicate memories from
+        different keys (e.g. same news story rephrased).
+
+        Args:
+            household_id: The household scope
+            query_embedding: Embedding of the new content
+            threshold: Minimum similarity to consider a duplicate (default 0.9)
+
+        Returns:
+            The existing duplicate memory, or None if no match
+        """
+        sql = """
+            SELECT id, 1 - (embedding <=> :query_vec::vector) AS similarity
+            FROM user_memories
+            WHERE user_id IS NULL
+              AND household_id = :hid
+              AND is_active = true
+              AND embedding IS NOT NULL
+              AND (expires_at IS NULL OR expires_at > NOW())
+              AND 1 - (embedding <=> :query_vec::vector) >= :threshold
+            ORDER BY similarity DESC
+            LIMIT 1
+        """
+        params: dict = {
+            "query_vec": str(query_embedding),
+            "hid": household_id,
+            "threshold": threshold,
+        }
+
+        row = self.db.execute(text(sql), params).fetchone()
+        if not row:
+            return None
+
+        return self.db.query(UserMemory).filter(UserMemory.id == row[0]).first()
 
     def get_memories_without_embeddings(self, limit: int = 100) -> list[UserMemory]:
         """Get active memories that don't have embeddings yet (for backfill).

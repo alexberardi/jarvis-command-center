@@ -2,18 +2,24 @@
 
 REST endpoints for managing user memories (preferences, facts, notes).
 Consumed by the admin dashboard, mobile app, and other UIs.
+
+Also provides a batch inject endpoint for background agents (calendar,
+news, weather) to push ephemeral context with TTL.
 """
 
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_app_auth
 from app.models import UserMemory
 from app.provisioning import ProvisioningAuthContext, verify_provisioning_auth
 from app.services.memory_service import MemoryService
+
+logger = logging.getLogger("uvicorn")
 
 router = APIRouter(prefix="/memories", tags=["memories"])
 
@@ -40,7 +46,7 @@ class MemoryUpdate(BaseModel):
 
 class MemoryResponse(BaseModel):
     id: int
-    user_id: int
+    user_id: int | None
     household_id: str
     category: str
     key: str | None = None
@@ -151,3 +157,167 @@ def delete_memory(
     memory.updated_at = datetime.utcnow()
     db.commit()
     return {"status": "deleted", "id": memory_id}
+
+
+# ---------------------------------------------------------------------------
+# Agent memory injection (batch endpoint for background agents)
+# ---------------------------------------------------------------------------
+
+
+class MemoryInjectItem(BaseModel):
+    """A single memory to inject from a background agent."""
+    content: str = Field(..., max_length=2000)
+    category: str = "agent_context"
+    key: str = Field(..., max_length=500, description="Stable key for dedup (e.g. news:nba:warriors-lakers:2026-05-01)")
+    user_id: int | None = None  # NULL = household-wide
+    ttl_hours: float = Field(default=24.0, gt=0, le=720)  # max 30 days
+    source: str = Field(default="agent", max_length=100)
+
+
+class MemoryInjectRequest(BaseModel):
+    """Batch inject request from a background agent."""
+    household_id: str
+    memories: list[MemoryInjectItem] = Field(..., max_length=100)
+
+
+class MemoryInjectResponse(BaseModel):
+    """Result of a batch inject operation."""
+    injected: int
+    updated: int
+    deduplicated: int
+    errors: list[str]
+
+
+@router.post("/inject", status_code=200)
+async def inject_memories(
+    body: MemoryInjectRequest,
+    _auth: None = Depends(require_app_auth),
+    db: Session = Depends(get_db),
+) -> MemoryInjectResponse:
+    """Batch inject memories from a background agent.
+
+    Supports 3-layer deduplication:
+    1. In-batch: same (key, user_id) → last one wins
+    2. Cross-batch: key-based upsert in save_memory()
+    3. Content similarity: cosine > 0.9 against existing memories
+
+    Auth: app-to-app (X-Jarvis-App-Id + X-Jarvis-App-Key).
+    """
+    if len(body.memories) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 memories per batch")
+
+    # Check that memory system is enabled for this household
+    try:
+        from app.services.settings_service import get_settings_service
+
+        settings = get_settings_service()
+        memory_enabled = settings.get(
+            "memory.enabled", household_id=body.household_id
+        )
+        if memory_enabled is not None and str(memory_enabled).lower() in ("false", "0"):
+            raise HTTPException(
+                status_code=409, detail="Memory system is disabled for this household"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Could not check memory.enabled setting, proceeding: %s", e)
+
+    service = MemoryService(db)
+
+    # Layer 1: In-batch dedup by (key, user_id) — last one wins
+    dedup_map: dict[tuple[str, int | None], MemoryInjectItem] = {}
+    for item in body.memories:
+        dedup_map[(item.key, item.user_id)] = item
+    deduped_items = list(dedup_map.values())
+    in_batch_deduped = len(body.memories) - len(deduped_items)
+
+    # Save all memories and collect contents for batch embedding
+    injected = 0
+    updated = 0
+    content_deduped = 0
+    errors: list[str] = []
+    saved_memories: list[tuple[UserMemory, str]] = []  # (memory, content) for embedding
+
+    for item in deduped_items:
+        try:
+            expires_at = datetime.utcnow() + timedelta(hours=item.ttl_hours)
+
+            # Check if key-based upsert will match an existing row
+            is_update = False
+            if item.key:
+                filters = [
+                    UserMemory.household_id == body.household_id,
+                    UserMemory.key == item.key,
+                    UserMemory.is_active == True,  # noqa: E712
+                ]
+                if item.user_id is not None:
+                    filters.append(UserMemory.user_id == item.user_id)
+                else:
+                    filters.append(UserMemory.user_id.is_(None))
+                is_update = db.query(UserMemory).filter(*filters).first() is not None
+
+            memory = service.save_memory(
+                user_id=item.user_id,
+                household_id=body.household_id,
+                content=item.content,
+                category=item.category,
+                key=item.key,
+                source=item.source,
+                expires_at=expires_at,
+            )
+
+            saved_memories.append((memory, item.content))
+            if is_update:
+                updated += 1
+            else:
+                injected += 1
+
+        except Exception as e:
+            logger.warning("Failed to inject memory key=%s: %s", item.key, e)
+            errors.append(f"key={item.key}: {e}")
+
+    # Batch-generate embeddings (best-effort — agent isn't latency-sensitive)
+    if saved_memories:
+        try:
+            from app.core.llm_proxy_client import LLMProxyClient
+
+            client = LLMProxyClient()
+            contents = [content for _, content in saved_memories]
+            vectors = client.create_embeddings_sync(contents)
+
+            if vectors and len(vectors) == len(saved_memories):
+                for i, (memory, _content) in enumerate(saved_memories):
+                    if vectors[i]:
+                        service.update_embedding(memory.id, vectors[i])
+
+                # Layer 3: Content similarity guard for newly inserted memories
+                # Check if any new (non-update) memory is near-duplicate of
+                # an older existing memory. If so, deactivate the duplicate.
+                for i, (memory, _content) in enumerate(saved_memories):
+                    if not vectors[i]:
+                        continue
+                    existing = service.check_content_similarity(
+                        household_id=body.household_id,
+                        query_embedding=vectors[i],
+                        threshold=0.9,
+                    )
+                    if existing and existing.id != memory.id:
+                        # Near-duplicate found — keep the newer one, deactivate old
+                        existing.is_active = False
+                        existing.updated_at = datetime.utcnow()
+                        db.commit()
+                        content_deduped += 1
+                        logger.info(
+                            "Content dedup: deactivated memory %d (sim>0.9 with %d)",
+                            existing.id, memory.id,
+                        )
+        except Exception as e:
+            logger.warning("Embedding generation failed (non-fatal): %s", e)
+
+    return MemoryInjectResponse(
+        injected=injected,
+        updated=updated,
+        deduplicated=in_batch_deduped + content_deduped,
+        errors=errors,
+    )

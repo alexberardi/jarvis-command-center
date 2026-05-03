@@ -408,6 +408,15 @@ class ConversationHandler:
                 "content": search_results,
             })
 
+        # Inject agent-supplied context (calendar, news, weather, etc.)
+        # relevant to the user's utterance via vector similarity search.
+        agent_context = await self._get_agent_context(voice_command, conversation_id)
+        if agent_context:
+            messages.append({
+                "role": "system",
+                "content": agent_context,
+            })
+
         # Add user message (with optional provider suffix, e.g. /nothink for Qwen3)
         suffix: str = (
             self.prompt_provider.user_message_suffix
@@ -1824,6 +1833,81 @@ class ConversationHandler:
         logger.info("Quick search completed in %ss, %d sources", elapsed, len(sources))
 
         return "\n".join(parts)
+
+    async def _get_agent_context(
+        self,
+        utterance: str,
+        conversation_id: str,
+    ) -> str | None:
+        """Retrieve agent-injected context relevant to the user's utterance.
+
+        Searches household-wide memories (user_id IS NULL) injected by
+        background agents (calendar, news, weather).  Returns a formatted
+        "Current context" block for prompt injection, or None if nothing
+        relevant was found.
+
+        Non-fatal: all errors are caught and logged so agent context
+        never blocks voice command processing.
+        """
+        node_context = conversation_cache.get_node_context(conversation_id)
+        if not node_context:
+            return None
+
+        household_id = node_context.get("household_id")
+        if not household_id:
+            return None
+
+        # Check if agent context is enabled
+        try:
+            settings = get_settings_service()
+            enabled = settings.get(
+                "memory.agent_context_enabled",
+                household_id=str(household_id),
+            )
+            if enabled is not None and str(enabled).lower() in ("false", "0"):
+                return None
+
+            max_results = int(
+                settings.get("memory.agent_context_max_results", household_id=str(household_id)) or 5
+            )
+            max_chars = int(
+                settings.get("memory.agent_context_max_chars", household_id=str(household_id)) or 500
+            )
+            similarity_threshold = float(
+                settings.get("memory.agent_context_similarity_threshold", household_id=str(household_id)) or 0.25
+            )
+        except Exception:
+            max_results = 5
+            max_chars = 500
+            similarity_threshold = 0.25
+
+        try:
+            from app.db import get_session_local
+            from app.services.agent_context_service import AgentContextService
+
+            SessionLocal = get_session_local()
+            db = SessionLocal()
+            try:
+                svc = AgentContextService(db)
+                result = svc.get_relevant_context(
+                    household_id=household_id,
+                    query=utterance,
+                    max_results=max_results,
+                    max_chars=max_chars,
+                    similarity_threshold=similarity_threshold,
+                )
+                if result:
+                    logger.info(
+                        "📋 Injecting %d chars of agent context for household %s",
+                        len(result), household_id,
+                    )
+                return result or None
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.warning("Failed to get agent context: %s", e)
+            return None
 
     def _rebuild_system_prompt_for_pruned_tools(
         self,
