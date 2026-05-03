@@ -202,50 +202,6 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Minimum cosine similarity for agent context vector search (0-1)",
     ),
 
-    # Background agent settings (news, calendar)
-    SettingDefinition(
-        key="agents.news_enabled",
-        category="agents",
-        value_type="bool",
-        default=True,
-        description="Enable periodic news headline injection into memory",
-    ),
-    SettingDefinition(
-        key="agents.news_interval_seconds",
-        category="agents",
-        value_type="int",
-        default=1800,
-        description="Interval in seconds between news refresh cycles (default: 30 min)",
-    ),
-    SettingDefinition(
-        key="agents.news_categories",
-        category="agents",
-        value_type="str",
-        default="general",
-        description="Comma-separated RSS categories to fetch (general, tech, sports, business, science, health)",
-    ),
-    SettingDefinition(
-        key="agents.news_headline_count",
-        category="agents",
-        value_type="int",
-        default=5,
-        description="Number of headlines to fetch per category",
-    ),
-    SettingDefinition(
-        key="agents.calendar_enabled",
-        category="agents",
-        value_type="bool",
-        default=True,
-        description="Enable periodic Google Calendar event injection into memory",
-    ),
-    SettingDefinition(
-        key="agents.calendar_interval_seconds",
-        category="agents",
-        value_type="int",
-        default=900,
-        description="Interval in seconds between calendar refresh cycles (default: 15 min)",
-    ),
-
     # Phase 5 — Auto-deploy LoRA adapter loop
     SettingDefinition(
         key="adapter.auto_train_enabled",
