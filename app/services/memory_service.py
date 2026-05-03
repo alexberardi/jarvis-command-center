@@ -235,13 +235,13 @@ class MemoryService:
         # pgvector cosine distance: 1 - cosine_similarity
         # So similarity = 1 - distance
         sql = """
-            SELECT id, 1 - (embedding <=> :query_vec::vector) AS similarity
+            SELECT id, 1 - (embedding <=> CAST(:query_vec AS vector)) AS similarity
             FROM user_memories
             WHERE user_id = :uid
               AND household_id = :hid
               AND is_active = true
               AND embedding IS NOT NULL
-              AND 1 - (embedding <=> :query_vec::vector) >= :threshold
+              AND 1 - (embedding <=> CAST(:query_vec AS vector)) >= :threshold
         """
         params: dict = {
             "query_vec": str(query_embedding),
@@ -359,14 +359,14 @@ class MemoryService:
             List of (memory, similarity_score) tuples, highest first
         """
         sql = """
-            SELECT id, 1 - (embedding <=> :query_vec::vector) AS similarity
+            SELECT id, 1 - (embedding <=> CAST(:query_vec AS vector)) AS similarity
             FROM user_memories
             WHERE user_id IS NULL
               AND household_id = :hid
               AND is_active = true
               AND embedding IS NOT NULL
               AND (expires_at IS NULL OR expires_at > NOW())
-              AND 1 - (embedding <=> :query_vec::vector) >= :threshold
+              AND 1 - (embedding <=> CAST(:query_vec AS vector)) >= :threshold
             ORDER BY similarity DESC
             LIMIT :lim
         """
@@ -463,14 +463,14 @@ class MemoryService:
             The existing duplicate memory, or None if no match
         """
         sql = """
-            SELECT id, 1 - (embedding <=> :query_vec::vector) AS similarity
+            SELECT id, 1 - (embedding <=> CAST(:query_vec AS vector)) AS similarity
             FROM user_memories
             WHERE user_id IS NULL
               AND household_id = :hid
               AND is_active = true
               AND embedding IS NOT NULL
               AND (expires_at IS NULL OR expires_at > NOW())
-              AND 1 - (embedding <=> :query_vec::vector) >= :threshold
+              AND 1 - (embedding <=> CAST(:query_vec AS vector)) >= :threshold
             ORDER BY similarity DESC
             LIMIT 1
         """
