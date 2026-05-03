@@ -176,9 +176,10 @@ class AgentContextService:
         """Format results as a 'Current context' block for prompt injection."""
         lines: list[str] = []
         header = (
-            "LIVE DATA (already fetched — DO NOT call get_weather, get_news, "
-            "or get_calendar_events for information listed below. Instead, "
-            "use the chat tool and include this data in your response):"
+            "The following real-time information has already been gathered. "
+            "Factor it into your reasoning and response. If the user's "
+            "question can be answered with this data, respond directly "
+            "rather than fetching it again:"
         )
         total_chars = len(header) + 1
 
