@@ -410,19 +410,21 @@ class ConversationHandler:
 
         # Inject agent-supplied context (calendar, news, weather, etc.)
         # relevant to the user's utterance via vector similarity search.
+        # Prepended to the user message so the model treats it as part of
+        # what it needs to respond to (not a separate system instruction
+        # it can ignore).
         agent_context = await self._get_agent_context(voice_command, conversation_id)
-        if agent_context:
-            messages.append({
-                "role": "system",
-                "content": agent_context,
-            })
 
         # Add user message (with optional provider suffix, e.g. /no_think for Qwen3)
         suffix: str = (
             self.prompt_provider.user_message_suffix
             if self.prompt_provider else ""
         )
-        user_content: str = f"{voice_command}\n{suffix}" if suffix else voice_command
+        user_content: str = voice_command
+        if agent_context:
+            user_content = f"{agent_context}\n\n{voice_command}"
+        if suffix:
+            user_content = f"{user_content}\n{suffix}"
         messages.append({"role": "user", "content": user_content})
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Starting tool execution loop")
 

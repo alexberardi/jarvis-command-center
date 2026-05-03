@@ -175,12 +175,7 @@ class AgentContextService:
     def _format_results(contents: list[str], max_chars: int) -> str:
         """Format results as a 'Current context' block for prompt injection."""
         lines: list[str] = []
-        header = (
-            "The following real-time information has already been gathered. "
-            "Factor it into your reasoning and response. If the user's "
-            "question can be answered with this data, respond directly "
-            "rather than fetching it again:"
-        )
+        header = "You already know the following — weave relevant facts into your answer:"
         total_chars = len(header) + 1
 
         for content in contents:
