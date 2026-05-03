@@ -34,6 +34,8 @@ logger = logging.getLogger("uvicorn")
 
 # Strip <think>...</think> blocks (Qwen3 thinking mode output)
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+# Strip unclosed <think> blocks (truncated by max_tokens)
+_THINK_UNCLOSED_RE = re.compile(r"<think>.*", re.DOTALL)
 
 
 class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
@@ -66,6 +68,7 @@ class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
     def parse_response(self, raw_content: str) -> Optional[str]:
         """Strip <think> blocks, then delegate to Qwen 2.5 parser."""
         cleaned: str = _THINK_BLOCK_RE.sub("", raw_content)
+        cleaned = _THINK_UNCLOSED_RE.sub("", cleaned)
         return super().parse_response(cleaned)
 
     def sanitize_text(self, text: str) -> str:
@@ -74,7 +77,9 @@ class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
         See Qwen3LargeUntrained.sanitize_text for the full rationale —
         same defense-in-depth for wake/chat/direct-answer paths.
         """
-        return _THINK_BLOCK_RE.sub("", text).strip()
+        cleaned = _THINK_BLOCK_RE.sub("", text)
+        cleaned = _THINK_UNCLOSED_RE.sub("", cleaned)
+        return cleaned.strip()
 
     def build_system_prompt(
         self,
