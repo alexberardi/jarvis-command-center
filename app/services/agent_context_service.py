@@ -6,18 +6,24 @@ a given voice command.  Used during conversation processing to inject
 a "Current context" section into the LLM prompt.
 
 Retrieval strategy:
-1. Embed the user's query (single text, ~10-20ms via local model)
-2. pgvector cosine search against pre-embedded agent memories (~1-5ms)
+1. Always include the latest from priority categories (weather, calendar)
+2. Fill remaining slots with vector-search results from other categories
 3. Fallback to word-overlap substring search if embedding fails
 """
 
 import logging
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.models import UserMemory
 from app.services.memory_service import MemoryService
 
 logger = logging.getLogger("uvicorn")
+
+# Categories that are always included (most recent entry per category)
+# regardless of vector similarity — they're universally relevant context.
+PRIORITY_CATEGORIES = ["weather", "calendar"]
 
 
 class AgentContextService:
@@ -36,6 +42,9 @@ class AgentContextService:
     ) -> str:
         """Search agent memories and format for prompt injection.
 
+        Always includes the latest weather/calendar context, then fills
+        remaining slots with vector-search results from other categories.
+
         Args:
             household_id: The household scope
             query: The user's voice command text
@@ -44,20 +53,57 @@ class AgentContextService:
             similarity_threshold: Minimum cosine similarity (0-1)
 
         Returns:
-            Formatted string like "Current context:\\n- item1\\n- item2"
-            or empty string if no relevant context found.
+            Formatted string for prompt injection, or empty string.
         """
-        results = self._search_vector(
-            household_id, query, max_results, similarity_threshold
-        )
+        results: list[str] = []
 
-        if not results:
-            results = self._search_substring(household_id, query, max_results)
+        # Step 1: Always include latest from priority categories
+        priority_contents = self._get_priority_context(household_id)
+        results.extend(priority_contents)
+
+        # Step 2: Fill remaining slots with vector search (non-priority)
+        remaining = max_results - len(results)
+        if remaining > 0:
+            vector_results = self._search_vector(
+                household_id, query, remaining, similarity_threshold,
+                exclude_categories=PRIORITY_CATEGORIES,
+            )
+            if not vector_results:
+                vector_results = self._search_substring(
+                    household_id, query, remaining,
+                    exclude_categories=PRIORITY_CATEGORIES,
+                )
+            results.extend(vector_results)
 
         if not results:
             return ""
 
         return self._format_results(results, max_chars)
+
+    def _get_priority_context(self, household_id: str) -> list[str]:
+        """Get the latest memory from each priority category."""
+        contents: list[str] = []
+        now = datetime.utcnow()
+
+        for category in PRIORITY_CATEGORIES:
+            memory = (
+                self.db.query(UserMemory)
+                .filter(
+                    UserMemory.user_id.is_(None),
+                    UserMemory.household_id == household_id,
+                    UserMemory.category == category,
+                    UserMemory.is_active == True,  # noqa: E712
+                )
+                .filter(
+                    (UserMemory.expires_at == None) | (UserMemory.expires_at > now)  # noqa: E711
+                )
+                .order_by(UserMemory.updated_at.desc())
+                .first()
+            )
+            if memory:
+                contents.append(memory.content)
+
+        return contents
 
     def _search_vector(
         self,
@@ -65,6 +111,7 @@ class AgentContextService:
         query: str,
         limit: int,
         threshold: float,
+        exclude_categories: list[str] | None = None,
     ) -> list[str]:
         """Try vector similarity search. Returns list of content strings."""
         try:
@@ -84,7 +131,13 @@ class AgentContextService:
                 similarity_threshold=threshold,
             )
 
-            return [m.content for m, _score in matches]
+            results = []
+            for m, _score in matches:
+                if exclude_categories and m.category in exclude_categories:
+                    continue
+                results.append(m.content)
+
+            return results[:limit]
 
         except Exception as e:
             logger.debug("Agent context vector search failed, will try substring: %s", e)
@@ -95,6 +148,7 @@ class AgentContextService:
         household_id: str,
         query: str,
         limit: int,
+        exclude_categories: list[str] | None = None,
     ) -> list[str]:
         """Fallback to word-overlap substring search."""
         try:
@@ -104,7 +158,14 @@ class AgentContextService:
                 query=query,
                 limit=limit,
             )
-            return [m.content for m, _score in matches]
+
+            results = []
+            for m, _score in matches:
+                if exclude_categories and m.category in exclude_categories:
+                    continue
+                results.append(m.content)
+
+            return results[:limit]
 
         except Exception as e:
             logger.warning("Agent context substring search failed: %s", e)
@@ -114,15 +175,18 @@ class AgentContextService:
     def _format_results(contents: list[str], max_chars: int) -> str:
         """Format results as a 'Current context' block for prompt injection."""
         lines: list[str] = []
-        header = "Current context (use this information to answer directly when relevant — no need to call a tool if the answer is here):"
-        total_chars = len(header) + 1  # +1 for newline after header
+        header = (
+            "Current context (use this information to answer directly "
+            "when relevant — no need to call a tool if the answer is here):"
+        )
+        total_chars = len(header) + 1
 
         for content in contents:
             line = f"- {content}"
             if total_chars + len(line) + 1 > max_chars:
                 break
             lines.append(line)
-            total_chars += len(line) + 1  # +1 for newline
+            total_chars += len(line) + 1
 
         if not lines:
             return ""
