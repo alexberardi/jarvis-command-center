@@ -114,7 +114,7 @@ class AgentContextService:
     def _format_results(contents: list[str], max_chars: int) -> str:
         """Format results as a 'Current context' block for prompt injection."""
         lines: list[str] = []
-        header = "Current context:"
+        header = "Current context (use this information to answer directly when relevant — no need to call a tool if the answer is here):"
         total_chars = len(header) + 1  # +1 for newline after header
 
         for content in contents:
