@@ -10,11 +10,13 @@ news, weather) to push ephemeral context with TTL.
 import logging
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from dataclasses import dataclass
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, require_app_auth
+from app.deps import _get_auth_base_url, get_db, verify_api_key
 from app.models import UserMemory
 from app.provisioning import ProvisioningAuthContext, verify_provisioning_auth
 from app.services.memory_service import MemoryService
@@ -176,7 +178,7 @@ class MemoryInjectItem(BaseModel):
 
 class MemoryInjectRequest(BaseModel):
     """Batch inject request from a background agent."""
-    household_id: str
+    household_id: str | None = None  # optional — auto-derived from node auth
     memories: list[MemoryInjectItem] = Field(..., max_length=100)
 
 
@@ -188,10 +190,67 @@ class MemoryInjectResponse(BaseModel):
     errors: list[str]
 
 
+# Combined auth for inject: accepts node auth (X-Api-Key) OR app-to-app
+@dataclass
+class InjectAuthContext:
+    """Auth result for the inject endpoint."""
+    auth_type: str  # "node" or "app"
+    household_id: str | None = None  # auto-derived for node auth
+
+
+def _verify_inject_auth(
+    x_api_key: str | None = Header(None),
+    x_jarvis_app_id: str | None = Header(None),
+    x_jarvis_app_key: str | None = Header(None),
+    db: Session = Depends(get_db),
+) -> InjectAuthContext:
+    """Authenticate via node API key OR app-to-app credentials.
+
+    Node auth: X-Api-Key header (node_id:node_key format).
+      → household_id auto-derived from node context.
+    App-to-app auth: X-Jarvis-App-Id + X-Jarvis-App-Key headers.
+      → household_id must be in request body.
+    """
+    # Try node auth first (X-Api-Key with node_id:node_key)
+    if x_api_key:
+        try:
+            node_ctx = verify_api_key(x_api_key=x_api_key, db=db)
+            return InjectAuthContext(
+                auth_type="node",
+                household_id=node_ctx.household_id,
+            )
+        except HTTPException:
+            pass  # fall through to app-to-app
+
+    # Try app-to-app auth
+    if x_jarvis_app_id and x_jarvis_app_key:
+        import httpx as _httpx
+
+        app_ping_url = _get_auth_base_url().rstrip("/") + "/internal/app-ping"
+        try:
+            resp = _httpx.get(
+                app_ping_url,
+                headers={
+                    "X-Jarvis-App-Id": x_jarvis_app_id,
+                    "X-Jarvis-App-Key": x_jarvis_app_key,
+                },
+                timeout=5.0,
+            )
+            if resp.status_code == 200:
+                return InjectAuthContext(auth_type="app")
+        except _httpx.RequestError as exc:
+            logger.error("Failed to reach jarvis-auth for app auth: %s", exc)
+            raise HTTPException(status_code=502, detail="Auth service unavailable") from exc
+
+        raise HTTPException(status_code=401, detail="Invalid app credentials")
+
+    raise HTTPException(status_code=401, detail="Authentication required (X-Api-Key or X-Jarvis-App-Id/Key)")
+
+
 @router.post("/inject", status_code=200)
-async def inject_memories(
+def inject_memories(
     body: MemoryInjectRequest,
-    _auth: None = Depends(require_app_auth),
+    auth: InjectAuthContext = Depends(_verify_inject_auth),
     db: Session = Depends(get_db),
 ) -> MemoryInjectResponse:
     """Batch inject memories from a background agent.
@@ -201,10 +260,26 @@ async def inject_memories(
     2. Cross-batch: key-based upsert in save_memory()
     3. Content similarity: cosine > 0.9 against existing memories
 
-    Auth: app-to-app (X-Jarvis-App-Id + X-Jarvis-App-Key).
+    Auth: node API key (auto-derives household) OR app-to-app.
     """
     if len(body.memories) > 100:
         raise HTTPException(status_code=400, detail="Maximum 100 memories per batch")
+
+    # Resolve household_id: node auth auto-derives, app auth requires it in body
+    household_id = body.household_id or auth.household_id
+    if not household_id:
+        raise HTTPException(
+            status_code=400,
+            detail="household_id required (provide in body or use node auth)",
+        )
+
+    # Node auth: verify body household_id matches node's household (if provided)
+    if auth.auth_type == "node" and body.household_id and auth.household_id:
+        if body.household_id != auth.household_id:
+            raise HTTPException(
+                status_code=403,
+                detail="household_id does not match node's household",
+            )
 
     # Check that memory system is enabled for this household
     try:
@@ -212,7 +287,7 @@ async def inject_memories(
 
         settings = get_settings_service()
         memory_enabled = settings.get(
-            "memory.enabled", household_id=body.household_id
+            "memory.enabled", household_id=household_id
         )
         if memory_enabled is not None and str(memory_enabled).lower() in ("false", "0"):
             raise HTTPException(
@@ -247,7 +322,7 @@ async def inject_memories(
             is_update = False
             if item.key:
                 filters = [
-                    UserMemory.household_id == body.household_id,
+                    UserMemory.household_id == household_id,
                     UserMemory.key == item.key,
                     UserMemory.is_active == True,  # noqa: E712
                 ]
@@ -259,7 +334,7 @@ async def inject_memories(
 
             memory = service.save_memory(
                 user_id=item.user_id,
-                household_id=body.household_id,
+                household_id=household_id,
                 content=item.content,
                 category=item.category,
                 key=item.key,
@@ -298,7 +373,7 @@ async def inject_memories(
                     if not vectors[i]:
                         continue
                     existing = service.check_content_similarity(
-                        household_id=body.household_id,
+                        household_id=household_id,
                         query_embedding=vectors[i],
                         threshold=0.9,
                     )

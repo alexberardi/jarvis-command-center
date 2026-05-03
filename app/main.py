@@ -229,75 +229,7 @@ async def startup_event():
 
     asyncio.create_task(_periodic_transcript_cleanup())
 
-    # Schedule background news agent
-    async def _periodic_news_refresh() -> None:
-        await asyncio.sleep(30)  # let services stabilize
-        while True:
-            try:
-                interval = int(settings_service.get("agents.news_interval_seconds") or 1800)
-            except (TypeError, ValueError):
-                interval = 1800
-            await asyncio.sleep(interval)
-            try:
-                news_enabled = settings_service.get("agents.news_enabled")
-                if news_enabled is False or str(news_enabled or "").lower() in ("false", "0"):
-                    continue
-
-                from app.services.background_agents import (
-                    get_active_household_ids, refresh_news_context,
-                )
-                db = SessionLocal()
-                try:
-                    for hid in get_active_household_ids(db):
-                        hid_enabled = settings_service.get("agents.news_enabled", household_id=hid)
-                        if hid_enabled is False or str(hid_enabled or "").lower() in ("false", "0"):
-                            continue
-                        categories_raw = settings_service.get("agents.news_categories", household_id=hid)
-                        categories = (
-                            [c.strip() for c in str(categories_raw).split(",")]
-                            if categories_raw else ["general"]
-                        )
-                        count = int(settings_service.get("agents.news_headline_count", household_id=hid) or 5)
-                        refresh_news_context(db, hid, categories=categories, headlines_per_category=count)
-                finally:
-                    db.close()
-            except Exception as e:
-                logger.warning("News agent refresh failed: %s", e)
-
-    asyncio.create_task(_periodic_news_refresh())
-
-    # Schedule background calendar agent
-    async def _periodic_calendar_refresh() -> None:
-        await asyncio.sleep(45)  # stagger from news agent
-        while True:
-            try:
-                interval = int(settings_service.get("agents.calendar_interval_seconds") or 900)
-            except (TypeError, ValueError):
-                interval = 900
-            await asyncio.sleep(interval)
-            try:
-                cal_enabled = settings_service.get("agents.calendar_enabled")
-                if cal_enabled is False or str(cal_enabled or "").lower() in ("false", "0"):
-                    continue
-
-                from app.services.background_agents import (
-                    get_active_household_ids, refresh_calendar_context,
-                )
-                db = SessionLocal()
-                try:
-                    for hid in get_active_household_ids(db):
-                        hid_enabled = settings_service.get("agents.calendar_enabled", household_id=hid)
-                        if hid_enabled is False or str(hid_enabled or "").lower() in ("false", "0"):
-                            continue
-                        refresh_calendar_context(db, hid)
-                finally:
-                    db.close()
-            except Exception as e:
-                logger.warning("Calendar agent refresh failed: %s", e)
-
-    asyncio.create_task(_periodic_calendar_refresh())
-
-    # Schedule expired memory cleanup (piggybacks on agent refresh cadence)
+    # Schedule expired memory cleanup (agent-injected memories have TTL)
     async def _periodic_memory_cleanup() -> None:
         await asyncio.sleep(60)
         while True:
@@ -807,6 +739,7 @@ async def handle_voice(
                     ),
                     stop_reason=stop_reason,
                     assistant_message=_msg or None,
+                    reasoning=result.get("reasoning"),
                     tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
                     validation_request=(
                         ValidationRequest(**result["validation_request"])
