@@ -176,8 +176,9 @@ class AgentContextService:
         """Format results as a 'Current context' block for prompt injection."""
         lines: list[str] = []
         header = (
-            "Current context (use this information to answer directly "
-            "when relevant — no need to call a tool if the answer is here):"
+            "LIVE DATA (already fetched — DO NOT call get_weather, get_news, "
+            "or get_calendar_events for information listed below. Instead, "
+            "use the chat tool and include this data in your response):"
         )
         total_chars = len(header) + 1
 
