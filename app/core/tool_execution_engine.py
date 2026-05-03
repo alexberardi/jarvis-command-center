@@ -8,6 +8,7 @@ repeat until completion or client tool calls are needed.
 import json
 import logging
 import os
+import re
 import time as _time
 import uuid
 from contextlib import nullcontext
@@ -142,6 +143,7 @@ class ToolExecutionEngine:
             Response dict with stop_reason and relevant data
         """
         usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        reasoning_parts: List[str] = []  # Accumulated <think> blocks across iterations
 
         # Build adapter_settings from node's adapter_hash if present
         node_context = conversation_cache.get_node_context(conversation_id) or {}
@@ -604,6 +606,11 @@ class ToolExecutionEngine:
                 finish_reason_raw = "stop"
                 msg = None
 
+            # Extract <think> content before any stripping/parsing
+            _think_matches = re.findall(r"<think>(.*?)</think>", raw_content, re.DOTALL)
+            if _think_matches:
+                reasoning_parts.extend(m.strip() for m in _think_matches if m.strip())
+
             # Extract date_keys
             date_keys: List[str] = []
             if isinstance(response, dict):
@@ -728,10 +735,13 @@ class ToolExecutionEngine:
                             len(original) - len(cleaned),
                         )
                 _log_usage(iteration + 1, "complete")
-                return {
+                result = {
                     "stop_reason": "complete",
-                    "assistant_message": assistant_message
+                    "assistant_message": assistant_message,
                 }
+                if reasoning_parts:
+                    result["reasoning"] = "\n\n".join(reasoning_parts)
+                return result
 
             elif finish_reason == "tool_calls":
                 # ISO date guard: if the model emitted ISO timestamps in
@@ -801,14 +811,17 @@ class ToolExecutionEngine:
                             if content.get("_validation_request"):
                                 logger.info("Validation request detected (only tool call)")
                                 _log_usage(iteration + 1, "validation_required")
-                                return {
+                                result = {
                                     "stop_reason": "validation_required",
                                     "validation_request": {
                                         "question": content["question"],
                                         "parameter_name": content["parameter_name"],
-                                        "options": content.get("options", [])
-                                    }
+                                        "options": content.get("options", []),
+                                    },
                                 }
+                                if reasoning_parts:
+                                    result["reasoning"] = "\n\n".join(reasoning_parts)
+                                return result
                         except (json.JSONDecodeError, KeyError):
                             pass
 
@@ -845,11 +858,14 @@ class ToolExecutionEngine:
 
                     logger.info(f"Returning {len(client_calls)} client tool calls (no server tools to wait for)")
                     _log_usage(iteration + 1, "tool_calls")
-                    return {
+                    result = {
                         "stop_reason": "tool_calls",
                         "tool_calls": client_calls,
-                        "assistant_message": assistant_message
+                        "assistant_message": assistant_message,
                     }
+                    if reasoning_parts:
+                        result["reasoning"] = "\n\n".join(reasoning_parts)
+                    return result
 
                 # Only server tools - already added to messages
                 if server_results:
@@ -862,27 +878,36 @@ class ToolExecutionEngine:
                             "Server-only tools in text-based mode — returning for formatting"
                         )
                         _log_usage(iteration + 1, "server_tool_complete")
-                        return {
+                        result = {
                             "stop_reason": "server_tool_complete",
                             "server_tool_results": server_results,
                             "assistant_message": assistant_message,
                         }
+                        if reasoning_parts:
+                            result["reasoning"] = "\n\n".join(reasoning_parts)
+                        return result
                     logger.info("Only server tools executed, continuing loop")
 
             else:
                 # Unknown finish reason
                 logger.warning(f"Unknown finish_reason: {finish_reason}")
                 _log_usage(iteration + 1, "complete")
-                return {
+                result = {
                     "stop_reason": "complete",
-                    "assistant_message": assistant_message
+                    "assistant_message": assistant_message,
                 }
+                if reasoning_parts:
+                    result["reasoning"] = "\n\n".join(reasoning_parts)
+                return result
 
         # Max iterations reached
         logger.warning(f"Max tool loop iterations ({max_iterations}) reached")
         _log_usage(max_iterations, "max_iterations_exceeded")
-        return {
+        result = {
             "stop_reason": "complete",
             "assistant_message": "Maximum tool execution iterations reached.",
-            "error": "max_iterations_exceeded"
+            "error": "max_iterations_exceeded",
         }
+        if reasoning_parts:
+            result["reasoning"] = "\n\n".join(reasoning_parts)
+        return result

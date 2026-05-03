@@ -45,6 +45,7 @@ class MobileChatRequest(BaseModel):
     timezone: str = "America/New_York"
     client_tools: list[dict[str, Any]] | None = None
     available_commands: list[dict[str, Any]] | None = None
+    include_reasoning: bool = False
 
 
 class WarmupRequest(BaseModel):
@@ -375,6 +376,8 @@ async def _chat_stream(
                     done_event["action_context"] = action_context
                     if action_preview:
                         done_event["action_preview"] = action_preview
+                if request.include_reasoning and result.get("reasoning"):
+                    done_event["reasoning"] = result["reasoning"]
                 yield _sse_event(done_event)
 
                 # Fire-and-forget: log transcript for passive memory extraction
@@ -466,12 +469,15 @@ async def _chat_stream(
 
             else:
                 assistant_message = result.get("assistant_message", "")
-                yield _sse_event({
+                done_event = {
                     "type": "done",
                     "conversation_id": conversation_id,
                     "full_text": assistant_message,
                     "stop_reason": stop_reason,
-                })
+                }
+                if request.include_reasoning and result.get("reasoning"):
+                    done_event["reasoning"] = result["reasoning"]
+                yield _sse_event(done_event)
                 return
 
         yield _sse_event({

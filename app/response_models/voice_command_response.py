@@ -53,12 +53,13 @@ class VoiceCommandResponse(BaseModel):
     """Response that can contain one or multiple commands"""
     commands: List[SingleCommandResponse]
     request_information: Optional[RequestInformation] = None
-    
+
     # New fields for tool-based architecture
     stop_reason: Optional[StopReason] = None
     tool_calls: Optional[List[ToolCall]] = None
     validation_request: Optional[ValidationRequest] = None
     assistant_message: Optional[str] = None
+    reasoning: Optional[str] = None
     
     @property
     def success(self) -> bool:

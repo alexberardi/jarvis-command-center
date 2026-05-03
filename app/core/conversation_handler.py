@@ -417,7 +417,7 @@ class ConversationHandler:
                 "content": agent_context,
             })
 
-        # Add user message (with optional provider suffix, e.g. /nothink for Qwen3)
+        # Add user message (with optional provider suffix, e.g. /no_think for Qwen3)
         suffix: str = (
             self.prompt_provider.user_message_suffix
             if self.prompt_provider else ""
@@ -1247,12 +1247,20 @@ class ConversationHandler:
         # Strip any role="tool" messages that the text-based model can't handle
         messages[:] = [m for m in messages if m.get("role") != "tool"]
 
+        # Mobile chat (rich_response) enables thinking on the formatting call
+        # so reasoning can be displayed in the chat UI. Voice nodes keep
+        # /no_think to avoid wasting tokens.
+        node_ctx = conversation_cache.get_node_context(conversation_id) or {}
+        is_rich = node_ctx.get("rich_response", False)
+        think_suffix: str = "\n/think" if is_rich else ""
+        max_tokens: int = 512 if is_rich else 256
+
         # Inject tool results as a user message into the EXISTING conversation
         # so the KV prefix cache (system prompt + tools + prior turns) is reused.
         if is_knowledge_query:
             messages.append({
                 "role": "user",
-                "content": "Answer the question from your own knowledge. Be brief and conversational.",
+                "content": f"Answer the question from your own knowledge. Be brief and conversational.{think_suffix}",
             })
         else:
             messages.append({
@@ -1260,7 +1268,7 @@ class ConversationHandler:
                 "content": (
                     f"Here are the tool results. Craft a natural response using the "
                     f"ACTUAL values — never use placeholders. Be brief and conversational.\n\n"
-                    f"{tool_context}"
+                    f"{tool_context}{think_suffix}"
                 ),
             })
 
@@ -1272,7 +1280,7 @@ class ConversationHandler:
             conversation_id=conversation_id,
             include_date_context=True,
             adapter_settings=adapter_settings,
-            max_tokens=256,
+            max_tokens=max_tokens,
             temperature=0.7,
         )
 
@@ -1298,6 +1306,10 @@ class ConversationHandler:
         # Clean up tool_call tags that text-based models emit
         content = re.sub(r"</?tool_call>", "", content).strip()
 
+        # Extract <think> content before stripping for optional client use
+        _think_matches = re.findall(r"<think>(.*?)</think>", content, re.DOTALL)
+        reasoning = "\n\n".join(m.strip() for m in _think_matches if m.strip()) or None
+
         # Provider-specific scrub (Qwen3 <think> blocks etc.), then
         # universal TTS-safe scrub (emojis). Without this, tool-result
         # responses from text-based models bypass the tool_execution_engine
@@ -1310,10 +1322,13 @@ class ConversationHandler:
         if content:
             messages.append({"role": "assistant", "content": content})
 
-        return {
+        result: Dict[str, Any] = {
             "stop_reason": "complete",
             "assistant_message": content,
         }
+        if reasoning:
+            result["reasoning"] = reasoning
+        return result
 
     async def _format_tool_result_text_mode_UNUSED(
         self,
