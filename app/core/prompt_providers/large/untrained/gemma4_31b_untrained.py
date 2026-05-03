@@ -22,11 +22,14 @@ get_response_format, supports_native_tools, and use_tool_classifier from
 Gemma3MediumUntrained. Overrides parse_response and sanitize_text to strip
 Gemma 4 control tokens.
 
-chat_format: Use "chatml" (NOT "gemma") — the gemma chat format drops system
-messages entirely, so the model never sees tool definitions.
+chat_format: Use "gemma4" — custom handler in llm-proxy that uses Gemma 4's
+native template with thinking disabled. Prefills an empty thinking channel
+(<|channel>thought\n<channel|>) so the model skips reasoning entirely (~2-5x
+faster). Falls back to "chatml" (NOT "gemma") if gemma4 handler unavailable —
+the gemma chat format drops system messages entirely.
 
 Ref: https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4
-Ref: https://github.com/asf0/gemma4_jinja (thinking channel leakage fix)
+Ref: https://ai.google.dev/gemma/docs/capabilities/thinking
 """
 
 import logging
@@ -66,14 +69,20 @@ _CHATML_TOKEN_RE = re.compile(r"<\|im_(?:start|end)\|>\s*(?:assistant|system|use
 # Thinking mode activation token
 _THINK_ACTIVATE_RE = re.compile(r"<\|think\|>\s*")
 
+# Comment-style thinking: lines starting with // (model uses as CoT)
+_COMMENT_THINK_RE = re.compile(r"^\s*//[^\n]*$", re.MULTILINE)
+
 
 def _strip_gemma4_tokens(text: str) -> str:
-    """Remove all Gemma 4 control tokens from text."""
+    """Remove all Gemma 4 control tokens and comment-style thinking from text."""
     text = _THINK_CHANNEL_RE.sub("", text)
     text = _TURN_MARKER_RE.sub("", text)
     text = _STRING_DELIM_RE.sub('"', text)
     text = _CHATML_TOKEN_RE.sub("", text)
     text = _THINK_ACTIVATE_RE.sub("", text)
+    text = _COMMENT_THINK_RE.sub("", text)
+    # Collapse multiple blank lines left by stripping
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text
 
 
@@ -111,27 +120,6 @@ class Gemma4_31B_Untrained(Gemma3MediumUntrained):
         """
         return _strip_gemma4_tokens(text).strip()
 
-    @staticmethod
-    def _build_compact_tools_section(tools: List[Dict[str, Any]]) -> str:
-        """Build compact Tools: listing with name + first-sentence description."""
-        if not tools:
-            return "No tools available."
-
-        lines: list[str] = []
-        for tool in tools:
-            func: Dict[str, Any] = tool.get("function", {})
-            name: str = func.get("name", "unknown")
-            desc: str = func.get("description", "").strip()
-            lines.append(f"- {name}: {desc}")
-
-            for ap in tool.get("antipatterns", []):
-                ap_cmd: str = ap.get("command_name", "")
-                ap_desc: str = ap.get("description", "")
-                if ap_cmd and ap_desc:
-                    lines.append(f"  NOT {name} → use {ap_cmd}: {ap_desc}")
-
-        return "\n".join(lines)
-
     def build_system_prompt(
         self,
         node_context: Dict[str, Any],
@@ -152,9 +140,6 @@ class Gemma4_31B_Untrained(Gemma3MediumUntrained):
 
         # <tools> XML block (inherited from Gemma3MediumUntrained)
         tools_xml: str = Gemma3MediumUntrained._build_tools_xml(tools)
-
-        # Compact tools summary: name + first-sentence description, no params
-        compact_tools: str = self._build_compact_tools_section(tools)
 
         # DT_KEYS — strong enforcement for 31B (model aggressively resolves dates)
         dt_keys_line: str = ""
@@ -185,6 +170,7 @@ Example — if the user says "What's the weather in Miami?", respond ONLY with:
 </tool_call>
 
 Rules:
+- NEVER think out loud, reason, or include comments (// or otherwise) in your output. Respond ONLY with a tool call or a brief spoken answer. No preamble, no explanation, no commentary.
 - You MUST call a tool for weather, sports, calendar, timers, music, device control, web search, and all other tool-covered domains. NEVER answer these from memory.
 - Call ONE tool at a time to fulfill requests.
 - Pick the tool that best matches intent; use get_command_utterance_examples if unsure.
@@ -195,9 +181,6 @@ Rules:
 {direct_answer_section}
 {agent_context_section}
 For final answers with no tool needed, respond with a brief spoken reply.
-
-Tools:
-{compact_tools}
 """
 
         logger.info(

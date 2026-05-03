@@ -40,6 +40,9 @@ logger = logging.getLogger("uvicorn")
 
 # Strip <think>...</think> blocks (Qwen3 thinking mode output)
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+# Strip unclosed <think> blocks — when max_tokens truncates the response
+# mid-think, </think> never arrives and the closed-block regex misses it.
+_THINK_UNCLOSED_RE = re.compile(r"<think>.*", re.DOTALL)
 
 # Strip <message>...</message> wrappers — Qwen3 sometimes wraps its direct
 # answer text in these tags by overgeneralizing from the <tool_call> format
@@ -99,6 +102,7 @@ class Qwen3LargeUntrained(Qwen25_7B_Compressed):
     def parse_response(self, raw_content: str) -> Optional[str]:
         """Strip <think> and <message> wrappers, then delegate to Qwen 2.5 parser."""
         cleaned: str = _THINK_BLOCK_RE.sub("", raw_content)
+        cleaned = _THINK_UNCLOSED_RE.sub("", cleaned)
         cleaned = _MESSAGE_WRAP_RE.sub(lambda m: m.group(1), cleaned)
         return super().parse_response(cleaned)
 
@@ -117,6 +121,7 @@ class Qwen3LargeUntrained(Qwen25_7B_Compressed):
         <tool_call> tag format in the system prompt.
         """
         cleaned = _THINK_BLOCK_RE.sub("", text)
+        cleaned = _THINK_UNCLOSED_RE.sub("", cleaned)
         cleaned = _MESSAGE_WRAP_RE.sub(lambda m: m.group(1), cleaned)
         return cleaned.strip()
 
