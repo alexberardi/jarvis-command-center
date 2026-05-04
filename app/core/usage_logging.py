@@ -97,3 +97,68 @@ def write_prompt_response_log(
             handle.write(json.dumps(entry) + "\n")
     except Exception as exc:
         logger.warning("Failed to write LLM trace log: %s", exc)
+
+
+def write_metrics_log(
+    conversation_id: str,
+    total_duration_ms: float,
+    iterations: List[Dict[str, Any]],
+    tools_count: int,
+    agent_context_chars: int = 0,
+) -> None:
+    """
+    Write a per-request metrics log entry for LLM performance analysis.
+
+    Each entry is a JSON line capturing per-iteration token counts, durations,
+    and tool calls — designed for before/after comparison of prompt optimizations.
+
+    Args:
+        conversation_id: The conversation ID
+        total_duration_ms: Total duration of the tool execution loop in ms
+        iterations: List of per-iteration dicts, each with:
+            - iteration (int)
+            - prompt_tokens (int)
+            - completion_tokens (int)
+            - duration_ms (float)
+            - tool_calls (list of tool names called)
+            - finish_reason (str)
+        tools_count: Number of tool definitions in the prompt
+        agent_context_chars: Number of chars of agent context injected (0 = none)
+    """
+    log_path = os.getenv(
+        "JARVIS_LLM_METRICS_LOG_PATH",
+        "/app/temp/llm_metrics.log"
+    )
+
+    # Determine if the model answered purely from context
+    # (stopped on first iteration with no tool calls)
+    answered_from_context = (
+        len(iterations) == 1
+        and iterations[0].get("finish_reason") == "stop"
+        and not iterations[0].get("tool_calls")
+    )
+
+    total_prompt = sum(it.get("prompt_tokens", 0) for it in iterations)
+    total_completion = sum(it.get("completion_tokens", 0) for it in iterations)
+
+    entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "conversation_id": conversation_id,
+        "total_duration_ms": round(total_duration_ms, 1),
+        "total_prompt_tokens": total_prompt,
+        "total_completion_tokens": total_completion,
+        "iterations_count": len(iterations),
+        "tools_count": tools_count,
+        "agent_context_chars": agent_context_chars,
+        "answered_from_context": answered_from_context,
+        "per_iteration": iterations,
+    }
+
+    try:
+        log_dir = os.path.dirname(log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except Exception as exc:
+        logger.warning("Failed to write metrics log: %s", exc)

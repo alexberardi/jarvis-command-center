@@ -45,6 +45,9 @@ class AgentContextService:
         Always includes the latest weather/calendar context, then fills
         remaining slots with vector-search results from other categories.
 
+        Gated behind ``model.advanced_thinking`` — returns empty when
+        disabled so vector search and embedding queries are skipped.
+
         Args:
             household_id: The household scope
             query: The user's voice command text
@@ -55,6 +58,18 @@ class AgentContextService:
         Returns:
             Formatted string for prompt injection, or empty string.
         """
+        # Defense-in-depth: conversation_handler also gates this, but
+        # guard here in case the service is called directly.
+        try:
+            from app.services.settings_service import get_settings_service
+
+            settings = get_settings_service()
+            val = settings.get("model.advanced_thinking", household_id=household_id)
+            if val is not None and str(val).lower() in ("false", "0"):
+                return ""
+        except Exception:
+            pass  # proceed if settings unavailable
+
         results: list[str] = []
 
         # Step 1: Always include latest from priority categories

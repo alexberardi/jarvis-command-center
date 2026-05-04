@@ -68,7 +68,7 @@ class Qwen3LargeUntrained(Qwen25_7B_Compressed):
 
     @property
     def user_message_suffix(self) -> str:
-        """Append /no_think to user messages to disable Qwen3 thinking mode.
+        """Return /think or /no_think based on the advanced_thinking setting.
 
         Qwen3's documented control tokens are /think and /no_think
         (underscore-separated). /nothink (without the underscore) is
@@ -77,8 +77,11 @@ class Qwen3LargeUntrained(Qwen25_7B_Compressed):
 
         /no_think must land in a USER turn; /system prompt placement is
         ignored by Qwen3's training.
+
+        When model.advanced_thinking is enabled, /think allows chain-of-thought
+        reasoning (~2s extra latency, better for complex queries).
         """
-        return "/no_think"
+        return "/think" if self.advanced_thinking else "/no_think"
 
     @staticmethod
     def _build_compressed_tools_block(tools: List[Dict[str, Any]]) -> str:
