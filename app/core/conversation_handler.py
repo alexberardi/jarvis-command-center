@@ -363,6 +363,10 @@ class ConversationHandler:
 
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Cache lookups done")
 
+        # Propagate model.advanced_thinking to the prompt provider so
+        # user_message_suffix returns /think or /no_think accordingly.
+        advanced_thinking = self._sync_advanced_thinking(conversation_id)
+
         if not messages:
             raise ValueError(f"Conversation {conversation_id} not found or expired")
 
@@ -412,7 +416,11 @@ class ConversationHandler:
         # relevant to the user's utterance via vector similarity search.
         # Appended AFTER the user message so recency bias in attention
         # keeps it top-of-mind when the model generates its response.
-        agent_context = await self._get_agent_context(voice_command, conversation_id)
+        # Gated behind model.advanced_thinking — when disabled, skip the
+        # vector search and embedding query to save latency.
+        agent_context: str | None = None
+        if advanced_thinking:
+            agent_context = await self._get_agent_context(voice_command, conversation_id)
 
         # Add user message (with optional provider suffix, e.g. /no_think for Qwen3)
         suffix: str = (
@@ -443,6 +451,7 @@ class ConversationHandler:
                 tools=tools or [],
                 user_utterance=voice_command,
                 max_iterations=max_iters,
+                agent_context_chars=len(agent_context) if agent_context else 0,
             )
 
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool execution loop completed")
@@ -545,6 +554,9 @@ class ConversationHandler:
                 )
                 # Re-fetch messages after reload
                 messages = conversation_cache.get_messages(conversation_id) or messages
+
+        # Sync advanced thinking setting so suffix adapts
+        self._sync_advanced_thinking(conversation_id)
 
         # Pre-execute quick_search if applicable
         search_results = await self._maybe_quick_search(voice_command)
@@ -774,6 +786,9 @@ class ConversationHandler:
 
         # Work on a copy so fall-back doesn't pollute the cache.
         messages = list(cached_messages)
+
+        # Sync advanced thinking setting so suffix adapts
+        self._sync_advanced_thinking(conversation_id)
 
         # Adapter settings
         node_context = conversation_cache.get_node_context(conversation_id) or {}
@@ -1243,18 +1258,43 @@ class ConversationHandler:
 
         tool_context: str = "\n".join(result_parts)
 
+        # Fast path: if all tool results have a clear message/response field,
+        # skip the expensive LLM formatting call (~3s) and return directly.
+        # Most commands return {"success": true, "message": "..."} which
+        # doesn't need LLM rephrasing.
+        fast_parts: list[str] = []
+        for tr in tool_results:
+            output = tr.get("output", {})
+            if isinstance(output, str):
+                try:
+                    output = json.loads(output)
+                except (json.JSONDecodeError, TypeError):
+                    output = {}
+            if isinstance(output, dict):
+                msg = output.get("message") or output.get("response")
+                if isinstance(msg, str) and msg.strip():
+                    fast_parts.append(msg.strip())
+        if fast_parts and len(fast_parts) == len(tool_results):
+            content = " ".join(fast_parts)
+            logger.info("Fast-path formatting: skipping LLM call, using tool message directly")
+            if content:
+                messages[:] = [m for m in messages if m.get("role") != "tool"]
+                messages.append({"role": "assistant", "content": content})
+            return {
+                "stop_reason": "complete",
+                "assistant_message": content,
+            }
+
         is_knowledge_query: bool = self._is_knowledge_delegation(tool_context)
 
         # Strip any role="tool" messages that the text-based model can't handle
         messages[:] = [m for m in messages if m.get("role") != "tool"]
 
-        # Mobile chat (rich_response) enables thinking on the formatting call
-        # so reasoning can be displayed in the chat UI. Voice nodes keep
-        # /no_think to avoid wasting tokens.
+        # Disable thinking on formatting calls — just rephrase tool results.
+        # Saves ~140 tokens and ~2s per formatting response.
         node_ctx = conversation_cache.get_node_context(conversation_id) or {}
-        is_rich = node_ctx.get("rich_response", False)
-        think_suffix: str = "\n/think" if is_rich else ""
-        max_tokens: int = 512 if is_rich else 256
+        think_suffix: str = "\n/no_think"
+        max_tokens: int = 256
 
         # Inject tool results as a user message into the EXISTING conversation
         # so the KV prefix cache (system prompt + tools + prior turns) is reused.
@@ -1304,7 +1344,7 @@ class ConversationHandler:
         except (KeyError, IndexError, TypeError, AttributeError):
             content = str(response.get("content", "") if isinstance(response, dict) else "")
 
-        # Clean up tool_call tags that text-based models emit
+        # Clean up model scaffolding: tool_call tags, think blocks, etc.
         content = re.sub(r"</?tool_call>", "", content).strip()
 
         # Extract <think> content before stripping for optional client use
@@ -1312,12 +1352,39 @@ class ConversationHandler:
         reasoning = "\n\n".join(m.strip() for m in _think_matches if m.strip()) or None
 
         # Provider-specific scrub (Qwen3 <think> blocks etc.), then
-        # universal TTS-safe scrub (emojis). Without this, tool-result
-        # responses from text-based models bypass the tool_execution_engine
-        # sanitize pass and leak scaffolding into TTS.
+        # universal TTS-safe scrub (emojis).
         if self.prompt_provider:
             content = self.prompt_provider.sanitize_text(content)
         content = clean_for_tts(content)
+
+        # AFTER all scrubbing: if the model emitted a tool call instead of
+        # prose, the content is now bare JSON. Build a fallback from the
+        # actual tool results rather than showing raw JSON to the user.
+        if content.startswith("{") and content.endswith("}"):
+            try:
+                parsed_tc = json.loads(content)
+                if isinstance(parsed_tc, dict) and "name" in parsed_tc:
+                    fallback_parts: list[str] = []
+                    for tr in tool_results:
+                        output = tr.get("output", {})
+                        if isinstance(output, str):
+                            try:
+                                output = json.loads(output)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        if isinstance(output, dict):
+                            msg = output.get("message") or output.get("response")
+                            if msg:
+                                fallback_parts.append(str(msg))
+                            elif output.get("success") is False:
+                                fallback_parts.append(output.get("error", "The command failed."))
+                    content = " ".join(fallback_parts) if fallback_parts else "Done."
+                    logger.info(
+                        "Formatting call emitted tool call instead of prose — "
+                        "using tool result fallback: %s", content,
+                    )
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         # Update cache
         if content:
@@ -1849,6 +1916,28 @@ class ConversationHandler:
         logger.info("Quick search completed in %ss, %d sources", elapsed, len(sources))
 
         return "\n".join(parts)
+
+    def _sync_advanced_thinking(self, conversation_id: str) -> bool:
+        """Read model.advanced_thinking setting and propagate to the provider.
+
+        Sets ``self.prompt_provider.advanced_thinking`` so suffix and prompt
+        behaviour adapt automatically.  Returns the resolved value so
+        callers can gate agent-context retrieval.
+        """
+        enabled = False
+        try:
+            node_ctx = conversation_cache.get_node_context(conversation_id)
+            hh_id = node_ctx.get("household_id") if node_ctx else None
+            if hh_id:
+                settings = get_settings_service()
+                val = settings.get("model.advanced_thinking", household_id=str(hh_id))
+                if val is not None:
+                    enabled = str(val).lower() in ("true", "1")
+        except Exception:
+            pass  # default to False
+        if self.prompt_provider:
+            self.prompt_provider.advanced_thinking = enabled
+        return enabled
 
     async def _get_agent_context(
         self,

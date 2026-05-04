@@ -1,21 +1,23 @@
 """
 Qwen25_14B_Untrained - Prompt provider for Qwen 2.5 14B Instruct (safetensors).
 
-Based on the Qwen25_7B_Compressed pattern (95%+ accuracy) — compressed tools
-block, minimal rules, DT_KEYS enforcement, force_tool_calls.
+Uses lazy tool loading: system prompt contains a compact capability list
+and a single ``get_tools`` meta-tool instead of full tool schemas. The model
+answers directly from injected context (weather, calendar, news) when
+possible, and calls ``get_tools`` only when it needs to perform an action.
 
-14B-specific tuning vs 7B compressed:
-- RULE_EXTRACT_PARAMS added back — 14B is more eager to ask clarifying
-  questions instead of making best-effort tool calls.
-- Language rule — the multilingual 14B model occasionally code-switches
-  to non-English on ambiguous queries.
+14B-specific tuning:
+- RULE_EXTRACT_PARAMS — 14B is more eager to ask clarifying questions.
+- Language rule — the multilingual 14B model occasionally code-switches.
 - User memories in identity header — 14B has enough capacity to use them.
-- Full tool descriptions preserved (compressed block already does this).
+- force_tool_calls disabled — model answers from context when appropriate.
+- lazy_tool_loading enabled — full tool schemas loaded on demand.
 
 Inherits parse_response, build_tools, get_response_format, and
 build_training_completion from Qwen25MediumUntrained via Qwen25_7B_Compressed.
 """
 
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -38,19 +40,70 @@ from app.core.prompt_providers.shared.core_rules import (
 
 logger = logging.getLogger("uvicorn")
 
+# get_tools definition — the only tool in the <tools> block
+_GET_TOOLS_DEFINITION: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_tools",
+        "description": (
+            "Retrieve full definitions of available tools with parameter details. "
+            "Call this when you need to perform an action (set timers, control devices, "
+            "search the web, check sports scores, etc.)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+}
+
 
 class Qwen25_14B_Untrained(Qwen25_7B_Compressed):
     """
     Prompt provider for Qwen 2.5 14B Instruct (untrained, safetensors).
 
-    Compressed prompt matching the 7B Compressed pattern with additional
-    rules to tame the 14B model's tendencies to over-clarify and
-    code-switch languages.
+    Uses lazy tool loading to minimize prompt tokens. Full tool schemas
+    are only provided when the model calls ``get_tools``.
     """
 
     @property
     def name(self) -> str:
         return "Qwen25_14B_Untrained"
+
+    @property
+    def force_tool_calls(self) -> bool:
+        return False
+
+    @property
+    def lazy_tool_loading(self) -> bool:
+        return True
+
+    @staticmethod
+    def _build_capability_summary(tools: List[Dict[str, Any]]) -> str:
+        """Build a compact one-line-per-tool capability list.
+
+        Extracts tool name + first sentence of description from each tool
+        definition. This gives the model enough context to decide whether
+        it needs tools without the full parameter schemas.
+        """
+        lines: list[str] = []
+        for tool in tools:
+            func = tool.get("function", {})
+            if not isinstance(func, dict):
+                continue
+            name = func.get("name", "")
+            desc = func.get("description", "")
+            # Take first sentence only
+            if ". " in desc:
+                desc = desc[: desc.index(". ") + 1]
+            elif desc and not desc.endswith("."):
+                desc = desc + "."
+            if name and name != "get_tools":
+                lines.append(f"  {name}: {desc}")
+        if not lines:
+            return ""
+        return "Available capabilities (call get_tools for full details):\n" + "\n".join(lines)
 
     def build_system_prompt(
         self,
@@ -68,7 +121,7 @@ class Qwen25_14B_Untrained(Qwen25_7B_Compressed):
         direct_answer_section: str = build_direct_answer_section(available_commands)
         agent_context_section: str = build_agent_context_summary(node_context)
 
-        # 6 rules — 7B compressed base (4) + extract_params + language rule
+        # 6 rules — same as before
         terminology: str = "function"
 
         def _sub(r: str) -> str:
@@ -80,10 +133,13 @@ class Qwen25_14B_Untrained(Qwen25_7B_Compressed):
         rules_lines.append(f"- {_sub(RULE_BEST_MATCH_INTENT)}")
         rules_lines.append(f"- {_sub(RULE_EXTRACT_PARAMS)}")
         rules_lines.append(f"- {_sub(RULE_STT_AWARENESS)}")
-        rules_lines.append("- ALWAYS respond in the language the user spoke. Prefer making a best-effort tool call over asking for clarification.")
+        rules_lines.append(
+            "- ALWAYS respond in the language the user spoke. "
+            "Prefer making a best-effort tool call over asking for clarification."
+        )
         rules: str = "\n".join(rules_lines)
 
-        # DT_KEYS — strong enforcement for 14B (model tries to resolve dates itself)
+        # DT_KEYS — strong enforcement
         dt_keys_line: str = ""
         if date_keys:
             dt_keys_line = (
@@ -94,12 +150,16 @@ class Qwen25_14B_Untrained(Qwen25_7B_Compressed):
                 "If the user omits a date, pass [\"today\"].\n"
             )
 
-        # Compressed tools block (param descriptions stripped, format hints stripped)
-        tools_block: str = self._build_compressed_tools_block(tools)
+        # Only get_tools in the <tools> block — no capability summary
+        get_tools_json: str = json.dumps(_GET_TOOLS_DEFINITION, separators=(",", ":"))
+        tools_block: str = f"<tools>\n{get_tools_json}\n</tools>"
 
         system_prompt: str = f"""{identity}
 
-You are a function calling AI model. You may call one or more functions to assist with the user query. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
+You are a voice assistant that can answer questions and perform actions. {ANTI_HALLUCINATION_MANDATE}
+
+When context (weather, calendar, news, etc.) is provided after the user's message, answer directly — do NOT call a tool for information you already have.
+When you need to perform an action or access information not in context, you MUST call get_tools first — it is the ONLY tool available to you right now. After calling get_tools you will receive the full list of tools you can use. Do NOT call any other tool name until you have called get_tools.
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
@@ -115,7 +175,7 @@ You are provided with function signatures within <tools></tools> XML tags:
 """
 
         logger.info(
-            "Built Qwen25_14B_Untrained system prompt: %d chars, %d tools",
+            "Built Qwen25_14B_Untrained (lazy) system prompt: %d chars, %d tools available",
             len(system_prompt),
             len(tools),
         )
@@ -133,4 +193,5 @@ You are provided with function signatures within <tools></tools> XML tags:
             "training_tier": "untrained",
             "use_tool_classifier": self.use_tool_classifier,
             "supports_native_tools": self.supports_native_tools,
+            "lazy_tool_loading": self.lazy_tool_loading,
         }

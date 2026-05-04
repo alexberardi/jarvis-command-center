@@ -24,6 +24,11 @@ class IJarvisPromptProvider(ABC):
     app/core/prompt_providers/ and matching by the `name` property.
     """
 
+    # Set by ConversationHandler from the model.advanced_thinking setting.
+    # Providers that support thinking mode use this to decide /think vs
+    # /no_think suffix and whether to include agent context.
+    advanced_thinking: bool = False
+
     # ── Shared context builders ──────────────────────────────────────
     # Room and user context are automatically extracted from node_context
     # and injected into the prompt. Providers call these helpers instead
@@ -154,6 +159,19 @@ class IJarvisPromptProvider(ABC):
         (e.g., Qwen3 ``/nothink`` to disable chain-of-thought).
         """
         return ""
+
+    @property
+    def lazy_tool_loading(self) -> bool:
+        """Whether this provider uses lazy tool loading.
+
+        When True: system prompt contains only a compact capability list
+        and a ``get_tools`` meta-tool. Full tool schemas are returned on
+        demand when the model calls ``get_tools``. This dramatically
+        reduces prompt tokens for context-answerable queries.
+
+        Default: False (all tool schemas in the system prompt).
+        """
+        return False
 
     @property
     def supports_native_tools(self) -> bool:

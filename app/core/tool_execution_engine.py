@@ -38,6 +38,7 @@ from app.core.system_prompt_builder import get_response_format
 from app.core.usage_logging import (
     write_usage_log,
     write_prompt_response_log,
+    write_metrics_log,
 )
 from app.core.general_context import generate_date_context_object
 from app.core.param_refinement import refine_params
@@ -127,7 +128,8 @@ class ToolExecutionEngine:
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
         max_iterations: int = 10,
-        user_utterance: Optional[str] = None
+        user_utterance: Optional[str] = None,
+        agent_context_chars: int = 0,
     ) -> Dict[str, Any]:
         """
         Execute the tool loop: call LLM, execute server tools, repeat until done.
@@ -138,12 +140,15 @@ class ToolExecutionEngine:
             tools: Available tools
             max_iterations: Maximum tool execution iterations
             user_utterance: Original user voice command (for LLM fallback in date resolution)
+            agent_context_chars: Number of chars of agent context injected into the user message
 
         Returns:
             Response dict with stop_reason and relevant data
         """
         usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         reasoning_parts: List[str] = []  # Accumulated <think> blocks across iterations
+        iteration_metrics: List[Dict[str, Any]] = []  # Per-iteration LLM metrics
+        _loop_start = _time.time()
 
         # Build adapter_settings from node's adapter_hash if present
         node_context = conversation_cache.get_node_context(conversation_id) or {}
@@ -171,6 +176,14 @@ class ToolExecutionEngine:
         # Helper functions using closures
         def _log_usage(turns_used: int, status: str) -> None:
             write_usage_log(conversation_id, turns_used, status, usage_totals)
+            _total_ms = (_time.time() - _loop_start) * 1000
+            write_metrics_log(
+                conversation_id=conversation_id,
+                total_duration_ms=_total_ms,
+                iterations=iteration_metrics,
+                tools_count=len(tools),
+                agent_context_chars=agent_context_chars,
+            )
 
         def _log_prompt_response(
             prompt_messages: List[Dict[str, Any]],
@@ -618,13 +631,17 @@ class ToolExecutionEngine:
                 if isinstance(raw_keys, list):
                     date_keys = [normalize_date_key(key) for key in raw_keys if isinstance(key, str)]
 
-            # Accumulate token usage
+            # Accumulate token usage and per-iteration metrics
+            _iter_prompt_tokens = 0
+            _iter_completion_tokens = 0
             if isinstance(response, dict):
                 usage = response.get("usage")
                 if isinstance(usage, dict):
                     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                         if isinstance(usage.get(key), int):
                             usage_totals[key] += usage[key]
+                    _iter_prompt_tokens = usage.get("prompt_tokens", 0)
+                    _iter_completion_tokens = usage.get("completion_tokens", 0)
 
             if not raw_content:
                 logger.warning("Empty raw_content!")
@@ -656,6 +673,22 @@ class ToolExecutionEngine:
                 finish_reason, tool_calls, assistant_message = tool_call_parser.parse_response(content_for_parsing)
 
             logger.info(f"LLM response parsed: finish_reason={finish_reason}, tool_calls={len(tool_calls)}")
+
+            # Record per-iteration metrics
+            _iter_duration_ms = (_time.time() - _llm_start) * 1000
+            _iter_tool_names = []
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                if isinstance(fn, dict) and fn.get("name"):
+                    _iter_tool_names.append(fn["name"])
+            iteration_metrics.append({
+                "iteration": iteration + 1,
+                "prompt_tokens": _iter_prompt_tokens,
+                "completion_tokens": _iter_completion_tokens,
+                "duration_ms": round(_iter_duration_ms, 1),
+                "tool_calls": _iter_tool_names,
+                "finish_reason": finish_reason,
+            })
 
             # Add assistant message to history
             assistant_msg: Dict[str, Any] = {"role": "assistant", "content": raw_content}

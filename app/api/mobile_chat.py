@@ -238,7 +238,7 @@ async def _do_warmup(
         timezone=timezone,
         client_tools=ct,
         available_commands=ac,
-        skip_warmup_inference=True,
+        skip_warmup_inference=False,
     )
 
 
@@ -345,10 +345,16 @@ async def _chat_stream(
         pending_actions: list[dict[str, Any]] = []
         action_context: dict[str, Any] = {}
         action_preview: str | None = None
+        # Accumulate reasoning across iterations (initial call thinking
+        # should be exposed even when the final response comes from a
+        # formatting call that has no thinking of its own).
+        accumulated_reasoning: str | None = None
 
         # Tool loop
         for _ in range(MAX_TOOL_ITERATIONS):
             stop_reason = result.get("stop_reason", "complete")
+            if result.get("reasoning"):
+                accumulated_reasoning = result["reasoning"]
 
             if stop_reason in ("complete", "server_tool_complete"):
                 assistant_message = result.get("assistant_message", "")
@@ -376,8 +382,8 @@ async def _chat_stream(
                     done_event["action_context"] = action_context
                     if action_preview:
                         done_event["action_preview"] = action_preview
-                if request.include_reasoning and result.get("reasoning"):
-                    done_event["reasoning"] = result["reasoning"]
+                if request.include_reasoning and accumulated_reasoning:
+                    done_event["reasoning"] = accumulated_reasoning
                 yield _sse_event(done_event)
 
                 # Fire-and-forget: log transcript for passive memory extraction
@@ -475,8 +481,8 @@ async def _chat_stream(
                     "full_text": assistant_message,
                     "stop_reason": stop_reason,
                 }
-                if request.include_reasoning and result.get("reasoning"):
-                    done_event["reasoning"] = result["reasoning"]
+                if request.include_reasoning and accumulated_reasoning:
+                    done_event["reasoning"] = accumulated_reasoning
                 yield _sse_event(done_event)
                 return
 

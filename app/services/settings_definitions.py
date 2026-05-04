@@ -93,6 +93,17 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Optimize prompts for smaller models",
         env_fallback="JARVIS_SMALL_MODEL_MODE",
     ),
+    SettingDefinition(
+        key="model.advanced_thinking",
+        category="model",
+        value_type="bool",
+        default=False,
+        description=(
+            "Enable chain-of-thought reasoning and proactive context injection "
+            "(weather, calendar, news). Adds ~2s latency but improves response "
+            "quality for complex queries."
+        ),
+    ),
 
     # Conversation settings
     SettingDefinition(
