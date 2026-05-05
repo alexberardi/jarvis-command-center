@@ -374,25 +374,28 @@ class ConversationHandler:
         server_tool_names = get_server_tool_names(tools)
 
         # Apply keyword-based tool filtering (if enabled)
-        tools = self._apply_tool_filtering(
-            voice_command, tools, available_commands
-        )
+        with timing.measure("tool_filtering") if timing else nullcontext():
+            tools = self._apply_tool_filtering(
+                voice_command, tools, available_commands
+            )
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool filtering done")
 
         # Apply tool routing classifier
         _router_t0 = time.time()
-        router_decision = self._apply_tool_routing_with_cache(
-            voice_command, tools or [], conversation_id
-        )
+        with timing.measure("tool_routing") if timing else nullcontext():
+            router_decision = self._apply_tool_routing_with_cache(
+                voice_command, tools or [], conversation_id
+            )
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool routing done (router took {(time.time()-_router_t0)*1000:.0f}ms)")
 
         # Apply high-confidence tool pruning — also rebuilds the system
         # prompt with only the pruned tools, dramatically reducing token count.
-        tools = self._apply_high_confidence_pruning(
-            tools, router_decision, server_tool_names,
-            messages=messages, conversation_id=conversation_id,
-            available_commands=available_commands,
-        )
+        with timing.measure("tool_pruning") if timing else nullcontext():
+            tools = self._apply_high_confidence_pruning(
+                tools, router_decision, server_tool_names,
+                messages=messages, conversation_id=conversation_id,
+                available_commands=available_commands,
+            )
 
         # Add router hint if decision was used
         if router_decision and router_decision.get("used"):
@@ -420,7 +423,8 @@ class ConversationHandler:
         # vector search and embedding query to save latency.
         agent_context: str | None = None
         if advanced_thinking:
-            agent_context = await self._get_agent_context(voice_command, conversation_id)
+            with timing.measure("agent_context") if timing else nullcontext():
+                agent_context = await self._get_agent_context(voice_command, conversation_id)
 
         # Add user message (with optional provider suffix, e.g. /no_think for Qwen3)
         suffix: str = (

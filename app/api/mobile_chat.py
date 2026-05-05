@@ -315,7 +315,14 @@ async def _chat_stream(
     user: AuthenticatedUser,
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE events for the chat stream."""
+    from app.core.utils.latency_logger import latency_logger
+
     conversation_id = request.conversation_id or f"mobile-{uuid4().hex[:12]}"
+    timing = latency_logger.start_request(conversation_id, "mobile_chat")
+    timing.source = "mobile"
+    timing.node_id = node.node_id
+    timing.household_id = request.household_id
+    timing.user_command = request.message
 
     try:
         # Check if conversation is already warm (preemptive warmup or continuation)
@@ -325,21 +332,23 @@ async def _chat_stream(
             # Cold start — need warmup
             yield _sse_event({"type": "status", "message": "Starting conversation..."})
 
-            await _do_warmup(
-                model_service, conversation_id, node, user,
-                request.household_id, request.timezone,
-                request.client_tools, request.available_commands,
-            )
+            with timing.measure("warmup"):
+                await _do_warmup(
+                    model_service, conversation_id, node, user,
+                    request.household_id, request.timezone,
+                    request.client_tools, request.available_commands,
+                )
 
         # Instant acknowledgment — keyword-matched, no LLM call.
         # Streamed before the pipeline starts so the user sees feedback immediately.
         ack_text = generate_acknowledgment(request.message)
         yield _sse_event({"type": "acknowledgment", "text": ack_text})
 
-        result = await model_service.process_voice_command_with_tools(
-            voice_command=request.message,
-            conversation_id=conversation_id,
-        )
+        with timing.measure("process_command"):
+            result = await model_service.process_voice_command_with_tools(
+                voice_command=request.message,
+                conversation_id=conversation_id,
+            )
 
         # Track actions and preview extracted from tool results
         pending_actions: list[dict[str, Any]] = []
@@ -376,6 +385,7 @@ async def _chat_stream(
                     "conversation_id": conversation_id,
                     "full_text": assistant_message,
                     "stop_reason": "complete",
+                    "trace_summary": timing.to_trace_summary(),
                 }
                 if pending_actions:
                     done_event["actions"] = pending_actions
@@ -385,6 +395,8 @@ async def _chat_stream(
                 if request.include_reasoning and accumulated_reasoning:
                     done_event["reasoning"] = accumulated_reasoning
                 yield _sse_event(done_event)
+
+                latency_logger.end_request(conversation_id)
 
                 # Fire-and-forget: log transcript for passive memory extraction
                 asyncio.create_task(_log_mobile_transcript(
@@ -406,7 +418,9 @@ async def _chat_stream(
                     "full_text": assistant_message,
                     "stop_reason": "validation_required",
                     "validation": validation,
+                    "trace_summary": timing.to_trace_summary(),
                 })
+                latency_logger.end_request(conversation_id)
                 return
 
             elif stop_reason == "tool_calls":
@@ -426,7 +440,9 @@ async def _chat_stream(
 
                 tool_results: list[dict[str, Any]] = []
                 for tc in tool_calls:
-                    tc_result = await _route_tool_call_to_node(node.node_id, tc, user_id=user.user_id)
+                    _tc_name = tc.get("function", {}).get("name", "?")
+                    with timing.measure(f"mqtt_tool_{_tc_name}", service="node", metadata={"command": _tc_name}):
+                        tc_result = await _route_tool_call_to_node(node.node_id, tc, user_id=user.user_id)
                     tool_results.append(tc_result)
 
                     # Extract actions from tool output
@@ -466,11 +482,15 @@ async def _chat_stream(
 
             elif stop_reason == "error":
                 error_msg = result.get("error", "An error occurred")
+                timing.trace_status = "error"
+                timing.error_message = error_msg
                 yield _sse_event({
                     "type": "error",
                     "message": error_msg,
                     "conversation_id": conversation_id,
+                    "trace_summary": timing.to_trace_summary(),
                 })
+                latency_logger.end_request(conversation_id)
                 return
 
             else:
@@ -480,25 +500,35 @@ async def _chat_stream(
                     "conversation_id": conversation_id,
                     "full_text": assistant_message,
                     "stop_reason": stop_reason,
+                    "trace_summary": timing.to_trace_summary(),
                 }
                 if request.include_reasoning and accumulated_reasoning:
                     done_event["reasoning"] = accumulated_reasoning
                 yield _sse_event(done_event)
+                latency_logger.end_request(conversation_id)
                 return
 
+        timing.trace_status = "error"
+        timing.error_message = "Too many tool iterations"
         yield _sse_event({
             "type": "error",
             "message": "Too many tool iterations",
             "conversation_id": conversation_id,
+            "trace_summary": timing.to_trace_summary(),
         })
+        latency_logger.end_request(conversation_id)
 
     except Exception as e:
         logger.error("Mobile chat stream error: %s", e, exc_info=True)
+        timing.trace_status = "error"
+        timing.error_message = str(e)
         yield _sse_event({
             "type": "error",
             "message": str(e),
             "conversation_id": conversation_id,
+            "trace_summary": timing.to_trace_summary(),
         })
+        latency_logger.end_request(conversation_id)
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
