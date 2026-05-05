@@ -229,6 +229,28 @@ async def startup_event():
 
     asyncio.create_task(_periodic_transcript_cleanup())
 
+    # Schedule trace TTL cleanup (hourly)
+    async def _periodic_trace_cleanup() -> None:
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                ttl_days = int(settings_service.get("tracing.retention_days") or 7)
+                from app.models import RequestTrace as RT
+                from datetime import datetime, timedelta
+                cutoff = datetime.utcnow() - timedelta(days=ttl_days)
+                db = SessionLocal()
+                try:
+                    removed = db.query(RT).filter(RT.created_at < cutoff).delete()
+                    db.commit()
+                    if removed:
+                        logger.info("Trace cleanup removed %d expired entries", removed)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("Trace cleanup failed: %s", e)
+
+    asyncio.create_task(_periodic_trace_cleanup())
+
     # Schedule expired memory cleanup (agent-injected memories have TTL)
     async def _periodic_memory_cleanup() -> None:
         await asyncio.sleep(60)
@@ -461,6 +483,15 @@ app.include_router(agents.router, prefix="/api/v0", tags=["agents"])
 from app.api import node_updates
 app.include_router(node_updates.router, prefix="/api/v0", tags=["node-updates"])
 
+# Include Bluetooth management router (scan, pair, disconnect via MQTT)
+from app.api import bluetooth
+app.include_router(bluetooth.router, prefix="/api/v0", tags=["bluetooth"])
+
+# Include request trace endpoints (admin + mobile)
+from app.api import traces as traces_api
+app.include_router(traces_api.admin_router, prefix="/api/v0/admin", tags=["traces-admin"])
+app.include_router(traces_api.mobile_router, prefix="/api/v0/mobile", tags=["traces-mobile"])
+
 # Include mobile chat, audio, node tools, and routine builder endpoints (JWT auth)
 from app.api import mobile_chat, mobile_audio, mobile_voice_profiles, node_tools, routine_builder
 app.include_router(mobile_chat.router, prefix="/api/v0/mobile", tags=["mobile-chat"])
@@ -490,6 +521,9 @@ async def start_conversation(
 ):
     """Start a new conversation and warm up the model with context."""
     timing = latency_logger.start_request(request.conversation_id, "warmup")
+    timing.source = "node"
+    timing.node_id = node_context_provider.node.node_id
+    timing.household_id = node_context_provider.household_id
     timing.checkpoint("auth_complete")
 
     try:
@@ -670,6 +704,10 @@ async def handle_voice(
     model_service: ModelService = Depends(get_model_service)
 ):
     timing = latency_logger.start_request(request.conversation_id, "voice_command")
+    timing.source = "node"
+    timing.node_id = node_context_provider.node.node_id
+    timing.household_id = node_context_provider.household_id
+    timing.user_command = request.voice_command
     timing.checkpoint("auth_complete")
     start_time = time.time()
 
@@ -829,6 +867,10 @@ async def handle_voice_stream(
       response — JSON body matching VoiceCommandResponse shape.
     """
     timing = latency_logger.start_request(request.conversation_id, "voice_command_stream")
+    timing.source = "node"
+    timing.node_id = node_context_provider.node.node_id
+    timing.household_id = node_context_provider.household_id
+    timing.user_command = request.voice_command
     timing.checkpoint("auth_complete")
     start_time = time.time()
 

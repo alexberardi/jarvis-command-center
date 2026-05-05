@@ -592,3 +592,82 @@ class AdapterProposal(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=False)
     decided_at = Column(DateTime, nullable=True)
+
+
+class BluetoothScanRequest(Base):
+    """Bluetooth scan request: mobile/voice → CC → MQTT → node → CC → mobile.
+
+    Lifecycle:
+    1. Mobile (or voice command) POSTs to request a scan (status=pending, expires_at=now+2min)
+    2. CC publishes MQTT to node's bluetooth-scan topic
+    3. Node runs bluetoothctl scan, POSTs results back
+    4. Mobile polls for results
+    """
+    __tablename__ = 'bluetooth_scan_requests'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    household_id = Column(String(255), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="pending")  # pending, completed, failed, expired
+    role = Column(String(20), nullable=False, default="source")  # source (speaker) or sink (audio input)
+    results_json = Column(Text, nullable=True)  # JSON array of discovered BT devices
+    device_count = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    source = Column(String(20), nullable=False, default="mobile")  # mobile or voice
+    user_id = Column(Integer, nullable=True)  # speaker user ID (if voice-triggered)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    node = relationship("Node", backref=backref("bluetooth_scan_requests", passive_deletes=True), passive_deletes=True)
+
+
+class BluetoothPairRequest(Base):
+    """Bluetooth pair request: mobile → CC → MQTT → node → CC → mobile.
+
+    Lifecycle:
+    1. Mobile POSTs with mac_address and role (status=pending, expires_at=now+2min)
+    2. CC publishes MQTT to node's bluetooth-pair topic
+    3. Node runs pair+connect+audio route, POSTs result back
+    4. Mobile polls for result
+    """
+    __tablename__ = 'bluetooth_pair_requests'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    household_id = Column(String(255), nullable=False, index=True)
+    mac_address = Column(String(17), nullable=False)  # XX:XX:XX:XX:XX:XX
+    role = Column(String(20), nullable=False, default="source")  # source or sink
+    status = Column(String(20), nullable=False, default="pending")  # pending, completed, failed, expired
+    device_name = Column(String(255), nullable=True)  # populated on success
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    node = relationship("Node", backref=backref("bluetooth_pair_requests", passive_deletes=True), passive_deletes=True)
+
+
+class RequestTrace(Base):
+    """Persisted request trace for the trace visualizer.
+
+    Each row captures the full service-to-service path of a single
+    voice or chat request, with per-hop timing stored as a JSON array
+    of span objects in ``spans_json``.
+    """
+    __tablename__ = 'request_traces'
+
+    id = Column(String(36), primary_key=True)
+    conversation_id = Column(String(255), nullable=False, index=True)
+    request_type = Column(String(20), nullable=False)   # warmup, voice_command, mobile_chat
+    source = Column(String(20), nullable=False)          # node, mobile
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='SET NULL'), nullable=True)
+    household_id = Column(String(255), nullable=True, index=True)
+    user_command = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, server_default="ok")
+    error_message = Column(Text, nullable=True)
+    total_duration_ms = Column(Float, nullable=False)
+    spans_json = Column(Text, nullable=False)            # JSON array of span objects
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)

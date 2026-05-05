@@ -553,7 +553,7 @@ class ToolExecutionEngine:
             # Call LLM — dual path: native tools vs text-based
             try:
                 _llm_start = _time.time()
-                with timing.measure(f"llm_call_iter_{iteration+1}") if timing else nullcontext():
+                with timing.measure(f"llm_call_iter_{iteration+1}", service="llm_proxy") if timing else nullcontext():
                     if use_native_tools:
                         # Native path: pass tools via API, no response_format constraint
                         response = await self.llm_client.chat_completion(
@@ -690,6 +690,18 @@ class ToolExecutionEngine:
                 "finish_reason": finish_reason,
             })
 
+            # Enrich the LLM call timing entry with token metadata
+            if timing:
+                llm_label = f"llm_call_iter_{iteration+1}"
+                for entry in reversed(timing.entries):
+                    if entry.label == llm_label:
+                        entry.metadata = {
+                            "prompt_tokens": _iter_prompt_tokens,
+                            "completion_tokens": _iter_completion_tokens,
+                            "finish_reason": finish_reason,
+                        }
+                        break
+
             # Add assistant message to history
             assistant_msg: Dict[str, Any] = {"role": "assistant", "content": raw_content}
             if tool_calls:
@@ -804,7 +816,13 @@ class ToolExecutionEngine:
                     logger.info("Processed date keys: %s", date_keys)
 
                 # Execute tools
-                with timing.measure(f"tool_exec_iter_{iteration+1}") if timing else nullcontext():
+                _tool_names_exec = [
+                    tc.get("function", {}).get("name", "?") for tc in tool_calls
+                ]
+                with timing.measure(
+                    f"tool_exec_iter_{iteration+1}",
+                    metadata={"tools": _tool_names_exec},
+                ) if timing else nullcontext():
                     server_results, client_calls = tool_executor.execute_tool_calls(
                         tool_calls, conversation_id=conversation_id, user_utterance=user_utterance
                     )
