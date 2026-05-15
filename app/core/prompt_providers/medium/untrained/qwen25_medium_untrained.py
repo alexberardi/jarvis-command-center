@@ -208,6 +208,44 @@ Tools:
             parsed = json.loads(cleaned)
             if isinstance(parsed, dict):
                 if "tool_calls" in parsed:
+                    # Already-Jarvis-JSON envelope. But the model occasionally
+                    # emits a *hybrid*: the envelope is correct (tool_calls is
+                    # an empty array, error is null) AND the actual call is
+                    # encoded as <tool_call>{...}</tool_call> XML *inside*
+                    # the `message` string. The step-1 regex above didn't
+                    # match because it scanned the whole stringified JSON
+                    # where the XML angle brackets are JSON-escaped in
+                    # message — search the unescaped `message` value
+                    # instead. Most common with tools whose schema is
+                    # large enough to destabilize the model's format
+                    # choice (e.g. Spotify's 4-param action+query+level+
+                    # state schema).
+                    existing_calls = parsed.get("tool_calls") or []
+                    if not existing_calls:
+                        message_text = parsed.get("message") or ""
+                        if isinstance(message_text, str) and "<tool_call>" in message_text:
+                            embedded: list[Dict[str, Any]] = []
+                            for match in _TOOL_CALL_TAG_RE.findall(message_text):
+                                try:
+                                    call_obj = json.loads(match.strip())
+                                except json.JSONDecodeError:
+                                    logger.warning(
+                                        "Failed to parse embedded tool_call JSON: %s",
+                                        match[:100],
+                                    )
+                                    continue
+                                args = call_obj.get("arguments", {})
+                                if isinstance(args, dict):
+                                    for key in _ARRAY_PARAMS:
+                                        if key in args and isinstance(args[key], str):
+                                            args[key] = [args[key]]
+                                embedded.append(call_obj)
+                            if embedded:
+                                return json.dumps({
+                                    "message": "",
+                                    "tool_calls": embedded,
+                                    "error": None,
+                                })
                     return None  # Already Jarvis JSON
                 # Bare tool call: {"name": "...", "arguments": {...}}
                 if "name" in parsed and "arguments" in parsed:
