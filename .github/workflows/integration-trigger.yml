@@ -29,6 +29,13 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           ORIGINATING_REPO: ${{ github.repository }}
         run: |
+          # linked_prs is a JSON-encoded map of cross-service PR dependencies,
+          # e.g. {"jarvis-llm-proxy-api": "coding-agent/issue-12-streaming"}.
+          # Empty {} default → the runner uses ghcr.io :dev images for the rest
+          # of the stack. The trigger plumbs this through but doesn't set it
+          # itself; multi-repo coding-agent runs can pass it explicitly via
+          # the workflow_dispatch path or by forking this trigger and adding
+          # logic to read it from the PR body / issue.
           gh api \
             --method POST \
             /repos/alexberardi/jarvis-node-setup/dispatches \
@@ -38,4 +45,5 @@ jobs:
             -f "client_payload[head_sha]=$HEAD_SHA" \
             -f "client_payload[head_ref]=$HEAD_REF" \
             -f "client_payload[originating_repo]=$ORIGINATING_REPO" \
-            -f "client_payload[qa_plan_comment_id]="
+            -f "client_payload[qa_plan_comment_id]=" \
+            -f "client_payload[linked_prs]={}"
