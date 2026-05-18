@@ -417,6 +417,7 @@ app/
 - Tests under `tests/` are unit; database tests under `tests/database/` need the docker harness.
 - Auth dependencies overridden via `dependency_overrides`.
 - LLM proxy calls mocked at `app.core.utils.rest_client.post` boundary — `main.py:31` imports it specifically for this reason.
+- **Cross-service integration tests.** `.github/workflows/integration-trigger.yml` fires a `repository_dispatch` to `jarvis-node-setup` on every PR. The receiver workflow there runs the integration suite against the PR's HEAD SHA and posts a `<!-- integration-test-results:v1 -->` comment + a `jarvis-integration` commit status back here. Requires the `INTEGRATION_DISPATCH_TOKEN` secret (fine-grained PAT, `contents:write` on `jarvis-node-setup`). Full design and ops guide: `jarvis-node-setup/docs/integration-tests.md`.
 
 ---
 
