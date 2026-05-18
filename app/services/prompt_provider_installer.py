@@ -1,8 +1,11 @@
 """Prompt provider installer — clone from GitHub, validate, install to CC.
 
 Community prompt providers are installed into
-app/core/prompt_providers/{size_tier}/{training_tier}/custom/{name}/
-and discovered at runtime by PromptProviderFactory via pkgutil.walk_packages.
+app/core/prompt_providers_custom/{size_tier}/{training_tier}/{name}/
+(a sibling of the built-in prompt_providers/ tree) and discovered at
+runtime by PromptProviderFactory via pkgutil.walk_packages over both roots.
+A single named docker volume mounts onto prompt_providers_custom/ without
+overlaying the built-ins.
 """
 
 import logging
@@ -16,7 +19,7 @@ from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 
 logger = logging.getLogger("uvicorn")
 
-PROVIDERS_BASE = Path(__file__).resolve().parents[1] / "core" / "prompt_providers"
+PROVIDERS_BASE = Path(__file__).resolve().parents[1] / "core" / "prompt_providers_custom"
 
 VALID_SIZE_TIERS = {"small", "medium", "large"}
 VALID_TRAINING_TIERS = {"untrained", "trained"}
@@ -97,7 +100,7 @@ def install_prompt_provider(github_repo_url: str, git_tag: str | None = None) ->
         package_name = manifest.get("name", provider_name.lower())
 
         # Install destination
-        install_dir = PROVIDERS_BASE / size_tier / training_tier / "custom" / package_name
+        install_dir = PROVIDERS_BASE / size_tier / training_tier / package_name
         if install_dir.exists():
             raise PromptProviderInstallError(
                 f"Provider already installed at {install_dir.relative_to(PROVIDERS_BASE)}"
@@ -137,7 +140,7 @@ def install_prompt_provider(github_repo_url: str, git_tag: str | None = None) ->
             )
 
         logger.info(
-            "Installed prompt provider: %s → %s/%s/custom/%s",
+            "Installed prompt provider: %s → %s/%s/%s",
             provider_name, size_tier, training_tier, package_name,
         )
 
@@ -169,7 +172,7 @@ def list_custom_providers() -> list[dict[str, Any]]:
 
     for size_tier in VALID_SIZE_TIERS:
         for training_tier in VALID_TRAINING_TIERS:
-            custom_dir = PROVIDERS_BASE / size_tier / training_tier / "custom"
+            custom_dir = PROVIDERS_BASE / size_tier / training_tier
             if not custom_dir.is_dir():
                 continue
             for pkg_dir in sorted(custom_dir.iterdir()):
@@ -194,7 +197,7 @@ def uninstall_prompt_provider(package_name: str) -> bool:
     """
     for size_tier in VALID_SIZE_TIERS:
         for training_tier in VALID_TRAINING_TIERS:
-            install_dir = PROVIDERS_BASE / size_tier / training_tier / "custom" / package_name
+            install_dir = PROVIDERS_BASE / size_tier / training_tier / package_name
             if install_dir.exists():
                 shutil.rmtree(install_dir)
                 logger.info("Uninstalled prompt provider: %s from %s/%s", package_name, size_tier, training_tier)
