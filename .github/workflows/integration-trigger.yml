@@ -1,0 +1,41 @@
+name: Integration Trigger
+
+# Fires a repository_dispatch at jarvis-node-setup when a PR opens or is
+# updated here. The receiver workflow (jarvis-node-setup/.github/workflows/
+# integration-runner.yml) runs the cross-service integration suite against
+# the PR's HEAD SHA and posts results back as a PR comment + check-run.
+#
+# Required secret:
+#   INTEGRATION_DISPATCH_TOKEN — fine-grained PAT scoped to
+#                                  `repository_dispatch:write` on
+#                                  alexberardi/jarvis-node-setup only.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Dispatch integration run
+        env:
+          GH_TOKEN: ${{ secrets.INTEGRATION_DISPATCH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          ORIGINATING_REPO: ${{ github.repository }}
+        run: |
+          gh api \
+            --method POST \
+            /repos/alexberardi/jarvis-node-setup/dispatches \
+            -f "event_type=pr-integration" \
+            -f "client_payload[service]=jarvis-command-center" \
+            -f "client_payload[pr_number]=$PR_NUMBER" \
+            -f "client_payload[head_sha]=$HEAD_SHA" \
+            -f "client_payload[head_ref]=$HEAD_REF" \
+            -f "client_payload[originating_repo]=$ORIGINATING_REPO" \
+            -f "client_payload[qa_plan_comment_id]="
