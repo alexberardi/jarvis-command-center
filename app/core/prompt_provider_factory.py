@@ -1,12 +1,14 @@
 """
 Prompt Provider Factory for Jarvis Voice Assistant.
 
-Discovers IJarvisPromptProvider implementations by scanning
-app/core/prompt_providers/ recursively, then falls back to legacy
-IModelInterface classes in app/core/models/ for backward compatibility.
+Discovers IJarvisPromptProvider implementations by scanning two roots:
+  1. app/core/prompt_providers/ — built-in providers shipped with the image
+  2. app/core/prompt_providers_custom/ — user-installed providers under a
+     named docker volume so they survive image upgrades
 
-Uses the same pkgutil.walk_packages + inspect.getmembers pattern as
-ModelFactory but targets the prompt_providers package first.
+Built-ins are scanned first; on the first match create_provider returns.
+For get_available_providers, both roots are walked and results are
+deduplicated by provider name.
 """
 
 import importlib
@@ -19,6 +21,12 @@ from typing import Any, Dict, List, Optional
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 
 logger = logging.getLogger("uvicorn")
+
+# (relative-dir-name, importlib-prefix) — scanned in this order.
+_PROVIDER_ROOTS: tuple[tuple[str, str], ...] = (
+    ("prompt_providers", "app.core.prompt_providers."),
+    ("prompt_providers_custom", "app.core.prompt_providers_custom."),
+)
 
 
 class PromptProviderFactory:
@@ -71,7 +79,9 @@ class PromptProviderFactory:
     @classmethod
     def _scan_prompt_providers(cls, target_name: str) -> Optional[IJarvisPromptProvider]:
         """
-        Scan app/core/prompt_providers/ for a matching provider.
+        Scan both prompt_providers roots for a matching provider.
+
+        Built-ins are scanned first; first match wins.
 
         Args:
             target_name: Name to match (case-insensitive).
@@ -79,66 +89,68 @@ class PromptProviderFactory:
         Returns:
             Matching provider instance, or None.
         """
-        providers_dir = os.path.join(os.path.dirname(__file__), "prompt_providers")
-        if not os.path.exists(providers_dir):
-            return None
-
-        prefix = "app.core.prompt_providers."
         upper_target = target_name.upper()
+        core_dir = os.path.dirname(__file__)
 
-        for _finder, module_name, _ispkg in pkgutil.walk_packages(
-            path=[providers_dir], prefix=prefix
-        ):
-            try:
-                imported = importlib.import_module(module_name)
-            except Exception as e:
-                logger.debug("Failed to import %s: %s", module_name, e)
+        for dir_name, prefix in _PROVIDER_ROOTS:
+            providers_dir = os.path.join(core_dir, dir_name)
+            if not os.path.exists(providers_dir):
                 continue
 
-            for _class_name, klass in inspect.getmembers(imported, inspect.isclass):
-                if not (issubclass(klass, IJarvisPromptProvider) and klass is not IJarvisPromptProvider):
-                    continue
+            for _finder, module_name, _ispkg in pkgutil.walk_packages(
+                path=[providers_dir], prefix=prefix
+            ):
                 try:
-                    instance = klass()
-                    if instance.name.upper() == upper_target:
-                        return instance
+                    imported = importlib.import_module(module_name)
                 except Exception as e:
-                    logger.debug("Failed to instantiate %s: %s", klass.__name__, e)
+                    logger.debug("Failed to import %s: %s", module_name, e)
+                    continue
+
+                for _class_name, klass in inspect.getmembers(imported, inspect.isclass):
+                    if not (issubclass(klass, IJarvisPromptProvider) and klass is not IJarvisPromptProvider):
+                        continue
+                    try:
+                        instance = klass()
+                        if instance.name.upper() == upper_target:
+                            return instance
+                    except Exception as e:
+                        logger.debug("Failed to instantiate %s: %s", klass.__name__, e)
 
         return None
 
     @classmethod
     def get_available_providers(cls) -> List[str]:
         """
-        List all discoverable prompt provider names.
+        List all discoverable prompt provider names across both roots.
 
         Returns:
-            Sorted list of provider name strings.
+            Sorted list of provider name strings, deduplicated by name.
         """
         names: list[str] = []
-        providers_dir = os.path.join(os.path.dirname(__file__), "prompt_providers")
-        if not os.path.exists(providers_dir):
-            return names
+        core_dir = os.path.dirname(__file__)
 
-        prefix = "app.core.prompt_providers."
-
-        for _finder, module_name, _ispkg in pkgutil.walk_packages(
-            path=[providers_dir], prefix=prefix
-        ):
-            try:
-                imported = importlib.import_module(module_name)
-            except (ImportError, AttributeError):
+        for dir_name, prefix in _PROVIDER_ROOTS:
+            providers_dir = os.path.join(core_dir, dir_name)
+            if not os.path.exists(providers_dir):
                 continue
 
-            for _class_name, klass in inspect.getmembers(imported, inspect.isclass):
-                if not (issubclass(klass, IJarvisPromptProvider) and klass is not IJarvisPromptProvider):
-                    continue
+            for _finder, module_name, _ispkg in pkgutil.walk_packages(
+                path=[providers_dir], prefix=prefix
+            ):
                 try:
-                    instance = klass()
-                    if instance.name not in names:
-                        names.append(instance.name)
-                except (TypeError, ValueError):
-                    pass
+                    imported = importlib.import_module(module_name)
+                except (ImportError, AttributeError):
+                    continue
+
+                for _class_name, klass in inspect.getmembers(imported, inspect.isclass):
+                    if not (issubclass(klass, IJarvisPromptProvider) and klass is not IJarvisPromptProvider):
+                        continue
+                    try:
+                        instance = klass()
+                        if instance.name not in names:
+                            names.append(instance.name)
+                    except (TypeError, ValueError):
+                        pass
 
         return sorted(names)
 
