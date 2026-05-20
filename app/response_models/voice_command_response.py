@@ -9,6 +9,7 @@ class StopReason(str, Enum):
     TOOL_CALLS = "tool_calls"
     VALIDATION_REQUIRED = "validation_required"
     ERROR = "error"
+    NOT_FOR_ME = "not_for_me"
 
 
 class VoiceCommandError(BaseModel):

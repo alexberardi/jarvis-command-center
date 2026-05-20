@@ -15,6 +15,7 @@ from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Set
 
 from app.core.conversation_cache import conversation_cache
+from app.core.not_for_me import contains_sentinel
 from app.core.tts_text import clean_for_tts
 from app.services.settings_service import get_settings_service
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
@@ -474,6 +475,17 @@ class ConversationHandler:
             result = await self._format_tool_result_text_mode(
                 conversation_id, messages, tool_results_for_format
             )
+
+        # If the LLM emitted the <not_for_me/> sentinel, the user wasn't
+        # addressing Jarvis (overheard conversation, TV audio, etc.). Convert
+        # to a silent abort so the node skips TTS and exits the follow-up
+        # loop immediately rather than reading the LLM's polite refusal.
+        if contains_sentinel(result.get("assistant_message")):
+            logger.info("Not-for-me sentinel detected — converting to silent abort")
+            result = {
+                "stop_reason": "not_for_me",
+                "assistant_message": "",
+            }
 
         # Update cache and return
         conversation_cache.update_messages(conversation_id, messages)
