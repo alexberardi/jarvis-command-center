@@ -66,6 +66,24 @@ FALLBACK_BRIEF_REPLY: str = (
     "greetings, or jokes that have NO matching {terminology}."
 )
 
+NOT_FOR_ME_INSTRUCTION: str = (
+    "False-wake guard (use RARELY — when in doubt, respond normally). "
+    "Default: every short utterance is a real command directed at you, even without "
+    "greetings or your name. Imperatives (\"turn on the lamp\", \"set a timer\", "
+    "\"play music\"), questions (\"what's the weather?\", \"weather?\"), and "
+    "conversational replies (\"yes\", \"no\", \"thanks\") are ALWAYS for you.\n"
+    "ONLY emit <not_for_me/> (alone — no prose, no tool call) when BOTH conditions hold:\n"
+    "  (a) the input contains NO imperative, NO question, NO request, NO greeting, AND\n"
+    "  (b) at least one strong ambient-speech signal is unmistakable:\n"
+    "      - third-person reference to you by name (\"...I asked Jarvis earlier...\", "
+    "\"Jarvis told her...\"), OR\n"
+    "      - clearly a snippet of a conversation between people about an unrelated "
+    "topic (\"yeah but then she said\", \"...so anyway, the whole thing was crazy\"), OR\n"
+    "      - clearly narration of past events with no addressee.\n"
+    "If you're not sure both (a) and (b) are met, RESPOND NORMALLY. A wrongly-suppressed "
+    "command is far worse than answering one stray utterance."
+)
+
 FALLBACK_BRIEF_REPLY_HERMES: str = (
     "For final answers with no tool needed, respond with a brief spoken reply."
 )
