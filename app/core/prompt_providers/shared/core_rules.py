@@ -67,21 +67,31 @@ FALLBACK_BRIEF_REPLY: str = (
 )
 
 NOT_FOR_ME_INSTRUCTION: str = (
-    "False-wake guard (use RARELY — when in doubt, respond normally). "
-    "Default: every short utterance is a real command directed at you, even without "
-    "greetings or your name. Imperatives (\"turn on the lamp\", \"set a timer\", "
-    "\"play music\"), questions (\"what's the weather?\", \"weather?\"), and "
-    "conversational replies (\"yes\", \"no\", \"thanks\") are ALWAYS for you.\n"
-    "ONLY emit <not_for_me/> (alone — no prose, no tool call) when BOTH conditions hold:\n"
-    "  (a) the input contains NO imperative, NO question, NO request, NO greeting, AND\n"
-    "  (b) at least one strong ambient-speech signal is unmistakable:\n"
-    "      - third-person reference to you by name (\"...I asked Jarvis earlier...\", "
-    "\"Jarvis told her...\"), OR\n"
-    "      - clearly a snippet of a conversation between people about an unrelated "
-    "topic (\"yeah but then she said\", \"...so anyway, the whole thing was crazy\"), OR\n"
-    "      - clearly narration of past events with no addressee.\n"
-    "If you're not sure both (a) and (b) are met, RESPOND NORMALLY. A wrongly-suppressed "
-    "command is far worse than answering one stray utterance."
+    "DIRECTION CHECK. The mic wakes on a wake-word, but a fraction of wakes "
+    "are false — TV audio, two people talking, a phone call in the room. "
+    "You only see the transcript, so decide whether it was directed at you.\n"
+    "\n"
+    "RESPOND NORMALLY (the common case) when the utterance reads like someone "
+    "talking TO you. Be willing to chat warmly — you do not need a tool for "
+    "every reply. Examples that ALWAYS get a response:\n"
+    '  • Commands or requests: "turn on the lamp", "set a timer for five minutes", "play music"\n'
+    '  • Questions: "what\'s the weather?", "weather?", "what time is it"\n'
+    '  • Greetings or check-ins: "hey jarvis", "good morning", "hey what\'s up"\n'
+    '  • Casual chit-chat or feelings: "I\'m so tired", "any cool news today", "ugh, long day"\n'
+    '  • Replies to your last turn: "yes", "no", "thanks", "the second one"\n'
+    "\n"
+    "Emit <not_for_me/> ALONE (no prose, no tool call, the whole response) ONLY "
+    "when the transcript clearly reads like overheard speech AND no part of it is "
+    "plausibly addressed to you. Mid-conversation snippets and overheard turns "
+    "are the canonical cases:\n"
+    '  • Mid-sentence snippet: "yeah but then she said", "...so anyway the whole thing was crazy", "okay and then we left"\n'
+    '  • Addressed to a named person other than you: "hey Sarah, did you finish that?", "mom where\'s the remote"\n'
+    '  • Third-person mention of you: "I asked Jarvis earlier", "Jarvis told her to do that"\n'
+    '  • Narration of past events with no addressee: "so I was telling him about that day"\n'
+    '  • Pure mumble / ambient filler: "yeah ok yeah", "uh huh mm-hmm"\n'
+    "\n"
+    "When in doubt — a short utterance that could go either way — respond normally. "
+    "A stray answer is mildly awkward; a silenced real command is a worse bug."
 )
 
 FALLBACK_BRIEF_REPLY_HERMES: str = (

@@ -34,3 +34,10 @@ class VoiceCommandRequest(BaseModel):
     voice_command: str
     conversation_id: str  # Required in new architecture
     speaker_user_id: Optional[int] = None  # Actual speaker from STT (for mismatch detection with warmup)
+    # Seconds of speech-like audio detected in the fixed window immediately
+    # before the wake word fired. The node computes this from a rolling RMS
+    # ring buffer kept alongside the wake-detect loop. Strong signal for
+    # not_for_me decisions: ~0s before wake → likely directed; multiple
+    # seconds → wake fired mid-conversation, lean toward silent abort.
+    # None when the node didn't report it (old client, alternate entry path).
+    pre_wake_speech_seconds: Optional[float] = None

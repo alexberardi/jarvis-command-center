@@ -15,6 +15,7 @@ from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Set
 
 from app.core.conversation_cache import conversation_cache
+from app.core.direction_hint import build_direction_hint
 from app.core.not_for_me import contains_sentinel
 from app.core.tts_text import clean_for_tts
 from app.services.settings_service import get_settings_service
@@ -315,6 +316,7 @@ class ConversationHandler:
         voice_command: str,
         conversation_id: str,
         speaker_user_id: int | None = None,
+        pre_wake_speech_seconds: float | None = None,
     ) -> Dict[str, Any]:
         """
         Process a voice command using tool-based architecture.
@@ -324,6 +326,10 @@ class ConversationHandler:
             conversation_id: Conversation ID
             speaker_user_id: Actual speaker from STT (for mismatch detection
                             when warmup used a cached/predicted speaker ID)
+            pre_wake_speech_seconds: Optional pre-wake VAD signal from the node
+                            (seconds of speech detected in the fixed window
+                            before wake fired). Surfaced to the LLM as a
+                            direction hint for the not_for_me decision.
 
         Returns:
             Response dict with:
@@ -432,9 +438,18 @@ class ConversationHandler:
             self.prompt_provider.user_message_suffix
             if self.prompt_provider else ""
         )
+        direction_hint: str | None = build_direction_hint(pre_wake_speech_seconds)
+        if direction_hint:
+            logger.info(
+                "🎯 Direction hint applied | pre_wake_speech_seconds=%.2f | hint=%s",
+                pre_wake_speech_seconds or 0.0,
+                direction_hint,
+            )
         user_content: str = voice_command
+        if direction_hint:
+            user_content = f"{user_content}\n\n{direction_hint}"
         if agent_context:
-            user_content = f"{voice_command}\n\n{agent_context}"
+            user_content = f"{user_content}\n\n{agent_context}"
         if suffix:
             user_content = f"{user_content}\n{suffix}"
         messages.append({"role": "user", "content": user_content})
@@ -481,7 +496,13 @@ class ConversationHandler:
         # to a silent abort so the node skips TTS and exits the follow-up
         # loop immediately rather than reading the LLM's polite refusal.
         if contains_sentinel(result.get("assistant_message")):
-            logger.info("Not-for-me sentinel detected — converting to silent abort")
+            raw_msg = result.get("assistant_message") or ""
+            logger.info(
+                "🚫 Not-for-me sentinel detected — silent abort | "
+                "transcript=%r | raw_assistant=%r",
+                voice_command,
+                raw_msg[:160],
+            )
             result = {
                 "stop_reason": "not_for_me",
                 "assistant_message": "",
@@ -503,6 +524,7 @@ class ConversationHandler:
         voice_command: str,
         tts_client,
         speaker_user_id: int | None = None,
+        pre_wake_speech_seconds: float | None = None,
     ):
         """Attempt to stream LLM tokens directly to TTS for eligible queries.
 
@@ -584,7 +606,17 @@ class ConversationHandler:
             self.prompt_provider.user_message_suffix
             if self.prompt_provider else ""
         )
-        user_content: str = f"{voice_command}\n{suffix}" if suffix else voice_command
+        direction_hint: str | None = build_direction_hint(pre_wake_speech_seconds)
+        if direction_hint:
+            logger.info(
+                "🎯 Direction hint applied (stream path) | pre_wake_speech_seconds=%.2f",
+                pre_wake_speech_seconds or 0.0,
+            )
+        user_content: str = voice_command
+        if direction_hint:
+            user_content = f"{user_content}\n\n{direction_hint}"
+        if suffix:
+            user_content = f"{user_content}\n{suffix}"
         messages.append({"role": "user", "content": user_content})
 
         # Override: tell the LLM to respond in plain text (no JSON, no tools)
@@ -620,17 +652,65 @@ class ConversationHandler:
         # Qwen3 and get spoken as "think slash think" if we don't strip.
         _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
+        # Open the LLM stream up-front so we can peek for the <not_for_me/>
+        # sentinel before committing tokens to TTS. process_voice_command_with_tools
+        # catches the sentinel after the blocking call, but the fast path
+        # has no such gate — without this pre-check, an ambient utterance
+        # the router mis-classified as conversational would get its sentinel
+        # TTS'd token-by-token. On detection we return None; the caller
+        # falls through to the blocking path which repeats the (cheap)
+        # LLM call and converts to a 202 JSON not_for_me.
+        llm_stream = self.llm_client.chat_completion_stream(
+            messages=messages,
+            adapter_settings=adapter_settings,
+            max_tokens=512,
+        )
+        pre_buffer_events: list = []
+        pre_buffer_text = ""
+        # 80 chars > sentinel length plus think-block padding.
+        SENTINEL_PRECHECK_CHARS = 80
+        try:
+            async for event in llm_stream:
+                pre_buffer_events.append(event)
+                if event.get("done"):
+                    break
+                delta = event.get("delta", "")
+                if not delta:
+                    continue
+                pre_buffer_text += delta
+                scan_text = _THINK_BLOCK_RE.sub("", pre_buffer_text)
+                if contains_sentinel(scan_text):
+                    logger.info(
+                        "🚫 Streaming path: <not_for_me/> in pre-buffer — "
+                        "falling through to blocking path (buf=%r)",
+                        pre_buffer_text[:120],
+                    )
+                    return None
+                # Partial sentinel still being emitted — wait for closing `>`.
+                if "<not_for_me" in scan_text.lower():
+                    continue
+                # Wait through an open <think> block — can't decide yet.
+                if "<think>" in pre_buffer_text and "</think>" not in pre_buffer_text:
+                    continue
+                if len(scan_text) >= SENTINEL_PRECHECK_CHARS:
+                    break
+        except Exception as e:
+            logger.error("Streaming pre-buffer LLM error: %s", e)
+            return None
+
+        async def _chain_events(buffered, remaining):
+            for ev in buffered:
+                yield ev
+            async for ev in remaining:
+                yield ev
+
         async def _audio_generator():
             token_buffer = ""
             full_response = ""
             sentences_sent = 0
 
             try:
-                async for event in self.llm_client.chat_completion_stream(
-                    messages=messages,
-                    adapter_settings=adapter_settings,
-                    max_tokens=512,
-                ):
+                async for event in _chain_events(pre_buffer_events, llm_stream):
                     if event.get("done"):
                         break
 
@@ -713,6 +793,7 @@ class ConversationHandler:
         voice_command: str,
         tts_client,
         speaker_user_id: int | None = None,
+        pre_wake_speech_seconds: float | None = None,
     ):
         """Stream LLM → TTS for commands that need server-side tool execution.
 
@@ -820,7 +901,17 @@ class ConversationHandler:
 
         # Append user message
         suffix = self.prompt_provider.user_message_suffix or ""
-        user_content = f"{voice_command}\n{suffix}" if suffix else voice_command
+        direction_hint: str | None = build_direction_hint(pre_wake_speech_seconds)
+        if direction_hint:
+            logger.info(
+                "🎯 Direction hint applied (tool-stream path) | pre_wake_speech_seconds=%.2f",
+                pre_wake_speech_seconds or 0.0,
+            )
+        user_content = voice_command
+        if direction_hint:
+            user_content = f"{user_content}\n\n{direction_hint}"
+        if suffix:
+            user_content = f"{user_content}\n{suffix}"
         messages.append({"role": "user", "content": user_content})
 
         # === Iter 1: blocking tool call decision ===
