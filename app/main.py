@@ -25,7 +25,7 @@ from app.core.malformed_json_extractor import MalformedJsonExtractorService
 from app.core.conversation_cache import conversation_cache
 from app.core.utils.latency_logger import latency_logger
 from . import admin, chat, date_context, node_settings, provisioning
-from app.api import media, node_commands, test_commands
+from app.api import ambient_noise, media, node_commands, test_commands
 from app.deps import verify_api_key, get_model_service
 from app.core.model_service import ModelService
 from app.core.utils.rest_client import post  # For test mocking compatibility
@@ -270,19 +270,23 @@ async def startup_event():
 
     asyncio.create_task(_periodic_memory_cleanup())
 
-    # Node-update task sweeper — fails any update task that's still not
-    # succeeded NODE_TASK_TIMEOUT after creation. Covers the full failure
-    # surface:
-    #   - pending:    node never came back to claim the task (offline)
-    #   - dispatched: node picked it up but installer died before first
-    #                 progress heartbeat
-    #   - in_progress: installer died silently mid-run (e.g. OOM on Pi Zero)
-    # Threshold is by created_at so that noisy heartbeats can't indefinitely
-    # refresh a stuck task — reconcile_open_task no longer bumps updated_at
-    # on no-progress heartbeats either, but created_at is the hard ceiling
-    # regardless.
+    # Node-update task sweeper — fails any update task that's clearly dead.
+    # Two thresholds:
+    #   - ANY_STATE_CEILING (created_at): 15 min outer ceiling regardless
+    #     of state. Catches pending tasks for offline nodes and dispatched
+    #     tasks whose installer never started reporting.
+    #   - IN_PROGRESS_NO_PROGRESS (updated_at, in_progress only): 10 min
+    #     since the last state transition. reconcile_open_task deliberately
+    #     does NOT bump updated_at on heartbeats that still report the OLD
+    #     version, so a stuck in_progress task ages out fast even if the
+    #     node keeps heartbeating.
+    # Install.sh on a Pi Zero typically finishes in 3-6 min; 10 min in
+    # in_progress and 15 min total are both well above that.
     from datetime import datetime, timedelta
-    NODE_TASK_TIMEOUT = timedelta(minutes=30)
+    from sqlalchemy import and_, or_
+
+    ANY_STATE_CEILING = timedelta(minutes=15)
+    IN_PROGRESS_NO_PROGRESS = timedelta(minutes=10)
 
     async def _periodic_node_task_timeout():
         while True:
@@ -292,12 +296,18 @@ async def startup_event():
                 from app.models import NodeTask
                 db = SessionLocal()
                 try:
-                    cutoff = datetime.utcnow() - NODE_TASK_TIMEOUT
+                    now = datetime.utcnow()
                     stale = (
                         db.query(NodeTask)
                         .filter(
                             NodeTask.state.in_(["pending", "dispatched", "in_progress"]),
-                            NodeTask.created_at < cutoff,
+                            or_(
+                                NodeTask.created_at < now - ANY_STATE_CEILING,
+                                and_(
+                                    NodeTask.state == "in_progress",
+                                    NodeTask.updated_at < now - IN_PROGRESS_NO_PROGRESS,
+                                ),
+                            ),
                         )
                         .all()
                     )
@@ -307,8 +317,8 @@ async def startup_event():
                             task.error_message
                             or f"Timeout: no heartbeat confirming {task.target_version}"
                         )
-                        task.finished_at = datetime.utcnow()
-                        task.updated_at = datetime.utcnow()
+                        task.finished_at = now
+                        task.updated_at = now
                     if stale:
                         db.commit()
                         logger.info("Marked %d stale node update tasks as failed", len(stale))
@@ -437,6 +447,9 @@ app.include_router(media.router, prefix="/api/v0", tags=["media"])
 
 # Include node commands router
 app.include_router(node_commands.router, prefix="/api/v0", tags=["node-commands"])
+
+# Include ambient-noise calibration router (mobile-triggered, node-fulfilled)
+app.include_router(ambient_noise.router, prefix="/api/v0", tags=["ambient-noise"])
 
 # Include test commands router (app-to-app auth)
 app.include_router(test_commands.router, prefix="/api/v0", tags=["testing"])

@@ -148,6 +148,41 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
     return task
 
 
+@router.post(
+    "/nodes/{node_id}/tasks/{task_id}/cancel",
+    response_model=NodeTaskResponse,
+    dependencies=[Depends(verify_user_jwt)],
+)
+def cancel_node_task(
+    node_id: str,
+    task_id: str,
+    db: Session = Depends(get_db),
+):
+    """Manually cancel an open node task.
+
+    The sweeper already times out stale tasks, but waiting 10-15 min is
+    bad UX when the user knows the install is dead. This lets the mobile
+    "Cancel" button immediately mark the task ``failed`` so a follow-up
+    update request isn't rejected with 409.
+    """
+    task = (
+        db.query(NodeTask)
+        .filter(NodeTask.id == task_id, NodeTask.node_id == node_id)
+        .first()
+    )
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if task.state in ("success", "failed"):
+        raise HTTPException(409, f"Task is already {task.state}")
+    task.state = "failed"
+    task.error_message = "Cancelled by user"
+    task.finished_at = datetime.utcnow()
+    task.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(task)
+    return task
+
+
 @router.get(
     "/nodes/{node_id}/tasks",
     response_model=list[NodeTaskResponse],
