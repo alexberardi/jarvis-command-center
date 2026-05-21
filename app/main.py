@@ -724,7 +724,8 @@ async def handle_voice(
         with timing.measure("process_voice_command_with_tools"):
             result = await model_service.process_voice_command_with_tools(
                 voice_command=request.voice_command,
-                conversation_id=request.conversation_id
+                conversation_id=request.conversation_id,
+                pre_wake_speech_seconds=request.pre_wake_speech_seconds,
             )
 
         # Build response based on stop_reason
@@ -903,6 +904,7 @@ async def handle_voice_stream(
             voice_command=request.voice_command,
             tts_client=tts_client,
             speaker_user_id=request.speaker_user_id,
+            pre_wake_speech_seconds=request.pre_wake_speech_seconds,
         )
         if streaming_audio is not None:
             try:
@@ -937,6 +939,7 @@ async def handle_voice_stream(
             voice_command=request.voice_command,
             tts_client=tts_client,
             speaker_user_id=request.speaker_user_id,
+            pre_wake_speech_seconds=request.pre_wake_speech_seconds,
         )
         if streaming_audio is not None:
             try:
@@ -966,6 +969,7 @@ async def handle_voice_stream(
                 voice_command=request.voice_command,
                 conversation_id=request.conversation_id,
                 speaker_user_id=request.speaker_user_id,
+                pre_wake_speech_seconds=request.pre_wake_speech_seconds,
             )
 
         stop_reason = result.get("stop_reason", "complete")

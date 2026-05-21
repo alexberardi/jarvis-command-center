@@ -288,6 +288,7 @@ class ModelService:
         voice_command: str,
         conversation_id: str,
         speaker_user_id: int | None = None,
+        pre_wake_speech_seconds: float | None = None,
     ) -> Dict[str, Any]:
         """
         Process a voice command using tool-based architecture.
@@ -297,6 +298,9 @@ class ModelService:
             conversation_id: Conversation ID
             speaker_user_id: Actual speaker from STT (for mismatch detection
                             when warmup used a cached/predicted speaker ID)
+            pre_wake_speech_seconds: Optional pre-wake VAD signal from the node
+                (seconds of speech detected just before wake fired). Used as
+                a direction hint for the LLM's not_for_me decision.
 
         Returns:
             Response dict with:
@@ -311,6 +315,7 @@ class ModelService:
             voice_command=voice_command,
             conversation_id=conversation_id,
             speaker_user_id=speaker_user_id,
+            pre_wake_speech_seconds=pre_wake_speech_seconds,
         )
 
     async def try_stream_voice_response(
@@ -319,6 +324,7 @@ class ModelService:
         voice_command: str,
         tts_client,
         speaker_user_id: int | None = None,
+        pre_wake_speech_seconds: float | None = None,
     ):
         """Attempt router-gated streaming LLM → TTS.
 
@@ -330,6 +336,7 @@ class ModelService:
             voice_command=voice_command,
             tts_client=tts_client,
             speaker_user_id=speaker_user_id,
+            pre_wake_speech_seconds=pre_wake_speech_seconds,
         )
 
     async def try_stream_voice_response_with_tools(
@@ -338,6 +345,7 @@ class ModelService:
         voice_command: str,
         tts_client,
         speaker_user_id: int | None = None,
+        pre_wake_speech_seconds: float | None = None,
     ):
         """Attempt streaming LLM → TTS for commands needing server-side tools.
 
@@ -353,6 +361,7 @@ class ModelService:
             voice_command=voice_command,
             tts_client=tts_client,
             speaker_user_id=speaker_user_id,
+            pre_wake_speech_seconds=pre_wake_speech_seconds,
         )
 
     async def try_stream_continue_with_tool_results(
