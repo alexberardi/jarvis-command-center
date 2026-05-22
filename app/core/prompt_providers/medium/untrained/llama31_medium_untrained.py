@@ -74,9 +74,33 @@ _XML_WRAPPED_CALL_RE = re.compile(
 _SPLIT_TAG_CALL_RE = re.compile(
     r"<function>(\w+)</function>\s*(\{.*?\})", re.DOTALL
 )
+# No-args variant: <function=name /> or <function=name/> — self-closing tag
+# with no arguments. Valid when the called tool has no required parameters
+# (e.g. tell_joke with optional topic). Without this, the model's emitted
+# tag falls through to plain-text wrapping and gets TTS'd to the user.
+_FUNCTION_CALL_NOARGS_RE = re.compile(
+    r"<function[=>](\w+)\s*/>", re.DOTALL
+)
 
 # Parameters that are always arrays — normalize string values to single-element lists
 _ARRAY_PARAMS = frozenset({"resolved_datetimes"})
+
+# Strip patterns for sanitize_text — remove function-call scaffolding that
+# leaks into post-tool follow-up prose. Small models (3B) hallucinate a
+# second tool call inside the natural-language summary; if it isn't scrubbed,
+# the raw <function=...>{...}</function> text reaches the user / TTS.
+_STRIP_FUNCTION_CLOSED_RE = re.compile(
+    r"<function[^>]*>.*?</?\s*function>", re.DOTALL
+)
+_STRIP_FUNCTION_UNCLOSED_RE = re.compile(
+    r"<function[^>]*>\s*\{.*", re.DOTALL
+)
+_STRIP_SPLIT_TAG_RE = re.compile(
+    r"<function>\w+</function>\s*\{.*?\}", re.DOTALL
+)
+_STRIP_FUNCTION_NOARGS_RE = re.compile(
+    r"<function[^>/]*\s*/>", re.DOTALL
+)
 
 
 class Llama31MediumUntrained(IJarvisPromptProvider):
@@ -248,6 +272,13 @@ Tools:
             raw_matches = _XML_WRAPPED_CALL_RE.findall(cleaned)
             function_matches = [(n, a) for (n, a) in raw_matches if n != "function"]
 
+        # No-args self-closing: <function=name /> — pair the name with an
+        # empty JSON object so the existing arg-parsing loop yields {}.
+        if not function_matches:
+            noargs_names = _FUNCTION_CALL_NOARGS_RE.findall(cleaned)
+            if noargs_names:
+                function_matches = [(name, "{}") for name in noargs_names]
+
         if function_matches:
             parsed_calls: list[Dict[str, Any]] = []
             for func_name, args_str in function_matches:
@@ -324,6 +355,20 @@ Tools:
             })
 
         return None
+
+    def sanitize_text(self, text: str) -> str:
+        """Strip Llama-style <function=...> tags from user-facing prose.
+
+        Small models (3.2 3B) regularly hallucinate a second tool call
+        inside post-tool follow-up summaries. The conversation_handler
+        runs this on every formatted response, so model-specific scaffolding
+        is scrubbed before TTS / chat rendering.
+        """
+        cleaned = _STRIP_FUNCTION_CLOSED_RE.sub("", text)
+        cleaned = _STRIP_SPLIT_TAG_RE.sub("", cleaned)
+        cleaned = _STRIP_FUNCTION_UNCLOSED_RE.sub("", cleaned)
+        cleaned = _STRIP_FUNCTION_NOARGS_RE.sub("", cleaned)
+        return cleaned.strip()
 
     def build_training_system_prompt(self) -> str:
         """System message for training — matches Llama 3.1's <function=name> format."""
