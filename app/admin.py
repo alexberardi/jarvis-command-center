@@ -162,7 +162,7 @@ def _register_node_with_auth(
                     "node_id": node_id,
                     "household_id": household_id,
                     "name": name,
-                    "services": [],  # command-center is auto-added by jarvis-auth
+                    "services": ["jarvis-logs"],
                 },
             )
     except httpx.RequestError as exc:
