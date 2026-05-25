@@ -151,6 +151,42 @@ def update_node_config(
     return SendCommandResponse(status="sent", request_id=request_id)
 
 
+class LedPreviewRequest(BaseModel):
+    """Briefly show ``pattern`` on the node's LED chain, then auto-revert."""
+    pattern: str
+    duration_seconds: float = 3.0
+
+
+@router.post(
+    "/nodes/{node_id}/led/preview",
+    response_model=SendCommandResponse,
+)
+def preview_led_pattern(
+    node_id: str,
+    body: LedPreviewRequest,
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+) -> SendCommandResponse:
+    """Preview an LED pattern on the node, then auto-revert (JWT auth).
+
+    Drives the Test-LEDs picker on the mobile Hardware tab. Mirrors
+    ``update_node_config``: publishes an MQTT command, the node's
+    ``handle_preview_led_pattern`` handler (mqtt_tts_listener) flashes
+    the pattern for ``duration_seconds`` and reverts to its stable
+    state. No persisted change.
+
+    Endpoint was missing in v0.1.x — the mobile app would hit 404 when
+    tapping any LED-state chip even though brightness/toggle worked
+    (those went through the existing update_node_config route).
+    """
+    service = get_node_command_service()
+    request_id = service.publish_command(
+        node_id,
+        "preview_led_pattern",
+        {"pattern": body.pattern, "duration_seconds": body.duration_seconds},
+    )
+    return SendCommandResponse(status="sent", request_id=request_id)
+
+
 @router.post(
     "/commands/{request_id}/verify",
     response_model=VerifyResponse,
