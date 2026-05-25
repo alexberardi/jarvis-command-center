@@ -161,6 +161,20 @@ class IJarvisPromptProvider(ABC):
         return ""
 
     @property
+    def think_delimiters(self) -> tuple[str, str]:
+        """Open/close markers wrapping the model's chain-of-thought output.
+
+        Streaming code uses these to strip complete think spans before TTS,
+        pause sentence emission while inside an unclosed span, and skip
+        think content during sentinel pre-checks.
+
+        Default ``("<think>", "</think>")`` matches Qwen3-style thinking tokens.
+        Override in providers whose thinking format differs (e.g. Llama 3.3
+        thinking variants emit ``[[[thinking start]]] ... [[[thinking end]]]``).
+        """
+        return ("<think>", "</think>")
+
+    @property
     def lazy_tool_loading(self) -> bool:
         """Whether this provider uses lazy tool loading.
 
