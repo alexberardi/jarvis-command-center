@@ -208,7 +208,8 @@ class TestLlama31MediumUntrainedPrompt:
         )
         assert '"get_weather"' in prompt
         assert '"set_timer"' in prompt
-        assert '"type": "function"' in prompt
+        # Tool JSON is compact-dumped (no whitespace) for prompt-size reasons.
+        assert '"type":"function"' in prompt
 
     def test_prompt_includes_tools_section(
         self,
@@ -482,3 +483,46 @@ class TestLlama31MediumUntrainedParseResponse:
         assert parsed["tool_calls"][0]["name"] == "set_timer"
         assert parsed["tool_calls"][0]["arguments"]["duration_seconds"] == 7200
         assert parsed["tool_calls"][0]["arguments"]["label"] == "2 hour timer"
+
+    def test_self_closing_no_args(self, provider: Llama31MediumUntrained):
+        """Self-closing <function=name /> with no args (e.g. tell_joke, no required params)."""
+        raw = '<function=tell_joke />'
+        result = provider.parse_response(raw)
+        parsed = json.loads(result)
+        assert len(parsed["tool_calls"]) == 1
+        assert parsed["tool_calls"][0]["name"] == "tell_joke"
+        assert parsed["tool_calls"][0]["arguments"] == {}
+
+    def test_self_closing_no_args_no_space(self, provider: Llama31MediumUntrained):
+        """Self-closing tag without space before />: <function=name/>."""
+        raw = '<function=tell_joke/>'
+        result = provider.parse_response(raw)
+        parsed = json.loads(result)
+        assert len(parsed["tool_calls"]) == 1
+        assert parsed["tool_calls"][0]["name"] == "tell_joke"
+        assert parsed["tool_calls"][0]["arguments"] == {}
+
+    def test_self_closing_no_args_with_surrounding_text(self, provider: Llama31MediumUntrained):
+        """Self-closing no-args call preceded by prose."""
+        raw = "Sure, here's one. <function=tell_joke />"
+        result = provider.parse_response(raw)
+        parsed = json.loads(result)
+        assert len(parsed["tool_calls"]) == 1
+        assert parsed["tool_calls"][0]["name"] == "tell_joke"
+        assert parsed["tool_calls"][0]["arguments"] == {}
+
+
+class TestLlama31MediumUntrainedSanitizeText:
+    """Test sanitize_text strips function-call scaffolding from post-tool prose."""
+
+    def test_strips_self_closing_no_args(self, provider: Llama31MediumUntrained):
+        """Self-closing no-args tag leaking into prose must be scrubbed."""
+        text = "Here's your joke: <function=tell_joke /> enjoy!"
+        cleaned = provider.sanitize_text(text)
+        assert "<function" not in cleaned
+        assert "tell_joke" not in cleaned
+
+    def test_strips_self_closing_no_space(self, provider: Llama31MediumUntrained):
+        text = "Done <function=tell_joke/> okay"
+        cleaned = provider.sanitize_text(text)
+        assert "<function" not in cleaned

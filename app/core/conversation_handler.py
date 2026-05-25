@@ -30,6 +30,10 @@ from app.core.tool_routing import (
     filter_tools_for_utterance,
 )
 from app.core.utils.latency_logger import latency_logger
+from app.core.utils.think_block_stripper import (
+    DEFAULT_THINK_DELIMITERS,
+    ThinkBlockStripper,
+)
 from app.core.voice_command_helpers import (
     get_tool_name,
     build_available_command_flags,
@@ -650,7 +654,14 @@ class ConversationHandler:
         # The /no_think control token usually prevents thinking mode from
         # firing, but empty <think></think> wrappers still come through on
         # Qwen3 and get spoken as "think slash think" if we don't strip.
-        _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+        # Delimiters come from the active provider so non-standard markers
+        # (e.g. Llama 3.3 thinking's [[[thinking start]]]) just work.
+        think_pair = (
+            self.prompt_provider.think_delimiters
+            if self.prompt_provider
+            else DEFAULT_THINK_DELIMITERS
+        )
+        think_stripper = ThinkBlockStripper.from_pair(think_pair)
 
         # Open the LLM stream up-front so we can peek for the <not_for_me/>
         # sentinel before committing tokens to TTS. process_voice_command_with_tools
@@ -678,7 +689,7 @@ class ConversationHandler:
                 if not delta:
                     continue
                 pre_buffer_text += delta
-                scan_text = _THINK_BLOCK_RE.sub("", pre_buffer_text)
+                scan_text = think_stripper.strip_complete_blocks(pre_buffer_text)
                 if contains_sentinel(scan_text):
                     logger.info(
                         "🚫 Streaming path: <not_for_me/> in pre-buffer — "
@@ -689,8 +700,8 @@ class ConversationHandler:
                 # Partial sentinel still being emitted — wait for closing `>`.
                 if "<not_for_me" in scan_text.lower():
                     continue
-                # Wait through an open <think> block — can't decide yet.
-                if "<think>" in pre_buffer_text and "</think>" not in pre_buffer_text:
+                # Wait through an open think block — can't decide yet.
+                if think_stripper.has_open_block(pre_buffer_text):
                     continue
                 if len(scan_text) >= SENTINEL_PRECHECK_CHARS:
                     break
@@ -721,17 +732,15 @@ class ConversationHandler:
                     token_buffer += delta
                     full_response += delta
 
-                    # Strip any complete <think>...</think> spans from the
-                    # buffer. DOTALL so the regex spans newlines (Qwen3
-                    # emits `<think>\n\n</think>\n\n...` even under
-                    # /no_think). Incomplete opens are left intact for
-                    # the next iteration when </think> arrives.
-                    token_buffer = _THINK_BLOCK_RE.sub("", token_buffer)
+                    # Strip any complete think spans from the buffer.
+                    # Incomplete opens are left intact for the next
+                    # iteration when the end marker arrives.
+                    token_buffer = think_stripper.strip_complete_blocks(token_buffer)
 
-                    # If there's an unclosed <think> in the buffer, pause
-                    # sentence emission until </think> arrives. Otherwise
-                    # anything we flush now would speak raw XML tags.
-                    if "<think>" in token_buffer:
+                    # If there's an unclosed think block in the buffer,
+                    # pause sentence emission until it closes. Otherwise
+                    # anything we flush now would speak raw scaffolding.
+                    if think_stripper.has_open_block(token_buffer):
                         continue
 
                     # Check for sentence boundaries in the buffer.
@@ -759,7 +768,9 @@ class ConversationHandler:
                 # think block one more time (in case the whole response
                 # came back as a single final chunk), then run the
                 # universal TTS-safe scrub.
-                remaining_text = clean_for_tts(_THINK_BLOCK_RE.sub("", token_buffer).strip())
+                remaining_text = clean_for_tts(
+                    think_stripper.strip_complete_blocks(token_buffer).strip()
+                )
                 if remaining_text:
                     sentences_sent += 1
                     try:
@@ -776,7 +787,7 @@ class ConversationHandler:
             # Update conversation cache with the full response — strip
             # think blocks so context windows don't accumulate scaffolding
             # that the model didn't actually "say".
-            clean_response = _THINK_BLOCK_RE.sub("", full_response).strip()
+            clean_response = think_stripper.strip_complete_blocks(full_response).strip()
             messages.append({"role": "assistant", "content": clean_response})
             conversation_cache.update_messages(conversation_id, messages)
 
@@ -994,10 +1005,16 @@ class ConversationHandler:
 
         # === Iter 2: streaming response ===
         # Reuse the same regexes / pattern as stream_voice_response so behavior
-        # matches (think-block strip, sentence detection, etc.).
+        # matches (think-block strip, sentence detection, etc.). Think
+        # delimiters come from the active provider.
         _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
-        _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
         _TOOL_CALL_TAG_RE = re.compile(r"</?tool_call>")
+        think_pair = (
+            self.prompt_provider.think_delimiters
+            if self.prompt_provider
+            else DEFAULT_THINK_DELIMITERS
+        )
+        think_stripper = ThinkBlockStripper.from_pair(think_pair)
 
         async def _audio_generator():
             token_buffer = ""
@@ -1018,8 +1035,8 @@ class ConversationHandler:
                     token_buffer += delta
                     full_response += delta
 
-                    token_buffer = _THINK_BLOCK_RE.sub("", token_buffer)
-                    if "<think>" in token_buffer:
+                    token_buffer = think_stripper.strip_complete_blocks(token_buffer)
+                    if think_stripper.has_open_block(token_buffer):
                         continue
 
                     parts = _SENTENCE_BOUNDARY.split(token_buffer)
@@ -1042,7 +1059,7 @@ class ConversationHandler:
 
                 # Flush trailing partial
                 remaining_text = clean_for_tts(
-                    _THINK_BLOCK_RE.sub("", token_buffer).strip()
+                    think_stripper.strip_complete_blocks(token_buffer).strip()
                 )
                 if remaining_text:
                     sentences_sent += 1
@@ -1061,7 +1078,7 @@ class ConversationHandler:
             # iter 2 final assistant) to the cache. Strip think blocks from
             # the recorded assistant message so future turns don't see
             # accumulated scaffolding.
-            clean_response = _THINK_BLOCK_RE.sub("", full_response).strip()
+            clean_response = think_stripper.strip_complete_blocks(full_response).strip()
             if clean_response:
                 messages.append({"role": "assistant", "content": clean_response})
                 conversation_cache.update_messages(conversation_id, messages)
@@ -1191,8 +1208,13 @@ class ConversationHandler:
         )
 
         _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
-        _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
         _TOOL_CALL_TAG_RE = re.compile(r"</?tool_call>")
+        think_pair = (
+            self.prompt_provider.think_delimiters
+            if self.prompt_provider
+            else DEFAULT_THINK_DELIMITERS
+        )
+        think_stripper = ThinkBlockStripper.from_pair(think_pair)
 
         async def _audio_generator():
             token_buffer = ""
@@ -1214,8 +1236,8 @@ class ConversationHandler:
                     token_buffer += delta
                     full_response += delta
 
-                    token_buffer = _THINK_BLOCK_RE.sub("", token_buffer)
-                    if "<think>" in token_buffer:
+                    token_buffer = think_stripper.strip_complete_blocks(token_buffer)
+                    if think_stripper.has_open_block(token_buffer):
                         continue
 
                     parts = _SENTENCE_BOUNDARY.split(token_buffer)
@@ -1239,7 +1261,7 @@ class ConversationHandler:
                 # Flush trailing partial
                 remaining_text = clean_for_tts(
                     _TOOL_CALL_TAG_RE.sub(
-                        "", _THINK_BLOCK_RE.sub("", token_buffer)
+                        "", think_stripper.strip_complete_blocks(token_buffer)
                     ).strip()
                 )
                 if remaining_text:
@@ -1258,7 +1280,7 @@ class ConversationHandler:
             # Commit the conversation (tool results + final assistant message)
             # to the cache, with scaffolding scrubbed.
             clean_response = _TOOL_CALL_TAG_RE.sub(
-                "", _THINK_BLOCK_RE.sub("", full_response)
+                "", think_stripper.strip_complete_blocks(full_response)
             ).strip()
             if clean_response:
                 messages.append({"role": "assistant", "content": clean_response})
@@ -1714,11 +1736,16 @@ class ConversationHandler:
 
         format_conv_id: str = f"fmt-{uuid.uuid4().hex[:12]}"
 
-        # Buffer tokens so we can strip complete <think>...</think> spans
-        # (Qwen3 etc.) before they reach TTS. Emits whenever the buffer is
-        # "safe" (no unclosed <think>); holds otherwise. Also runs the
-        # universal TTS-safe scrub (emojis).
-        _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+        # Buffer tokens so we can strip complete think spans before they
+        # reach TTS. Emits whenever the buffer is "safe" (no unclosed
+        # think block); holds otherwise. Also runs the universal TTS-safe
+        # scrub (emojis). Think delimiters come from the active provider.
+        think_pair = (
+            self.prompt_provider.think_delimiters
+            if self.prompt_provider
+            else DEFAULT_THINK_DELIMITERS
+        )
+        think_stripper = ThinkBlockStripper.from_pair(think_pair)
         token_buffer = ""
         full_text = ""
         async for event in self.llm_client.chat_completion_stream(
@@ -1732,9 +1759,9 @@ class ConversationHandler:
             if not delta:
                 continue
             token_buffer += delta
-            token_buffer = _THINK_BLOCK_RE.sub("", token_buffer)
-            if "<think>" in token_buffer:
-                continue  # wait for </think> before emitting anything
+            token_buffer = think_stripper.strip_complete_blocks(token_buffer)
+            if think_stripper.has_open_block(token_buffer):
+                continue  # wait for end marker before emitting anything
             cleaned = clean_for_tts(re.sub(r"</?tool_call>", "", token_buffer))
             if cleaned:
                 full_text += cleaned
@@ -1745,7 +1772,7 @@ class ConversationHandler:
         # tokens arrived before the loop had a chance to emit).
         if token_buffer:
             remaining = clean_for_tts(
-                re.sub(r"</?tool_call>", "", _THINK_BLOCK_RE.sub("", token_buffer))
+                re.sub(r"</?tool_call>", "", think_stripper.strip_complete_blocks(token_buffer))
             )
             if remaining:
                 full_text += remaining

@@ -81,6 +81,15 @@ _SPLIT_TAG_CALL_RE = re.compile(
 _FUNCTION_CALL_NOARGS_RE = re.compile(
     r"<function[=>](\w+)\s*/>", re.DOTALL
 )
+# No-args drift: <function)name></function>, <function:name></function>,
+# <function)name</function>, <function=name></function> — bare tag with no
+# arguments AND a paren/colon/equals drift separator. Hit on tools with all
+# optional parameters (e.g. get_current_time with no location specified).
+# Without this, the tag falls through to plain-text wrapping and TTS'd
+# scaffolding reaches the user.
+_FUNCTION_CALL_DRIFT_NOARGS_RE = re.compile(
+    r"<function[=>:)\"]\s*(\w+)\s*>?\s*</\s*function\s*>", re.DOTALL
+)
 
 # Parameters that are always arrays — normalize string values to single-element lists
 _ARRAY_PARAMS = frozenset({"resolved_datetimes"})
@@ -100,6 +109,10 @@ _STRIP_SPLIT_TAG_RE = re.compile(
 )
 _STRIP_FUNCTION_NOARGS_RE = re.compile(
     r"<function[^>/]*\s*/>", re.DOTALL
+)
+# Strip variant for the drift-noargs form (paren/colon separator, no args).
+_STRIP_FUNCTION_DRIFT_NOARGS_RE = re.compile(
+    r"<function[=>:)\"]\s*\w+\s*>?\s*</\s*function\s*>", re.DOTALL
 )
 
 
@@ -172,9 +185,13 @@ class Llama31MediumUntrained(IJarvisPromptProvider):
             tools, available_commands, primary_examples_only=True
         )
 
-        # Build JSON schemas for tools
+        # Build JSON schemas for tools. Compact dump (no indent) —
+        # the JSON block is the single largest contributor to prompt
+        # size (≈65% with a full tool set), and pretty-printing adds
+        # ~1.4k tokens of whitespace for 23 tools without changing
+        # what the model sees semantically.
         clean_tools: List[Dict[str, Any]] = ToolBuilder.build(tools)
-        tool_json: str = json.dumps(clean_tools, indent=2) if clean_tools else "[]"
+        tool_json: str = json.dumps(clean_tools, separators=(",", ":")) if clean_tools else "[]"
 
         # Shared header
         identity: str = self.build_context_header(node_context)
@@ -279,6 +296,14 @@ Tools:
             if noargs_names:
                 function_matches = [(name, "{}") for name in noargs_names]
 
+        # No-args drift: <function)name></function> and similar drift wrappers
+        # with NO args block. Common for tools whose params are all optional
+        # (get_current_time with no location).
+        if not function_matches:
+            drift_noargs_names = _FUNCTION_CALL_DRIFT_NOARGS_RE.findall(cleaned)
+            if drift_noargs_names:
+                function_matches = [(name, "{}") for name in drift_noargs_names]
+
         if function_matches:
             parsed_calls: list[Dict[str, Any]] = []
             for func_name, args_str in function_matches:
@@ -297,12 +322,18 @@ Tools:
                         last = cleaned_args.rfind("}")
                         if last > 0:
                             cleaned_args = cleaned_args[: last + 1]
-                    try:
-                        arguments = json.loads(cleaned_args)
-                    except json.JSONDecodeError:
-                        # Over-escaped JSON: model emits {\"key\": \"val\"} with
-                        # literal backslash-quote. Strip and retry.
-                        arguments = json.loads(cleaned_args.replace('\\"', '"'))
+                    # Empty args block (<function=name></function>) — treat as
+                    # no-args call. Otherwise json.loads('') raises and we
+                    # drop the call entirely, leaving scaffolding to leak.
+                    if not cleaned_args:
+                        arguments = {}
+                    else:
+                        try:
+                            arguments = json.loads(cleaned_args)
+                        except json.JSONDecodeError:
+                            # Over-escaped JSON: model emits {\"key\": \"val\"} with
+                            # literal backslash-quote. Strip and retry.
+                            arguments = json.loads(cleaned_args.replace('\\"', '"'))
                 except json.JSONDecodeError:
                     logger.warning(
                         "Failed to parse function args for %s: %s",
@@ -368,6 +399,7 @@ Tools:
         cleaned = _STRIP_SPLIT_TAG_RE.sub("", cleaned)
         cleaned = _STRIP_FUNCTION_UNCLOSED_RE.sub("", cleaned)
         cleaned = _STRIP_FUNCTION_NOARGS_RE.sub("", cleaned)
+        cleaned = _STRIP_FUNCTION_DRIFT_NOARGS_RE.sub("", cleaned)
         return cleaned.strip()
 
     def build_training_system_prompt(self) -> str:
