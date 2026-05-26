@@ -85,6 +85,8 @@ class WhisperClient:
         self,
         audio: bytes,
         filename: str,
+        speaker_audio: bytes | None = None,
+        speaker_audio_filename: str | None = None,
         timeout: float = 60.0,
         **params: Any,
     ) -> dict[str, Any]:
@@ -96,6 +98,11 @@ class WhisperClient:
         Args:
             audio: Audio bytes to transcribe
             filename: Original filename (used for format detection)
+            speaker_audio: Optional separate audio used for speaker recognition
+                only — typically the wake-word + command concat, which gives
+                the speaker pass more signal for short utterances ("delete it")
+                without confusing Whisper's text output.
+            speaker_audio_filename: Filename for the speaker_audio upload.
             timeout: Request timeout in seconds
             **params: Additional parameters (language, task, etc.)
 
@@ -106,11 +113,17 @@ class WhisperClient:
             httpx.HTTPStatusError: If the request fails
         """
         url = f"{self.base_url.rstrip('/')}/transcribe"
+        files: list[tuple[str, tuple[str, bytes]]] = [("file", (filename, audio))]
+        if speaker_audio is not None:
+            files.append((
+                "speaker_audio",
+                (speaker_audio_filename or "speaker.wav", speaker_audio),
+            ))
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 url,
-                files={"file": (filename, audio)},
+                files=files,
                 data=params if params else None,
                 headers=self._build_headers(),
             )
@@ -122,6 +135,7 @@ class WhisperClient:
         user_id: int,
         audio: bytes,
         filename: str,
+        sample_index: int | None = None,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
         """Upload a voice sample for speaker enrollment.
@@ -130,21 +144,66 @@ class WhisperClient:
             user_id: The user to enroll
             audio: WAV audio bytes
             filename: Original filename
+            sample_index: Optional explicit index for the sample. If omitted,
+                whisper auto-allocates the next index in the user's directory
+                (used by multi-take orchestrated by mobile).
             timeout: Request timeout in seconds
 
         Returns:
-            Enrollment result dict
+            Enrollment result dict (includes ``sample_index`` and ``total_samples``)
         """
         url = f"{self.base_url.rstrip('/')}/voice-profiles/enroll"
-        params = {
+        params: dict[str, str] = {
             "user_id": str(user_id),
             "household_id": self.household_id,
         }
+        if sample_index is not None:
+            params["sample_index"] = str(sample_index)
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 url,
                 files={"file": (filename, audio)},
+                params=params,
+                headers=self._build_headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def list_voice_profile_samples(
+        self,
+        user_id: int,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """List enrollment samples for a user (multi-sample enrollment UI)."""
+        url = f"{self.base_url.rstrip('/')}/voice-profiles/{user_id}/samples"
+        params = {"household_id": self.household_id}
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                url,
+                params=params,
+                headers=self._build_headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def delete_voice_profile_sample(
+        self,
+        user_id: int,
+        sample_index: int,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """Delete a single enrollment sample (lets users redo a bad take)."""
+        url = (
+            f"{self.base_url.rstrip('/')}/voice-profiles/{user_id}"
+            f"/samples/{sample_index}"
+        )
+        params = {"household_id": self.household_id}
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.delete(
+                url,
                 params=params,
                 headers=self._build_headers(),
             )

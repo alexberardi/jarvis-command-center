@@ -40,31 +40,90 @@ async def voice_profile_status(
     household_id: str,
     user: AuthenticatedUser = Depends(verify_user_jwt),
 ) -> dict[str, Any]:
-    """Check whether the current user has an enrolled voice profile."""
+    """Check whether the current user has an enrolled voice profile.
+
+    Returns sample_count so the mobile UI can show enrollment progress
+    (e.g. "1 of 3 samples enrolled") for the multi-take wizard.
+    """
     verify_household_role(user.user_id, household_id, required_role="member")
 
     client = WhisperClient(household_id=household_id, user_id=user.user_id)
     result = await client.check_voice_profile(user.user_id)
-    return {"has_profile": result.get("exists", False)}
+    return {
+        "has_profile": result.get("exists", False),
+        "sample_count": result.get("sample_count", 0),
+    }
 
 
 @router.post("/voice-profile/enroll")
 async def voice_profile_enroll(
     file: UploadFile = File(...),
     household_id: str = Form(...),
+    sample_index: int | None = Form(None),
     user: AuthenticatedUser = Depends(verify_user_jwt),
 ) -> dict[str, Any]:
-    """Upload a voice sample to enroll (or update) the user's voice profile."""
+    """Upload a voice sample to enroll (or update) the user's voice profile.
+
+    When ``sample_index`` is omitted the backend auto-allocates the next
+    index. The mobile multi-take wizard sends explicit indices so a
+    "retake" overwrites the right slot.
+    """
     verify_household_role(user.user_id, household_id, required_role="member")
 
     client = WhisperClient(household_id=household_id, user_id=user.user_id)
     audio_bytes = await file.read()
     filename = file.filename or "enrollment.wav"
 
-    result = await client.enroll_voice_profile(user.user_id, audio_bytes, filename)
+    result = await client.enroll_voice_profile(
+        user.user_id, audio_bytes, filename, sample_index=sample_index,
+    )
     logger.info(
         "Voice profile enrolled via mobile",
-        extra={"user_id": user.user_id, "household_id": household_id},
+        extra={
+            "user_id": user.user_id,
+            "household_id": household_id,
+            "sample_index": result.get("sample_index"),
+            "total_samples": result.get("total_samples"),
+        },
+    )
+    return result
+
+
+@router.get("/voice-profile/samples")
+async def voice_profile_samples(
+    household_id: str,
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+) -> dict[str, Any]:
+    """List the current user's enrolled voice samples.
+
+    Used by the multi-take enrollment wizard to show progress and let
+    the user retake individual samples.
+    """
+    verify_household_role(user.user_id, household_id, required_role="member")
+
+    client = WhisperClient(household_id=household_id, user_id=user.user_id)
+    return await client.list_voice_profile_samples(user.user_id)
+
+
+@router.delete("/voice-profile/samples/{sample_index}")
+async def voice_profile_delete_sample(
+    sample_index: int,
+    household_id: str,
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+) -> dict[str, Any]:
+    """Delete a single enrollment sample so the user can redo a bad take."""
+    verify_household_role(user.user_id, household_id, required_role="member")
+
+    client = WhisperClient(household_id=household_id, user_id=user.user_id)
+    result = await client.delete_voice_profile_sample(user.user_id, sample_index)
+    logger.info(
+        "Voice profile sample deleted via mobile",
+        extra={
+            "user_id": user.user_id,
+            "household_id": household_id,
+            "sample_index": sample_index,
+            "remaining_samples": result.get("remaining_samples"),
+        },
     )
     return result
 

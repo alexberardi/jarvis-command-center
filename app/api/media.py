@@ -78,6 +78,7 @@ async def tts_speak_stream(
 @router.post("/whisper/transcribe")
 async def whisper_transcribe(
     file: UploadFile = File(...),
+    speaker_audio: UploadFile | None = File(default=None),
     language: str | None = Form(None),
     task: str | None = Form(None),
     node_context: NodeContextProvider = Depends(verify_api_key),
@@ -91,6 +92,9 @@ async def whisper_transcribe(
 
     Args:
         file: Audio file to transcribe
+        speaker_audio: Optional separate audio used for the speaker pass
+            only (e.g. wake-word + command concat). Improves speaker
+            recognition accuracy on short follow-up utterances.
         language: Optional language code (e.g., "en", "es")
         task: Optional task ("transcribe" or "translate")
         node_context: Authenticated node context (from verify_api_key)
@@ -108,6 +112,12 @@ async def whisper_transcribe(
     audio_bytes = await file.read()
     filename = file.filename or "audio.wav"
 
+    speaker_audio_bytes: bytes | None = None
+    speaker_audio_filename: str | None = None
+    if speaker_audio is not None:
+        speaker_audio_bytes = await speaker_audio.read()
+        speaker_audio_filename = speaker_audio.filename or "speaker.wav"
+
     # Build extra params
     params: dict[str, Any] = {}
     if language:
@@ -115,7 +125,13 @@ async def whisper_transcribe(
     if task:
         params["task"] = task
 
-    return await client.transcribe(audio_bytes, filename, **params)
+    return await client.transcribe(
+        audio_bytes,
+        filename,
+        speaker_audio=speaker_audio_bytes,
+        speaker_audio_filename=speaker_audio_filename,
+        **params,
+    )
 
 
 @router.post("/whisper/voice-profiles/enroll")
