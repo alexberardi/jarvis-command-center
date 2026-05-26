@@ -16,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from app.context_providers.node_context_provider import NodeContextProvider
 from app.request_models.voice_command_request import VoiceCommandRequest
 from app.request_models.conversation_start_request import ConversationStartRequest
+from app.request_models.conversation_end_request import ConversationEndRequest
 from app.request_models.tool_result_request import ToolResultRequest
 from app.request_models.tool_router_training_request import ToolRouterTrainingRequest
 from app.request_models.adapter_training_request import AdapterTrainingRequest
@@ -631,6 +632,33 @@ async def start_conversation(
 
             # Extract speaker identity from voice recognition
             speaker_user_id = request.node_context.get("speaker_user_id")
+            speaker_confidence = request.node_context.get("speaker_confidence")
+            node_id_for_stickiness = node_context_provider.node.node_id
+
+            from app.core.utils.speaker_stickiness import (
+                inherit_speaker_for_node,
+                record_speaker_for_node,
+            )
+
+            if speaker_user_id is None:
+                # Short utterance — try inheriting a recent high-confidence
+                # speaker from the same node. See speaker_stickiness.py.
+                inherited = inherit_speaker_for_node(node_id_for_stickiness)
+                if inherited is not None:
+                    logger.info(
+                        f"🎤 Speaker inherited from recent identification "
+                        f"on node={node_id_for_stickiness}: user_id={inherited}"
+                    )
+                    speaker_user_id = inherited
+            else:
+                # Confident new ID — remember it so the next short follow-up
+                # on this node can inherit it.
+                record_speaker_for_node(
+                    node_id_for_stickiness,
+                    speaker_user_id,
+                    float(speaker_confidence) if speaker_confidence is not None else None,
+                )
+
             if speaker_user_id is not None:
                 node_context["speaker_user_id"] = speaker_user_id
                 # Resolve speaker_user_id to display name
@@ -671,6 +699,28 @@ async def start_conversation(
         raise HTTPException(status_code=500, detail=f"Failed to start conversation: {str(e)}")
 
 
+@v0_router.post("/conversation/end")
+async def end_conversation(
+    request: ConversationEndRequest,
+    node_context_provider: NodeContextProvider = Depends(verify_api_key),
+):
+    """Mark a conversation as ended.
+
+    The node calls this when its wake cycle finishes (follow-up window
+    closed, no further turns expected without a new wake word). Right now
+    the only thing this does is wipe the node's speaker stickiness so a
+    later wake event by a different speaker doesn't inherit the previous
+    speaker's identity. Future lifecycle cleanups (cache eviction,
+    transcript finalization, etc.) can attach here.
+    """
+    from app.core.utils.speaker_stickiness import reset_node_history
+
+    node_id = node_context_provider.node.node_id
+    reset_node_history(node_id)
+    logger.info(
+        f"📤 Conversation ended: id={request.conversation_id} node={node_id}"
+    )
+    return {"status": "ok", "conversation_id": request.conversation_id}
 
 
 async def _log_transcript(

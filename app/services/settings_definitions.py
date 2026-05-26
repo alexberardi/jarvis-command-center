@@ -376,6 +376,32 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Show devices from the node's device manager instead of the CC database",
     ),
 
+    # Voice / speaker stickiness
+    SettingDefinition(
+        key="voice.stickiness_min_confidence",
+        category="voice",
+        value_type="float",
+        default=0.55,
+        description=(
+            "Minimum speaker-recognition confidence to record a node's "
+            "speaker for short follow-up inheritance. When the next short "
+            "utterance comes in unidentified, this node's most recent "
+            "high-confidence speaker is reused if within the TTL. Tune to "
+            "match the encoder's score distribution — ECAPA same-speaker "
+            "scores typically cluster 0.45-0.70; resemblyzer 0.75-0.90."
+        ),
+    ),
+    SettingDefinition(
+        key="voice.stickiness_ttl_seconds",
+        category="voice",
+        value_type="float",
+        default=30.0,
+        description=(
+            "Seconds an identified speaker stays sticky for a node. "
+            "After this, a fresh identification is required."
+        ),
+    ),
+
     # Admin settings
     SettingDefinition(
         key="admin.api_key",

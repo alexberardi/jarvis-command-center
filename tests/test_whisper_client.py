@@ -292,3 +292,105 @@ class TestWhisperClientTranscribe:
                     assert "data" in call_kwargs
                     assert call_kwargs["data"]["language"] == "es"
                     assert call_kwargs["data"]["task"] == "translate"
+
+
+class TestEnrollVoiceProfileSampleIndex:
+    """Coverage for the multi-take enrollment wiring."""
+
+    @pytest.mark.asyncio
+    async def test_omits_sample_index_when_none(self):
+        """When sample_index is None, the param must not be in the request."""
+        from app.core.clients.whisper_client import WhisperClient
+
+        with patch("app.core.clients.whisper_client.get_settings_service") as mock_settings:
+            mock_settings.return_value.get.return_value = None
+            with patch("app.core.clients.whisper_client.get_app_headers", return_value={}):
+                client = WhisperClient(household_id="h123")
+
+                with patch("httpx.AsyncClient") as mock_client_class:
+                    mock_client = AsyncMock()
+                    mock_response = MagicMock()
+                    mock_response.json.return_value = {"status": "enrolled"}
+                    mock_response.raise_for_status = MagicMock()
+                    mock_client.post.return_value = mock_response
+                    mock_client_class.return_value.__aenter__.return_value = mock_client
+
+                    await client.enroll_voice_profile(42, b"audio", "x.wav")
+
+                    params = mock_client.post.call_args[1]["params"]
+                    assert "sample_index" not in params
+                    assert params["user_id"] == "42"
+
+    @pytest.mark.asyncio
+    async def test_passes_sample_index_when_provided(self):
+        """Explicit sample_index must be forwarded so retakes overwrite cleanly."""
+        from app.core.clients.whisper_client import WhisperClient
+
+        with patch("app.core.clients.whisper_client.get_settings_service") as mock_settings:
+            mock_settings.return_value.get.return_value = None
+            with patch("app.core.clients.whisper_client.get_app_headers", return_value={}):
+                client = WhisperClient(household_id="h123")
+
+                with patch("httpx.AsyncClient") as mock_client_class:
+                    mock_client = AsyncMock()
+                    mock_response = MagicMock()
+                    mock_response.json.return_value = {"status": "enrolled", "sample_index": 1}
+                    mock_response.raise_for_status = MagicMock()
+                    mock_client.post.return_value = mock_response
+                    mock_client_class.return_value.__aenter__.return_value = mock_client
+
+                    await client.enroll_voice_profile(
+                        42, b"audio", "x.wav", sample_index=1,
+                    )
+
+                    params = mock_client.post.call_args[1]["params"]
+                    assert params["sample_index"] == "1"
+
+
+class TestVoiceProfileSamplesEndpoints:
+    """Coverage for the list/delete sample helpers (multi-take retake)."""
+
+    @pytest.mark.asyncio
+    async def test_list_samples_hits_user_samples_url(self):
+        from app.core.clients.whisper_client import WhisperClient
+
+        with patch("app.core.clients.whisper_client.get_settings_service") as mock_settings:
+            mock_settings.return_value.get.return_value = "http://w:7706"
+            with patch("app.core.clients.whisper_client.get_app_headers", return_value={}):
+                client = WhisperClient(household_id="h123")
+
+                with patch("httpx.AsyncClient") as mock_client_class:
+                    mock_client = AsyncMock()
+                    mock_response = MagicMock()
+                    mock_response.json.return_value = {"samples": []}
+                    mock_response.raise_for_status = MagicMock()
+                    mock_client.get.return_value = mock_response
+                    mock_client_class.return_value.__aenter__.return_value = mock_client
+
+                    await client.list_voice_profile_samples(42)
+
+                    url = mock_client.get.call_args[0][0]
+                    assert url == "http://w:7706/voice-profiles/42/samples"
+                    assert mock_client.get.call_args[1]["params"]["household_id"] == "h123"
+
+    @pytest.mark.asyncio
+    async def test_delete_sample_hits_indexed_url(self):
+        from app.core.clients.whisper_client import WhisperClient
+
+        with patch("app.core.clients.whisper_client.get_settings_service") as mock_settings:
+            mock_settings.return_value.get.return_value = "http://w:7706"
+            with patch("app.core.clients.whisper_client.get_app_headers", return_value={}):
+                client = WhisperClient(household_id="h123")
+
+                with patch("httpx.AsyncClient") as mock_client_class:
+                    mock_client = AsyncMock()
+                    mock_response = MagicMock()
+                    mock_response.json.return_value = {"remaining_samples": 2}
+                    mock_response.raise_for_status = MagicMock()
+                    mock_client.delete.return_value = mock_response
+                    mock_client_class.return_value.__aenter__.return_value = mock_client
+
+                    await client.delete_voice_profile_sample(42, 1)
+
+                    url = mock_client.delete.call_args[0][0]
+                    assert url == "http://w:7706/voice-profiles/42/samples/1"
