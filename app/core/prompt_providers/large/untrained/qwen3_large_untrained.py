@@ -29,7 +29,6 @@ from app.core.prompt_providers.shared.context_builders import (
 )
 from app.core.prompt_providers.shared.core_rules import (
     ANTI_HALLUCINATION_MANDATE,
-    NOT_FOR_ME_INSTRUCTION,
     RULE_BEST_MATCH_INTENT,
     RULE_EXTRACT_PARAMS,
     RULE_ONE_AT_A_TIME,
@@ -177,8 +176,6 @@ class Qwen3LargeUntrained(Qwen25_7B_Compressed):
         system_prompt: str = f"""{identity}
 
 You are a function calling AI model. You may call one or more functions to assist with the user query. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
-
-{NOT_FOR_ME_INSTRUCTION}
 
 You are provided with function signatures within <tools></tools> XML tags:
 {tools_block}

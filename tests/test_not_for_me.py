@@ -87,13 +87,66 @@ class TestNotForMeInstruction:
     def test_includes_safety_bar(self):
         # Conservative bar: false-suppressing a real command must be
         # explicitly framed as worse than answering one stray utterance.
-        assert "doubt" in NOT_FOR_ME_INSTRUCTION.lower()
-        assert "respond normally" in NOT_FOR_ME_INSTRUCTION.lower()
-
-    def test_mentions_at_least_one_pattern(self):
-        # The instruction should give the LLM concrete patterns to look for.
         body = NOT_FOR_ME_INSTRUCTION.lower()
+        # The bar can be phrased as "default to answering", "silencing a
+        # real request is worse", "when in doubt", etc. — any of these is
+        # an explicit framing that pushes the model toward responding.
         assert any(
-            cue in body
-            for cue in ("third-person", "narrative", "mid-sentence", "overheard")
+            phrase in body
+            for phrase in (
+                "doubt",
+                "silencing a real",
+                "default to answering",
+                "default to responding",
+                "worse bug",
+            )
+        )
+
+    def test_mentions_overheard_cue(self):
+        # The instruction must name overheard speech as the silence trigger
+        # — that's the entire reason this guard exists.
+        assert "overheard" in NOT_FOR_ME_INSTRUCTION.lower()
+
+    def test_instruction_is_loose_no_pattern_examples(self):
+        # Regression: prior versions listed silence-case examples like
+        # "yeah but then she said" / "uh huh". The 14B was pattern-matching
+        # memory questions onto those examples and silencing. The loose
+        # version drops the example list entirely so the model has no
+        # silence patterns to anchor on — must reason from first principles.
+        body = NOT_FOR_ME_INSTRUCTION.lower()
+        # The memory-relevance directive moved out of this instruction and
+        # into the User Profile header, so this body should NOT carry the
+        # old example list any more.
+        assert "yeah but then she said" not in body
+        assert "uh huh" not in body
+        assert "hey sarah" not in body
+        # And the must-respond example list also lives in the User Profile
+        # header now, not here.
+        assert "who's my favorite" not in body
+
+
+class TestProvidersDoNotInjectInstruction:
+    """The instruction lives in conversation_handler._get_system_prompt now;
+    individual providers must not include it. If a provider re-introduces
+    the import it'll double-inject — these guards catch that at test time.
+    """
+
+    def test_no_qwen3_provider_imports_instruction(self):
+        # Re-importing into a provider is the entry point for double-injection.
+        # Read the source files directly — importing modules and inspecting
+        # symbols would miss conditional imports.
+        from pathlib import Path
+
+        provider_root = (
+            Path(__file__).resolve().parent.parent
+            / "app" / "core" / "prompt_providers"
+        )
+        offenders: list[str] = []
+        for path in provider_root.rglob("*.py"):
+            text = path.read_text()
+            if "NOT_FOR_ME_INSTRUCTION" in text and path.name != "core_rules.py":
+                offenders.append(str(path.relative_to(provider_root)))
+        assert not offenders, (
+            f"NOT_FOR_ME_INSTRUCTION must only live in core_rules.py + "
+            f"conversation_handler. Found in: {offenders}"
         )

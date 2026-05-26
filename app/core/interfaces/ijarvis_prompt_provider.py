@@ -47,7 +47,8 @@ class IJarvisPromptProvider(ABC):
             You are Jarvis, a function calling voice assistant.
             Context: room=kitchen, user=alex, style=brief
 
-            About alex:
+            User Profile - If user asks a question about one of these items
+            you must respond with an answer:
             - Likes coffee black
         """
         from app.core.prompt_providers.shared.core_rules import build_identity_header

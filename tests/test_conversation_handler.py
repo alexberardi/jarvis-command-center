@@ -245,7 +245,7 @@ class TestGetSystemPromptDispatch:
 
         result = handler._get_system_prompt({"room": "kitchen"}, "UTC", [])
 
-        assert result == "new prompt"
+        assert result.startswith("new prompt")
         mock_provider.build_system_prompt.assert_called_once()
         mock_model._build_system_prompt.assert_not_called()
 
@@ -261,7 +261,7 @@ class TestGetSystemPromptDispatch:
 
         result = handler._get_system_prompt({"room": "kitchen"}, "UTC", [])
 
-        assert result == "legacy prompt"
+        assert result.startswith("legacy prompt")
         mock_model._build_system_prompt.assert_called_once()
 
     def test_falls_back_to_default_when_no_provider_or_method(self):
@@ -275,7 +275,62 @@ class TestGetSystemPromptDispatch:
 
         result = handler._get_system_prompt({"room": "kitchen"}, "UTC", [])
 
-        assert result == "You are a helpful voice assistant."
+        assert result.startswith("You are a helpful voice assistant.")
+
+    def test_appends_not_for_me_instruction_universally(self):
+        """The false-wake gating instruction is appended in the shared
+        dispatch — every provider, the legacy model path, and the minimal
+        fallback all get it. This is the single point of truth for the
+        gating prompt; individual providers must NOT include it themselves.
+        """
+        from app.core.conversation_handler import ConversationHandler
+        from app.core.prompt_providers.shared.core_rules import (
+            NOT_FOR_ME_INSTRUCTION,
+        )
+
+        # Provider path
+        mock_model_a = MagicMock()
+        mock_provider = MagicMock()
+        mock_provider.build_system_prompt = MagicMock(return_value="provider body")
+        handler_a = ConversationHandler(
+            model=mock_model_a, llm_client=MagicMock(), prompt_provider=mock_provider,
+        )
+        assert NOT_FOR_ME_INSTRUCTION in handler_a._get_system_prompt({}, "UTC", [])
+
+        # Legacy model path
+        mock_model_b = MagicMock()
+        mock_model_b._build_system_prompt = MagicMock(return_value="legacy body")
+        handler_b = ConversationHandler(
+            model=mock_model_b, llm_client=MagicMock(),
+        )
+        assert NOT_FOR_ME_INSTRUCTION in handler_b._get_system_prompt({}, "UTC", [])
+
+        # Minimal-fallback path
+        mock_model_c = MagicMock(spec=["name", "use_tool_classifier"])
+        handler_c = ConversationHandler(
+            model=mock_model_c, llm_client=MagicMock(),
+        )
+        assert NOT_FOR_ME_INSTRUCTION in handler_c._get_system_prompt({}, "UTC", [])
+
+    def test_not_for_me_instruction_is_trailing(self):
+        """The instruction must be at the end of the system prompt so it
+        sits closest to the user message — that's where recency-bias gives
+        it the most weight on weaker models."""
+        from app.core.conversation_handler import ConversationHandler
+        from app.core.prompt_providers.shared.core_rules import (
+            NOT_FOR_ME_INSTRUCTION,
+        )
+
+        mock_provider = MagicMock()
+        mock_provider.build_system_prompt = MagicMock(return_value="provider body")
+        handler = ConversationHandler(
+            model=MagicMock(), llm_client=MagicMock(), prompt_provider=mock_provider,
+        )
+
+        result = handler._get_system_prompt({}, "UTC", [])
+        idx_body = result.index("provider body")
+        idx_nfm = result.index(NOT_FOR_ME_INSTRUCTION)
+        assert idx_nfm > idx_body
 
     def test_init_stores_prompt_provider(self):
         """Test that prompt_provider is stored on init."""
