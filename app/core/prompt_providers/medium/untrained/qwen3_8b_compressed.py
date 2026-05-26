@@ -28,7 +28,6 @@ from app.core.prompt_providers.shared.context_builders import (
 )
 from app.core.prompt_providers.shared.core_rules import (
     ANTI_HALLUCINATION_MANDATE,
-    NOT_FOR_ME_INSTRUCTION,
 )
 
 logger = logging.getLogger("uvicorn")
@@ -119,8 +118,6 @@ class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
         system_prompt: str = f"""{identity}
 
 You are a function calling AI model. You may call one or more functions to assist with the user query. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
-
-{NOT_FOR_ME_INSTRUCTION}
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>

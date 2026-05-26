@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Set
 from app.core.conversation_cache import conversation_cache
 from app.core.direction_hint import build_direction_hint
 from app.core.not_for_me import contains_sentinel
+from app.core.prompt_providers.shared.core_rules import NOT_FOR_ME_INSTRUCTION
 from app.core.tts_text import clean_for_tts
 from app.services.settings_service import get_settings_service
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
@@ -1416,6 +1417,29 @@ class ConversationHandler:
 
         is_knowledge_query: bool = self._is_knowledge_delegation(tool_context)
 
+        # Pull the user's most recent question out of the conversation so the
+        # formatting prompt can name it explicitly. Without this, the model
+        # tends to narrate every field in the tool result instead of answering
+        # the actual question (e.g. "Is it going to rain?" → wall of current
+        # temp/humidity/wind).
+        voice_command: Optional[str] = None
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                voice_command = content.strip()
+                break
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text = (part.get("text") or "").strip()
+                        if text:
+                            voice_command = text
+                            break
+                if voice_command:
+                    break
+
         # Strip any role="tool" messages that the text-based model can't handle
         messages[:] = [m for m in messages if m.get("role") != "tool"]
 
@@ -1425,19 +1449,30 @@ class ConversationHandler:
         think_suffix: str = "\n/no_think"
         max_tokens: int = 256
 
+        question_preamble: str = (
+            f'The user asked: "{voice_command}"\n\n' if voice_command else ""
+        )
+
         # Inject tool results as a user message into the EXISTING conversation
         # so the KV prefix cache (system prompt + tools + prior turns) is reused.
         if is_knowledge_query:
             messages.append({
                 "role": "user",
-                "content": f"Answer the question from your own knowledge. Be brief and conversational.{think_suffix}",
+                "content": (
+                    f"{question_preamble}"
+                    f"Answer the question from your own knowledge. Be brief "
+                    f"and conversational.{think_suffix}"
+                ),
             })
         else:
             messages.append({
                 "role": "user",
                 "content": (
-                    f"Here are the tool results. Craft a natural response using the "
-                    f"ACTUAL values — never use placeholders. Be brief and conversational.\n\n"
+                    f"{question_preamble}"
+                    f"Tool results below. Answer the user's question DIRECTLY "
+                    f"using only the fields relevant to what they asked — don't "
+                    f"list fields they didn't ask about. Use ACTUAL values, "
+                    f"never placeholders. Be brief and conversational.\n\n"
                     f"{tool_context}{think_suffix}"
                 ),
             })
@@ -2206,18 +2241,25 @@ class ConversationHandler:
         2. Legacy model._build_system_prompt (duck-typed)
         3. Minimal fallback
 
+        The false-wake gating instruction is appended here so it lives in
+        one place and applies uniformly across providers — placing it at
+        the END of the system prompt also gives it strong recency right
+        before the user message lands.
+
         Returns:
             System prompt string.
         """
         if self.prompt_provider is not None:
-            return self.prompt_provider.build_system_prompt(
+            base = self.prompt_provider.build_system_prompt(
                 node_context, timezone, tools, available_command_flags
             )
-        if hasattr(self.model, "_build_system_prompt"):
-            return self.model._build_system_prompt(  # type: ignore[attr-defined]
+        elif hasattr(self.model, "_build_system_prompt"):
+            base = self.model._build_system_prompt(  # type: ignore[attr-defined]
                 node_context, timezone, tools, available_command_flags
             )
-        return "You are a helpful voice assistant."
+        else:
+            base = "You are a helpful voice assistant."
+        return f"{base.rstrip()}\n\n{NOT_FOR_ME_INSTRUCTION}\n"
 
     @staticmethod
     def _get_memory_settings(node_context: Dict[str, Any] | None) -> tuple[bool, bool]:

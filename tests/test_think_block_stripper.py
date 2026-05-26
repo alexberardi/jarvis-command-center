@@ -14,7 +14,10 @@ def qwen_stripper():
 
 
 @pytest.fixture
-def llama33_stripper():
+def custom_delim_stripper():
+    # Smoke test that arbitrary delimiter pairs work — not tied to any
+    # specific provider. (The original Llama 3.3 thinking variant turned
+    # out to use plain <think>/</think> in practice.)
     return ThinkBlockStripper("[[[thinking start]]]", "[[[thinking end]]]")
 
 
@@ -42,8 +45,8 @@ class TestStripCompleteBlocks:
             "<think>\n\nfoo\n\n</think>\n\nreal answer"
         ) == "real answer"
 
-    def test_custom_delimiters(self, llama33_stripper):
-        assert llama33_stripper.strip_complete_blocks(
+    def test_custom_delimiters(self, custom_delim_stripper):
+        assert custom_delim_stripper.strip_complete_blocks(
             "pre [[[thinking start]]]reasoning[[[thinking end]]] post"
         ) == "pre post"
 
@@ -60,11 +63,11 @@ class TestHasOpenBlock:
     def test_returns_false_for_no_marker(self, qwen_stripper):
         assert not qwen_stripper.has_open_block("hello world")
 
-    def test_custom_delimiters(self, llama33_stripper):
-        assert llama33_stripper.has_open_block(
+    def test_custom_delimiters(self, custom_delim_stripper):
+        assert custom_delim_stripper.has_open_block(
             "pre [[[thinking start]]]reason"
         )
-        assert not llama33_stripper.has_open_block(
+        assert not custom_delim_stripper.has_open_block(
             "pre [[[thinking start]]]r[[[thinking end]]]"
         )
 

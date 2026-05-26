@@ -61,7 +61,11 @@ class TestRuleConstants:
     def test_anti_hallucination_mandate(self):
         assert "MUST call a function" in ANTI_HALLUCINATION_MANDATE
         assert "NEVER fabricate" in ANTI_HALLUCINATION_MANDATE
-        assert "tool-covered domain" in ANTI_HALLUCINATION_MANDATE
+        # The mandate now carves out personal memory explicitly so the
+        # model doesn't refuse to answer User Profile questions when no
+        # tool matches the domain (the bug that caused "who's my favorite
+        # baseball team?" to get silenced).
+        assert "User Profile" in ANTI_HALLUCINATION_MANDATE
 
     def test_fallback_brief_reply(self):
         assert "brief spoken reply" in FALLBACK_BRIEF_REPLY

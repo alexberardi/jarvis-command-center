@@ -11,11 +11,22 @@ from typing import Dict, Any, Optional, List, TYPE_CHECKING
 
 from app.core.interfaces.iserver_tool import IServerTool
 from app.core.general_context import generate_date_context_object
+from app.core.utils.think_block_stripper import (
+    DEFAULT_THINK_DELIMITERS,
+    ThinkBlockStripper,
+)
 
 if TYPE_CHECKING:
     from app.core.llm_proxy_client import LLMProxyClient
 
 logger = logging.getLogger("uvicorn")
+
+# Reasoning models (Qwen3, Llama 3.3 Thinking) sometimes leak ``<think>...``
+# into the resolver's plain-text response — either as a balanced block before
+# the answer or as an unclosed tail when max_tokens cuts them off mid-thought.
+# Strip before validating so we don't reject a perfectly good "today" answer
+# that just happens to follow some chain-of-thought.
+_THINK_STRIPPER = ThinkBlockStripper.from_pair(DEFAULT_THINK_DELIMITERS)
 
 
 class ResolveRelativeDateTool(IServerTool):
@@ -294,23 +305,37 @@ Your answer (just the key):"""
                 logger.warning("📅 LLM fallback returned empty response")
                 return None
 
-            # Clean and validate the response
+            # Reasoning models leak <think>...</think> here — strip before
+            # parsing so we don't end up validating a whole chain-of-thought.
+            stripped_content = _THINK_STRIPPER.strip_all(raw_content)
             # Strip quotes that LLM may include (e.g., "today" -> today)
-            selected_key = raw_content.strip().strip('"\'').lower().replace(" ", "_")
+            selected_key = stripped_content.strip().strip('"\'').lower().replace(" ", "_")
 
             # Validate it's in our available keys
             if selected_key in available_keys:
                 logger.info(f"📅 LLM fallback resolved '{unrecognized_key}' → '{selected_key}'")
                 return selected_key
-            else:
-                # Try fuzzy match - maybe LLM added/removed underscores
-                for key in available_keys:
-                    if key.replace("_", "") == selected_key.replace("_", ""):
-                        logger.info(f"📅 LLM fallback fuzzy matched '{unrecognized_key}' → '{key}'")
-                        return key
 
-                logger.warning(f"📅 LLM fallback returned invalid key '{selected_key}' (not in available_keys)")
-                return None
+            # Try fuzzy match - maybe LLM added/removed underscores
+            for key in available_keys:
+                if key.replace("_", "") == selected_key.replace("_", ""):
+                    logger.info(f"📅 LLM fallback fuzzy matched '{unrecognized_key}' → '{key}'")
+                    return key
+
+            # Last-resort default: prefer "today" over passing the junk through.
+            # The caller treats None as "couldn't resolve" and may forward the
+            # unparseable key to the tool — which then crashes on strptime in
+            # the command. Defaulting to today keeps the request flowing and
+            # matches the fallback rule we already give the LLM in the prompt.
+            if "today" in available_keys:
+                logger.warning(
+                    f"📅 LLM fallback returned invalid key '{selected_key}' "
+                    f"(not in available_keys); defaulting to 'today'"
+                )
+                return "today"
+
+            logger.warning(f"📅 LLM fallback returned invalid key '{selected_key}' (not in available_keys)")
+            return None
 
         except Exception as e:
             logger.error(f"📅 LLM fallback error: {e}")

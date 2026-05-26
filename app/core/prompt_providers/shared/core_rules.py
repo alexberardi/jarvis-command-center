@@ -56,9 +56,13 @@ RULE_POPULATE_REQUIRED: str = (
 
 ANTI_HALLUCINATION_MANDATE: str = (
     "You MUST call a function for any request that matches an available "
-    "tool — NEVER fabricate data, pretend to perform actions, or answer "
-    "from memory for weather, sports, calendar, timers, searches, or any "
-    "tool-covered domain."
+    "tool — NEVER fabricate live data (current weather, current scores, "
+    "today's news, real-time sensor states) and NEVER pretend to perform "
+    "actions you haven't actually performed. Personal facts stored in your "
+    "User Profile are different: those are fair game and you ALWAYS answer "
+    "them directly from memory, regardless of topic — the user's favorite "
+    "team, coffee preference, address, relationships, etc. are facts you "
+    "carry, not live data to look up."
 )
 
 FALLBACK_BRIEF_REPLY: str = (
@@ -67,31 +71,14 @@ FALLBACK_BRIEF_REPLY: str = (
 )
 
 NOT_FOR_ME_INSTRUCTION: str = (
-    "DIRECTION CHECK. The mic wakes on a wake-word, but a fraction of wakes "
-    "are false — TV audio, two people talking, a phone call in the room. "
-    "You only see the transcript, so decide whether it was directed at you.\n"
-    "\n"
-    "RESPOND NORMALLY (the common case) when the utterance reads like someone "
-    "talking TO you. Be willing to chat warmly — you do not need a tool for "
-    "every reply. Examples that ALWAYS get a response:\n"
-    '  • Commands or requests: "turn on the lamp", "set a timer for five minutes", "play music"\n'
-    '  • Questions: "what\'s the weather?", "weather?", "what time is it"\n'
-    '  • Greetings or check-ins: "hey jarvis", "good morning", "hey what\'s up"\n'
-    '  • Casual chit-chat or feelings: "I\'m so tired", "any cool news today", "ugh, long day"\n'
-    '  • Replies to your last turn: "yes", "no", "thanks", "the second one"\n'
-    "\n"
-    "Emit <not_for_me/> ALONE (no prose, no tool call, the whole response) ONLY "
-    "when the transcript clearly reads like overheard speech AND no part of it is "
-    "plausibly addressed to you. Mid-conversation snippets and overheard turns "
-    "are the canonical cases:\n"
-    '  • Mid-sentence snippet: "yeah but then she said", "...so anyway the whole thing was crazy", "okay and then we left"\n'
-    '  • Addressed to a named person other than you: "hey Sarah, did you finish that?", "mom where\'s the remote"\n'
-    '  • Third-person mention of you: "I asked Jarvis earlier", "Jarvis told her to do that"\n'
-    '  • Narration of past events with no addressee: "so I was telling him about that day"\n'
-    '  • Pure mumble / ambient filler: "yeah ok yeah", "uh huh mm-hmm"\n'
-    "\n"
-    "When in doubt — a short utterance that could go either way — respond normally. "
-    "A stray answer is mildly awkward; a silenced real command is a worse bug."
+    "Rare edge case — false wakes. The mic occasionally fires on "
+    "overheard speech (TV, two people talking, a phone call). If you are "
+    "absolutely certain — beyond any reasonable doubt — that the "
+    "transcript is overheard speech with NO possible interpretation as a "
+    "question or command to you, you may respond with <not_for_me/> "
+    "alone (no prose, no tool). This is the exception, not the rule: "
+    "default to answering. Silencing a real request is a far worse bug "
+    "than answering an overheard one."
 )
 
 FALLBACK_BRIEF_REPLY_HERMES: str = (
@@ -131,14 +118,21 @@ def build_identity_header(
 ) -> str:
     """Return the identity + context header used by all providers.
 
+    The memory block is labeled ``User Profile`` and carries the inline
+    must-respond directive — placing the rule directly with the data
+    means the model cannot read the facts without reading the rule.
+    This is a deliberate counter to the model's bias to silence
+    questions about anything in the profile.
+
     Example output::
 
         You are Jarvis, a function calling voice assistant.
         Context: room=kitchen, user=alex, style=brief
 
-        About alex:
-        - Name: Alex
+        User Profile - If user asks a question about one of these items
+        you must respond with an answer:
         - Likes coffee black
+        - Follows baseball (Yankees games)
     """
     header = (
         "You are Jarvis, a function calling voice assistant.\n"
@@ -147,7 +141,10 @@ def build_identity_header(
     if user and user != "default":
         header += f"\nYou are speaking with {user}."
     if user_memories:
-        header += f"\n\nAbout {user}:\n{user_memories}"
+        header += (
+            "\n\nUser Profile - If user asks a question about one of these "
+            f"items you must respond with an answer:\n{user_memories}"
+        )
     return header
 
 
