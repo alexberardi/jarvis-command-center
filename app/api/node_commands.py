@@ -249,3 +249,52 @@ async def node_push_notification(
         sent=inbox_item_id is not None,
         inbox_item_id=inbox_item_id,
     )
+
+
+# ── Node Send Link (tap-to-open URL push) ─────────────────────────────
+
+
+class SendLinkRequest(BaseModel):
+    user_id: int
+    url: str
+    title: str | None = None
+    body: str | None = None
+
+
+class SendLinkResponse(BaseModel):
+    sent: bool
+
+
+@router.post(
+    "/node/send-link",
+    response_model=SendLinkResponse,
+)
+async def node_send_link(
+    request: SendLinkRequest,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+) -> SendLinkResponse:
+    """Push a tap-to-open URL to a specific user's devices.
+
+    Called by the built-in `send_link` node command after the speaker has
+    been recognized. user_id is trusted as the speaker_user_id resolved
+    server-side during the original voice conversation — the node only
+    sees user_ids that CC told it about.
+    """
+    from app.services.inbox_notification_service import send_link_push_sync
+
+    url = (request.url or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return SendLinkResponse(sent=False)
+
+    household_id = node_context.node.household_id
+    title = (request.title or "Link from Jarvis").strip() or "Link from Jarvis"
+    body = (request.body or "Tap to open").strip() or "Tap to open"
+
+    ok = send_link_push_sync(
+        household_id=household_id,
+        user_id=request.user_id,
+        url=url,
+        title=title,
+        body=body,
+    )
+    return SendLinkResponse(sent=ok)
