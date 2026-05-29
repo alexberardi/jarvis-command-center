@@ -223,6 +223,88 @@ def post_inbox_item_sync(
     return inbox_item_id
 
 
+def send_link_push_sync(
+    *,
+    household_id: str,
+    user_id: int,
+    url: str,
+    title: str,
+    body: str,
+) -> bool:
+    """Land a tap-to-open URL in the user's inbox AND fire a push.
+
+    Inbox first (so the link is visible even if push delivery fails — which
+    is the realistic failure mode for self-hosted relays / stale tokens).
+    Push second, targeted at the user. Mobile reads `data.url` on tap and
+    opens in the system browser.
+
+    Returns True if at least the inbox write succeeded. Push delivery is
+    best-effort and not reflected in the return value.
+    """
+    notifications_url = _get_notifications_url()
+    app_headers = _get_app_headers()
+
+    inbox_id: str | None = None
+    inbox_payload: dict[str, Any] = {
+        "household_id": household_id,
+        "title": title,
+        "summary": body,
+        "body": url,
+        "category": "link",
+        "source_service": "jarvis-command-center",
+        "user_id": user_id,
+        "metadata": {
+            "url": url,
+            "type": "open_url",
+        },
+    }
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                f"{notifications_url}/api/v0/inbox",
+                json=inbox_payload,
+                headers=app_headers,
+            )
+            resp.raise_for_status()
+            inbox_id = resp.json().get("id")
+    except Exception as e:
+        logger.error("send_link inbox write failed: %s", e)
+        return False
+
+    push_payload: dict[str, Any] = {
+        "target_type": "user",
+        "target_id": str(user_id),
+        "title": title,
+        "body": body,
+        "category": "link",
+        "priority": "high",
+        "data": {
+            "type": "open_url",
+            "url": url,
+            "household_id": household_id,
+            "inbox_item_id": inbox_id,
+        },
+    }
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(
+                f"{notifications_url}/api/v0/notify",
+                json=push_payload,
+                headers=app_headers,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "send_link push non-200: %s %s",
+                    resp.status_code, resp.text,
+                )
+    except Exception as e:
+        logger.warning("send_link push error: %s", e)
+
+    return True
+
+
 # ==========================================================================
 # Typed helpers for Phase 7 adapter lifecycle items.
 # ==========================================================================
