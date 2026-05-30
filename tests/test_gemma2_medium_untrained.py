@@ -186,7 +186,7 @@ class TestGemma2MediumUntrainedPrompt:
             sample_node_context, "America/New_York", sample_tools
         )
         assert "room=kitchen" in prompt
-        assert "user=alex" in prompt
+        assert "You are speaking with alex" in prompt
         assert "style=brief" in prompt
 
     def test_prompt_includes_tool_call_format(
@@ -208,16 +208,14 @@ class TestGemma2MediumUntrainedPrompt:
         sample_tools: list,
         sample_node_context: dict,
     ):
-        """Gemma 2 has no native tool format — uses pretty-printed JSON schemas."""
+        """Gemma 2 emits tool schemas as pretty-printed JSON inside <tools> XML tags."""
         prompt = provider.build_system_prompt(
             sample_node_context, "America/New_York", sample_tools
         )
-        # Should NOT use Qwen's <tools> XML wrapper
-        assert "<tools>" not in prompt
-        assert "</tools>" not in prompt
-        # Should have "Available functions:" with pretty-printed JSON
-        assert "Available functions:" in prompt
-        # Pretty-printed JSON has indentation
+        # Gemma 2 now uses <tools> XML wrapper (matches Hermes/Qwen format)
+        assert "<tools>" in prompt
+        assert "</tools>" in prompt
+        # Pretty-printed JSON inside the <tools> block has indentation
         assert '  "type": "function"' in prompt
 
     def test_prompt_includes_tool_schemas(
@@ -282,7 +280,8 @@ class TestGemma2MediumUntrainedPrompt:
     ):
         prompt = provider.build_system_prompt({}, None, sample_tools)
         assert "room=unknown" in prompt
-        assert "user=default" in prompt
+        # Default user is now omitted — the "speaking with" line is suppressed
+        assert "You are speaking with" not in prompt
         assert "style=brief" in prompt
 
     def test_prompt_includes_agent_context(
@@ -334,7 +333,10 @@ class TestGemma2MediumUntrainedPrompt:
         prompt = provider.build_system_prompt(
             sample_node_context, "America/New_York", sample_tools
         )
-        assert "NEVER fabricate" in prompt
+        # Gemma 2's prompt uses inline rules rather than the shared
+        # ANTI_HALLUCINATION_MANDATE — the "no fabricated answers" intent
+        # is enforced via "NEVER answer these from memory" on the tool-required rule.
+        assert "NEVER answer these from memory" in prompt
 
     def test_prompt_includes_no_iso_dates_rule(
         self,
@@ -345,7 +347,9 @@ class TestGemma2MediumUntrainedPrompt:
         prompt = provider.build_system_prompt(
             sample_node_context, "America/New_York", sample_tools
         )
-        assert "NEVER output ISO dates" in prompt
+        # Wording was updated from "NEVER output ISO dates" to
+        # "NEVER convert to ISO dates" in the inline date-params rule.
+        assert "NEVER convert to ISO dates" in prompt
 
 
 class TestGemma2MediumUntrainedParseResponse:

@@ -178,7 +178,7 @@ class TestLlama31MediumUntrainedPrompt:
             sample_node_context, "America/New_York", sample_tools
         )
         assert "room=kitchen" in prompt
-        assert "user=alex" in prompt
+        assert "You are speaking with alex" in prompt
         assert "style=brief" in prompt
 
     def test_prompt_includes_function_call_format(
@@ -237,11 +237,15 @@ class TestLlama31MediumUntrainedPrompt:
             sample_tools,
             sample_commands,
         )
+        # Llama 3.1 derives the Direct Answer Policy from `tools` (each tool
+        # carries its own allow_direct_answer flag), not from available_commands.
+        # The sample tools default to allow_direct_answer=False, so both end up
+        # in the MUST-call bucket. "calculate" lives only in sample_commands so
+        # it never appears here.
         assert "Direct Answer Policy" in prompt
         assert "MUST call tools for" in prompt
         assert "get_weather" in prompt
-        assert "Direct answers allowed for" in prompt
-        assert "calculate" in prompt
+        assert "set_timer" in prompt
 
     def test_prompt_without_commands(
         self,
@@ -252,7 +256,13 @@ class TestLlama31MediumUntrainedPrompt:
         prompt = provider.build_system_prompt(
             sample_node_context, "America/New_York", sample_tools, []
         )
-        assert "Direct Answer Policy" not in prompt
+        # Llama 3.1 sources the Direct Answer Policy from the tools list, so
+        # the section is rendered whenever there are tools — even with no
+        # available_commands. Both sample tools land in MUST-call by default.
+        assert "Direct Answer Policy" in prompt
+        assert "MUST call tools for" in prompt
+        assert "get_weather" in prompt
+        assert "set_timer" in prompt
 
     def test_prompt_with_empty_context(
         self,
@@ -261,7 +271,8 @@ class TestLlama31MediumUntrainedPrompt:
     ):
         prompt = provider.build_system_prompt({}, None, sample_tools)
         assert "room=unknown" in prompt
-        assert "user=default" in prompt
+        # Default user is now omitted — the "speaking with" line is suppressed
+        assert "You are speaking with" not in prompt
         assert "style=brief" in prompt
 
     def test_prompt_includes_agent_context(

@@ -179,7 +179,7 @@ class TestQwen25MediumUntrainedPrompt:
             sample_node_context, "America/New_York", sample_tools
         )
         assert "room=kitchen" in prompt
-        assert "user=alex" in prompt
+        assert "You are speaking with alex" in prompt
         assert "style=brief" in prompt
 
     def test_prompt_includes_tools_xml_tags(
@@ -292,7 +292,8 @@ class TestQwen25MediumUntrainedPrompt:
     ):
         prompt = provider.build_system_prompt({}, None, sample_tools)
         assert "room=unknown" in prompt
-        assert "user=default" in prompt
+        # Default user is now omitted — the "speaking with" line is suppressed
+        assert "You are speaking with" not in prompt
         assert "style=brief" in prompt
 
     def test_prompt_includes_agent_context(

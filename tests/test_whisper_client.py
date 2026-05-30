@@ -190,9 +190,11 @@ class TestWhisperClientTranscribe:
                     await client.transcribe(b"audio data", "recording.wav")
 
                     call_kwargs = mock_client.post.call_args[1]
-                    # Files should be a dict with "file" key containing tuple (filename, content)
+                    # Files is a list of (field_name, (filename, content)) tuples
+                    # for multipart upload — same shape httpx expects.
                     assert "files" in call_kwargs
-                    assert "file" in call_kwargs["files"]
+                    file_field_names = [entry[0] for entry in call_kwargs["files"]]
+                    assert "file" in file_field_names
 
     @pytest.mark.asyncio
     async def test_transcribe_sends_headers(self):

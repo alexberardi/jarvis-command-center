@@ -218,11 +218,13 @@ class TestContinueConversation:
                 tool_results=[{"tool_call_id": "call_123", "output": "Sunny, 72F"}],
             )
 
-            # The formatted response replaces tool exchange messages
-            # with a single assistant message containing data + response
+            # The text-mode path runs the tool output through a formatting
+            # LLM call which returns the rephrased user-facing response.
+            # The raw tool output ("Sunny, 72F") is NOT preserved verbatim —
+            # the formatter rephrases it into natural language.
             last_msg = messages[-1]
             assert last_msg["role"] == "assistant"
-            assert "Sunny, 72F" in last_msg["content"]  # tool data preserved
+            assert last_msg["content"] == "It's sunny and 72F."
             assert result["stop_reason"] == "complete"
 
 

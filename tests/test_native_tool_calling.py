@@ -16,6 +16,22 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+@pytest.fixture(autouse=True)
+def _mock_settings_service():
+    """Engine calls get_settings_service() at execute time which would spin
+    up a real DB engine; stub it so the tests stay offline."""
+    fake_settings = MagicMock()
+    fake_settings.get_bool.return_value = True
+    fake_settings.get.return_value = None
+    fake_settings.get_str.return_value = None
+    fake_settings.get_int.return_value = 0
+    with patch(
+        "app.core.tool_execution_engine.get_settings_service",
+        return_value=fake_settings,
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # _normalize_native_tool_calls tests
 # ---------------------------------------------------------------------------
@@ -120,6 +136,9 @@ class TestNativeToolCallingDualPath:
         provider.build_tools.return_value = [
             {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
         ]
+        # Engine pipes the final response through sanitize_text →
+        # clean_for_tts; both need strings.
+        provider.sanitize_text.side_effect = lambda s: s
         return provider
 
     @pytest.fixture
@@ -129,6 +148,7 @@ class TestNativeToolCallingDualPath:
         provider.supports_native_tools = False
         provider.get_response_format.return_value = {"type": "text"}
         provider.parse_response.return_value = None
+        provider.sanitize_text.side_effect = lambda s: s
         return provider
 
     @pytest.mark.asyncio

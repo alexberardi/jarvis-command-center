@@ -34,6 +34,7 @@ dependencies = [
     "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@4549b23",
     "ddgs>=7.0.0",
     "jarvis-web-scraper @ git+https://github.com/alexberardi/jarvis-web-scraper.git@60ac1bf",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
