@@ -284,11 +284,11 @@ class TestPromptProviderFactoryDualRoot:
         )
 
         provider = PromptProviderFactory.create_provider("DuplicateStub")
+        # Both stubs are defined in tests/ so __module__ comparison won't
+        # distinguish them — compare the underlying class instead.
         assert provider is not None
-        assert provider.__class__.__module__.startswith(
-            "app.core.prompt_providers."
-        )
-        assert "prompt_providers_custom" not in provider.__class__.__module__
+        assert isinstance(provider, builtin_dup)
+        assert not isinstance(provider, custom_dup)
 
     # ── Missing / empty custom root must not crash ───────────────────
 

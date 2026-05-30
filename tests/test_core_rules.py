@@ -83,27 +83,36 @@ class TestBuildIdentityHeader:
         result = build_identity_header("kitchen", "alex", "brief")
         assert result == (
             "You are Jarvis, a function calling voice assistant.\n"
-            "Context: room=kitchen, user=alex, style=brief"
+            "Context: room=kitchen, style=brief\n"
+            "You are speaking with alex."
         )
 
     def test_unknown_defaults(self):
+        # user="default" sentinel suppresses the "speaking with" line
         result = build_identity_header("unknown", "default", "brief")
         assert "room=unknown" in result
-        assert "user=default" in result
         assert "style=brief" in result
+        assert "You are speaking with" not in result
 
     def test_custom_values(self):
         result = build_identity_header("living_room", "bob", "verbose")
         assert "room=living_room" in result
-        assert "user=bob" in result
         assert "style=verbose" in result
+        assert "You are speaking with bob." in result
 
     def test_starts_with_jarvis(self):
         result = build_identity_header("r", "u", "v")
         assert result.startswith("You are Jarvis")
 
-    def test_two_lines(self):
+    def test_three_lines_with_user(self):
+        # Identity + Context + "speaking with" line = 3 lines when user is set
         result = build_identity_header("r", "u", "v")
+        lines = result.split("\n")
+        assert len(lines) == 3
+
+    def test_two_lines_without_user(self):
+        # user="default" omits the speaking-with line → 2 lines
+        result = build_identity_header("r", "default", "v")
         lines = result.split("\n")
         assert len(lines) == 2
 
@@ -148,7 +157,7 @@ class TestBuildRulesBlock:
         assert "- Be polite." in result
         # Extra rules come after the standard rules
         lines = result.split("\n")
-        standard_count = 7  # "Rules:" + 6 standard rules
+        standard_count = 8  # "Rules:" + 7 standard rules
         assert len(lines) == standard_count + 2
 
     def test_extra_rules_none(self):
@@ -157,16 +166,16 @@ class TestBuildRulesBlock:
         assert result_none == result_default
 
     def test_line_count_default(self):
-        """Default: Rules: header + 6 rules = 7 lines."""
+        """Default: Rules: header + 7 rules = 8 lines."""
         result = build_rules_block()
         lines = result.split("\n")
-        assert len(lines) == 7
+        assert len(lines) == 8
 
     def test_line_count_no_param_names(self):
-        """With param_names_rule=None: Rules: header + 5 rules = 6 lines."""
+        """With param_names_rule=None: Rules: header + 6 rules = 7 lines."""
         result = build_rules_block(param_names_rule=None)
         lines = result.split("\n")
-        assert len(lines) == 6
+        assert len(lines) == 7
 
     def test_terminology_substitution_in_extra_rules(self):
         result = build_rules_block(
@@ -212,6 +221,7 @@ class TestProviderOutputConsistency:
             "- Pick the function whose described purpose matches the user's actual topic — match on meaning, not keyword overlap. Use get_command_utterance_examples if unsure.",
             '- For date parameters like resolved_datetimes, you MUST use ONLY these natural date keys as string values: "today", "tomorrow", "day_after_tomorrow", "yesterday", "this_weekend", "this_year", "next_week". NEVER output ISO dates (e.g. 2025-01-01T00:00:00Z) or timestamps — the downstream system resolves these keys to actual dates.',
             "- Extract parameters from the user's words; only request clarification if required params are truly missing/ambiguous.",
+            '- User input comes from speech-to-text and may contain transcription errors. Interpret homophones and near-misses charitably (e.g., "watts" → "what\'s", "won" → "one", "whether" → "weather"). Proper nouns like team names, cities, and people are often misspelled — infer the intended name (e.g., "Ankeys" → "Yankees", "Albukirky" → "Albuquerque").',
         ]
         assert result == "\n".join(expected_lines)
 
@@ -240,5 +250,6 @@ class TestProviderOutputConsistency:
             "- Pick the tool whose described purpose matches the user's actual topic — match on meaning, not keyword overlap. Use get_command_utterance_examples if unsure.",
             '- For date parameters like resolved_datetimes, you MUST use ONLY these natural date keys as string values: "today", "tomorrow", "day_after_tomorrow", "yesterday", "this_weekend", "this_year", "next_week". NEVER output ISO dates (e.g. 2025-01-01T00:00:00Z) or timestamps — the downstream system resolves these keys to actual dates.',
             "- Extract parameters from the user's words; only request clarification if required params are truly missing/ambiguous.",
+            '- User input comes from speech-to-text and may contain transcription errors. Interpret homophones and near-misses charitably (e.g., "watts" → "what\'s", "won" → "one", "whether" → "weather"). Proper nouns like team names, cities, and people are often misspelled — infer the intended name (e.g., "Ankeys" → "Yankees", "Albukirky" → "Albuquerque").',
         ]
         assert result == "\n".join(expected_lines)

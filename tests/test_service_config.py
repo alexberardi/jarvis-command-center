@@ -50,21 +50,22 @@ class TestServiceConfig:
 
                 assert result is True
 
-    def test_init_without_config_url_raises(self):
-        """Test that init() raises if JARVIS_CONFIG_URL is not set."""
+    def test_init_without_config_url_warns_and_returns_false(self):
+        """Missing JARVIS_CONFIG_URL is non-fatal: init() logs the nag banner
+        and returns False so services can still boot in fallback-only mode."""
         env = {k: v for k, v in os.environ.items() if k != "JARVIS_CONFIG_URL"}
 
         with patch.dict(os.environ, env, clear=True):
             from app.core import service_config
 
-            with pytest.raises(ValueError, match="JARVIS_CONFIG_URL"):
-                service_config.init()
+            assert service_config.init() is False
+            assert service_config.is_initialized() is True
 
     def test_get_llm_proxy_url(self):
         """Test getting LLM proxy URL from config service."""
         mock_services = {
             "services": [
-                {"name": "jarvis-llm-proxy", "host": "gpu-server", "port": 7704, "url": "http://gpu-server:7704", "health_path": "/health"},
+                {"name": "jarvis-llm-proxy-api", "host": "gpu-server", "port": 7704, "url": "http://gpu-server:7704", "health_path": "/health"},
             ]
         }
 
@@ -144,8 +145,10 @@ class TestServiceConfig:
                 url = service_config.get_llm_proxy_url()
                 assert url == "http://fallback:7704"
 
-    def test_fallback_to_default_when_no_env_var(self):
-        """Test that we fall back to defaults when no env var either."""
+    def test_raises_when_no_env_var_and_not_in_config(self):
+        """When the service isn't in config-service AND no env var is set,
+        the lookup raises rather than guessing a hardcoded default — config
+        service is the source of truth."""
         mock_services = {"services": []}  # Empty - no services registered
 
         # Remove the fallback env var
@@ -162,16 +165,17 @@ class TestServiceConfig:
                 from app.core import service_config
                 service_config.init()
 
-                # Should fall back to hardcoded default
-                url = service_config.get_llm_proxy_url()
-                assert url == "http://localhost:7704"
+                with pytest.raises(ValueError, match="jarvis-llm-proxy-api"):
+                    service_config.get_llm_proxy_url()
 
     def test_get_url_before_init_raises(self):
-        """Test that getting URL before init raises RuntimeError."""
-        from app.core import service_config
+        """Test that getting URL before init raises (with no config + no env var)."""
+        env = {k: v for k, v in os.environ.items() if k != "JARVIS_LLM_PROXY_API_URL"}
+        with patch.dict(os.environ, env, clear=True):
+            from app.core import service_config
 
-        with pytest.raises(RuntimeError, match="not initialized"):
-            service_config.get_llm_proxy_url()
+            with pytest.raises(ValueError, match="jarvis-llm-proxy-api"):
+                service_config.get_llm_proxy_url()
 
     def test_is_initialized(self):
         """Test checking if service config is initialized."""

@@ -57,7 +57,7 @@ class TestSettingsDefinitions:
         categories = set(d.category for d in SETTINGS_DEFINITIONS)
         expected_categories = {"llm", "tool_classifier", "tool_router", "transcription",
                               "prompt", "model", "conversation", "admin", "memory",
-                              "network", "oauth", "smart_home", "adapter"}
+                              "network", "oauth", "smart_home", "adapter", "voice"}
         assert categories == expected_categories
 
 
