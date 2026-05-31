@@ -53,7 +53,7 @@ services:
 
   postgres:
     profiles: ["standalone"]
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_DB: jarvis_command_center
       POSTGRES_PASSWORD: postgres

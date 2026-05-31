@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_DB: jarvis_command_center
       POSTGRES_USER: jarvis_user
