@@ -502,9 +502,30 @@ class ConversationHandler:
         # loop immediately rather than reading the LLM's polite refusal.
         if contains_sentinel(result.get("assistant_message")):
             raw_msg = result.get("assistant_message") or ""
+            # Structured fields after the stable ``not_for_me_sentinel`` token
+            # so we can chart this in Loki without parsing prose: rate over
+            # time, per prompt provider, per direction-hint state. Without
+            # this the only way to count not_for_me events was to manually
+            # grep the prose log line.
+            provider_name = (
+                self.prompt_provider.__class__.__name__
+                if self.prompt_provider is not None else "none"
+            )
+            pre_wake = (
+                pre_wake_speech_seconds
+                if pre_wake_speech_seconds is not None else -1.0
+            )
+            hint_state = "active" if direction_hint else "absent"
             logger.info(
-                "🚫 Not-for-me sentinel detected — silent abort | "
-                "transcript=%r | raw_assistant=%r",
+                "🚫 not_for_me_sentinel | "
+                "conversation_id=%s speaker_user_id=%s prompt_provider=%s "
+                "pre_wake_speech_secs=%.2f direction_hint=%s "
+                "transcript=%r raw_assistant=%r",
+                conversation_id,
+                speaker_user_id,
+                provider_name,
+                pre_wake,
+                hint_state,
                 voice_command,
                 raw_msg[:160],
             )
