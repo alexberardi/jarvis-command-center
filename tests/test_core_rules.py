@@ -12,6 +12,7 @@ from app.core.prompt_providers.shared.core_rules import (
     ANTI_HALLUCINATION_MANDATE,
     FALLBACK_BRIEF_REPLY,
     FALLBACK_BRIEF_REPLY_HERMES,
+    NOT_FOR_ME_INSTRUCTION,
     RULE_BEST_MATCH_INTENT,
     RULE_DATE_PARAMS,
     RULE_EXTRACT_PARAMS,
@@ -74,6 +75,69 @@ class TestRuleConstants:
     def test_fallback_brief_reply_hermes(self):
         assert "brief spoken reply" in FALLBACK_BRIEF_REPLY_HERMES
         assert "no tool needed" in FALLBACK_BRIEF_REPLY_HERMES
+
+
+class TestNotForMeInstruction:
+    """Lock in the concrete cues the LLM uses for the not_for_me decision.
+
+    The instruction is the *single* place where Jarvis is taught WHEN to
+    emit ``<not_for_me/>``. Each cue below is load-bearing — silently
+    dropping one in a future edit would walk us back toward the v1
+    "default to answer, beyond reasonable doubt" stance that was missing
+    the false-wakes we deployed against in beta.
+    """
+
+    def test_mentions_sentinel_literal(self):
+        # The instruction must name the literal token the parser detects.
+        assert "<not_for_me/>" in NOT_FOR_ME_INSTRUCTION
+
+    def test_specifies_no_prose_no_tool(self):
+        # Without this the LLM tends to apologize + emit the sentinel
+        # alongside prose, which the parser still catches but defeats
+        # the "silent abort" intent on the streaming path.
+        assert "no prose" in NOT_FOR_ME_INSTRUCTION
+        assert "no tool" in NOT_FOR_ME_INSTRUCTION
+
+    def test_keeps_default_to_answer_guardrail(self):
+        # The hard floor — without this the model gets too eager and
+        # silences real but oddly-phrased requests.
+        assert "Silencing a real request is worse" in NOT_FOR_ME_INSTRUCTION
+
+    def test_addressee_cue_present(self):
+        # Cue 1: someone else by name. The most distinctive ambient
+        # signature when a household has multiple people in the room.
+        for name in ("Mom", "Sarah", "Dad"):
+            assert name in NOT_FOR_ME_INSTRUCTION, name
+
+    def test_mid_narrative_cue_present(self):
+        # Cue 2: fragment of an ongoing exchange between others.
+        assert "Mid-narrative fragment" in NOT_FOR_ME_INSTRUCTION
+        assert "and then I told him" in NOT_FOR_ME_INSTRUCTION
+
+    def test_ungrounded_reference_cue_present(self):
+        # Cue 3: references nothing in the conversation, profile, or
+        # tool output. This is the "current conversation" cue.
+        assert "not in this conversation" in NOT_FOR_ME_INSTRUCTION
+        assert "not in the user's profile" in NOT_FOR_ME_INSTRUCTION
+        assert "not in any tool result" in NOT_FOR_ME_INSTRUCTION
+
+    def test_conjunction_opener_cue_present(self):
+        # Cue 4: starts mid-sentence with a conjunction — wake fired
+        # while two people were already talking.
+        assert "Opens with a conjunction" in NOT_FOR_ME_INSTRUCTION
+
+    def test_direction_hint_cue_present(self):
+        # Cue 5: trust the acoustic hint the node ships when present.
+        # If we ever rename ``[direction hint: ...]`` the LLM stops
+        # noticing it — fail loudly here so we catch the drift.
+        assert "[direction hint:" in NOT_FOR_ME_INSTRUCTION
+        assert "trust it" in NOT_FOR_ME_INSTRUCTION
+
+    def test_borderline_examples_kept_addressed(self):
+        # Examples that LOOK borderline but should still get answered —
+        # without these the model errs aggressive on common short utterances.
+        assert "thanks" in NOT_FOR_ME_INSTRUCTION
+        assert "never mind" in NOT_FOR_ME_INSTRUCTION
 
 
 class TestBuildIdentityHeader:
