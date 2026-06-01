@@ -209,6 +209,7 @@ class PushNotificationRequest(BaseModel):
     body: str
     priority: str = "default"
     category: str = "alert"
+    user_id: int | None = None
 
 
 class PushNotificationResponse(BaseModel):
@@ -224,10 +225,12 @@ async def node_push_notification(
     request: PushNotificationRequest,
     node_context: NodeContextProvider = Depends(verify_api_key),
 ) -> PushNotificationResponse:
-    """Push a notification from a node to the household's mobile devices.
+    """Push a notification from a node to a user's devices, or the household.
 
     Used by agents (e.g., reminder_agent) to send push notifications
-    when a setting like REMINDER_PUSH_NOTIFICATIONS is enabled.
+    when a setting like REMINDER_PUSH_NOTIFICATIONS is enabled. When
+    ``user_id`` is provided, the notification targets only that user's
+    devices; otherwise it broadcasts to the entire household.
     """
     from app.services.inbox_notification_service import push_confirmation_to_inbox
 
@@ -236,7 +239,7 @@ async def node_push_notification(
 
     inbox_item_id = await push_confirmation_to_inbox(
         household_id=household_id,
-        user_id=None,  # Broadcast to household
+        user_id=request.user_id,
         node_id=node_id,
         title=request.title,
         summary=request.body,
@@ -298,3 +301,82 @@ async def node_send_link(
         body=body,
     )
     return SendLinkResponse(sent=ok)
+
+
+# ── Node Inbox Item (generic rich notification) ───────────────────────
+
+
+class NodeInboxItemRequest(BaseModel):
+    """Inbox item posted on behalf of a node command.
+
+    Server resolves household_id from the authenticated node and injects
+    metadata.node_id so any interactive-element callbacks route back to
+    the originating node. The node sends only its own content + auth — no
+    app credentials traverse the node.
+
+    ``create_push_notification`` is opt-in per-command (defaults to False).
+    Commands gate it behind their own user-facing setting — e.g. reminder
+    reads ``REMINDER_PUSH_NOTIFICATIONS`` — and pass the resolved boolean
+    here. Always-on push for every node-emitted inbox item would be noisy.
+    """
+    title: str
+    summary: str = ""
+    body: str = ""
+    category: str = "general"
+    metadata: dict | None = None
+    user_id: int | None = None
+    create_push_notification: bool = False
+
+
+class NodeInboxItemResponse(BaseModel):
+    id: str | None = None
+    sent: bool
+
+
+@router.post(
+    "/node/inbox-item",
+    response_model=NodeInboxItemResponse,
+)
+def node_post_inbox_item(
+    request: NodeInboxItemRequest,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+) -> NodeInboxItemResponse:
+    """Create an inbox item on behalf of a node command.
+
+    Distinct from /node/push-notification (informational reminders) and
+    /node/send-link (tap-to-open URLs): this one carries the full inbox
+    payload — body, category, metadata — so commands that produce rich
+    interactive content (cast cards, drill-downs, etc.) can land it in
+    the inbox without ever talking to jarvis-notifications directly.
+    """
+    from app.services.inbox_notification_service import post_inbox_item_sync
+
+    title = (request.title or "").strip()
+    if not title:
+        return NodeInboxItemResponse(sent=False)
+
+    household_id = node_context.node.household_id or ""
+    if not household_id:
+        logger.warning(
+            "Cannot post node inbox item: node %s has no household",
+            node_context.node.node_id,
+        )
+        return NodeInboxItemResponse(sent=False)
+
+    metadata = dict(request.metadata or {})
+    # The mobile app reads metadata.node_id to populate target_node_id on
+    # any tappable element callback — fix it server-side so the command
+    # doesn't need to know (or fake) its own node id.
+    metadata.setdefault("node_id", node_context.node.node_id)
+
+    inbox_id = post_inbox_item_sync(
+        household_id=household_id,
+        user_id=request.user_id,
+        title=title,
+        summary=request.summary or "",
+        body=request.body or "",
+        category=request.category or "general",
+        metadata=metadata,
+        push=request.create_push_notification,
+    )
+    return NodeInboxItemResponse(id=inbox_id, sent=inbox_id is not None)
