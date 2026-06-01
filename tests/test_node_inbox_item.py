@@ -126,6 +126,51 @@ class TestNodeInboxItemEndpoint:
                 app.dependency_overrides.clear()
         assert mock_post.call_args.kwargs["push"] is False
 
+    def test_target_type_user_forwarded(self, test_db):
+        """target_type=user should flow through to post_inbox_item_sync so
+        the push lands on the named user, not the whole household."""
+        node = _create_node(test_db)
+        with patch("app.services.inbox_notification_service.post_inbox_item_sync") as mock_post:
+            mock_post.return_value = "inbox-xyz"
+            client = _node_client(test_db, node)
+            try:
+                client.post(
+                    "/api/v0/node/inbox-item",
+                    json={
+                        "title": "x",
+                        "user_id": 7,
+                        "create_push_notification": True,
+                        "target_type": "user",
+                    },
+                )
+            finally:
+                app.dependency_overrides.clear()
+        assert mock_post.call_args.kwargs["target_type"] == "user"
+        assert mock_post.call_args.kwargs["user_id"] == 7
+
+    def test_target_type_defaults_household(self, test_db):
+        node = _create_node(test_db)
+        with patch("app.services.inbox_notification_service.post_inbox_item_sync") as mock_post:
+            mock_post.return_value = "inbox-xyz"
+            client = _node_client(test_db, node)
+            try:
+                client.post("/api/v0/node/inbox-item", json={"title": "x"})
+            finally:
+                app.dependency_overrides.clear()
+        assert mock_post.call_args.kwargs["target_type"] == "household"
+
+    def test_invalid_target_type_rejected(self, test_db):
+        node = _create_node(test_db)
+        client = _node_client(test_db, node)
+        try:
+            resp = client.post(
+                "/api/v0/node/inbox-item",
+                json={"title": "x", "target_type": "broadcast"},
+            )
+        finally:
+            app.dependency_overrides.clear()
+        assert resp.status_code in (400, 422)
+
     def test_empty_title_returns_sent_false(self, test_db):
         node = _create_node(test_db)
         with patch("app.services.inbox_notification_service.post_inbox_item_sync") as mock_post:
