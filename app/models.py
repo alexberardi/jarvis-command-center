@@ -671,3 +671,45 @@ class RequestTrace(Base):
     total_duration_ms = Column(Float, nullable=False)
     spans_json = Column(Text, nullable=False)            # JSON array of span objects
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class CallbackJob(Base):
+    """Interactive-notification callback: mobile tap → CC → MQTT → node → CC → mobile.
+
+    Lifecycle:
+    1. Mobile app POSTs (user-JWT) with {command, callback, data, target_node_id}
+       — created from a tap on an interactive element in a rich inbox item.
+    2. CC creates the row (status=pending) and publishes
+       [{"command": "callback", "details": {"request_id": id}}] to the node's
+       commands topic via NodeCommandService (job.id == MQTT request_id).
+    3. Node GETs /api/v0/callbacks/{id} (node X-API-Key) and reads the full
+       payload. MQTT carries only the opaque id — zero-trust delivery.
+    4. Node dispatches to the command's @callback-decorated method, then POSTs
+       /api/v0/callbacks/{id}/result with success/error/context_data.
+    5. The callback method is responsible for emitting any follow-up inbox
+       item (via the notifications service) — this row just tracks the job.
+    """
+    __tablename__ = 'callback_jobs'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    household_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True)  # JWT user who originated the tap
+    command_name = Column(String(128), nullable=False)
+    callback_name = Column(String(128), nullable=False)
+    data_json = Column(Text, nullable=True)  # opaque per-callback payload from the inbox item
+    # Renderer hint chosen by the command at element-creation time.
+    # "new_notification" → result endpoint creates an inbox item server-side
+    #                      (back-compat default; mobile fire-and-forget).
+    # "stack"            → mobile pushed a screen; it polls the user-JWT'd
+    #                      GET endpoint and renders inline. No inbox row.
+    # "popover"          → modal sheet, same poll/render semantics as "stack".
+    navigation_type = Column(String(32), nullable=False, default="new_notification")
+    status = Column(String(20), nullable=False, default="pending")  # pending, completed, failed, expired
+    error_message = Column(Text, nullable=True)
+    result_context_data_json = Column(Text, nullable=True)  # CommandResponse.context_data from the node
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    node = relationship("Node", backref=backref("callback_jobs", passive_deletes=True), passive_deletes=True)

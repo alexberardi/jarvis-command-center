@@ -501,6 +501,10 @@ app.include_router(node_updates.router, prefix="/api/v0", tags=["node-updates"])
 from app.api import bluetooth
 app.include_router(bluetooth.router, prefix="/api/v0", tags=["bluetooth"])
 
+# Include interactive-notification callback router (mobile tap -> node @callback)
+from app.api import callbacks
+app.include_router(callbacks.router, prefix="/api/v0", tags=["callbacks"])
+
 # Include request trace endpoints (admin + mobile)
 from app.api import traces as traces_api
 app.include_router(traces_api.admin_router, prefix="/api/v0/admin", tags=["traces-admin"])
