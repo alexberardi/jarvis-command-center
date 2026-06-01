@@ -1,8 +1,9 @@
 """Pre-TTS text sanitation.
 
 Strips characters that don't belong in spoken output regardless of which
-LLM produced them — currently emoji, but the same shape works for any
-future "looks fine on screen, terrible spoken aloud" cases.
+LLM produced them — emoji + markdown presentation syntax that TTS would
+otherwise read aloud literally ("asterisk asterisk hello asterisk
+asterisk").
 
 Distinct from `IJarvisPromptProvider.sanitize_text`, which removes
 model-specific scaffolding (Qwen3 ``<think>...</think>``, etc.). That
@@ -48,8 +49,58 @@ _EMOJI_RE = re.compile(
 )
 
 
+# Markdown patterns applied in order. Each strips presentation syntax
+# while preserving the wrapped prose so the TTS still hears the words.
+#
+# Order matters: triple-fence code blocks before inline backticks;
+# ``***bold-italic***`` before ``**bold**`` before ``*italic*`` (otherwise
+# the shorter pattern consumes the outer asterisks and orphans the inner
+# ones).
+_MARKDOWN_SUBS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Fenced code blocks ```lang\n...\n``` — DOTALL to span lines, also
+    # eats an optional language hint on the opening fence.
+    (re.compile(r"```[a-zA-Z0-9_-]*\n?(.*?)```", flags=re.DOTALL), r"\1"),
+    # Inline code `...`
+    (re.compile(r"`([^`\n]+)`"), r"\1"),
+    # Image ![alt](url) — drop entirely (alt text is rarely useful spoken)
+    (re.compile(r"!\[[^\]]*\]\([^)]+\)"), ""),
+    # Link [text](url) → text
+    (re.compile(r"\[([^\]]+)\]\([^)]+\)"), r"\1"),
+    # Bold-italic ***text***
+    (re.compile(r"\*\*\*([^\*\n]+?)\*\*\*"), r"\1"),
+    # Bold **text**
+    (re.compile(r"\*\*([^\*\n]+?)\*\*"), r"\1"),
+    # Italic *text* — single asterisks wrapping a span
+    (re.compile(r"\*([^\*\n]+?)\*"), r"\1"),
+    # Bold __text__
+    (re.compile(r"__([^_\n]+?)__"), r"\1"),
+    # Italic _text_ — only when the underscores are at word boundaries,
+    # so identifiers like ``user_id`` are left alone.
+    (re.compile(r"(?<![A-Za-z0-9])_([^_\n]+?)_(?![A-Za-z0-9])"), r"\1"),
+    # Strikethrough ~~text~~
+    (re.compile(r"~~([^~\n]+?)~~"), r"\1"),
+    # Headings at line start: ``# ``, ``## ``, ...
+    (re.compile(r"^[ \t]*#{1,6}[ \t]+", flags=re.MULTILINE), ""),
+    # Blockquote markers at line start
+    (re.compile(r"^[ \t]*>[ \t]?", flags=re.MULTILINE), ""),
+    # Unordered list markers (-, *, +) at line start
+    (re.compile(r"^[ \t]*[-\*\+][ \t]+", flags=re.MULTILINE), ""),
+    # Ordered list markers (1., 2., ...) at line start
+    (re.compile(r"^[ \t]*\d+\.[ \t]+", flags=re.MULTILINE), ""),
+    # Horizontal rules — a whole line of ---, ***, or ___
+    (re.compile(r"^[ \t]*[-\*_]{3,}[ \t]*$", flags=re.MULTILINE), ""),
+)
+
+# Final sweep for orphaned formatting characters the paired patterns above
+# didn't catch (e.g. an unclosed ``*hello`` or a stray trailing ``*``).
+# Matches a run of ``*``/``~``/`` ` `` glyphs that has a non-word char on
+# at least one side, so they're clearly punctuation rather than embedded
+# in something like ``5*3`` (which we leave for the TTS to interpret).
+_ORPHAN_MARKDOWN_RE = re.compile(r"(?<!\w)[\*~`]+|[\*~`]+(?!\w)")
+
+
 def clean_for_tts(text: str) -> str:
-    """Return ``text`` stripped of emoji + collapsed whitespace.
+    """Return ``text`` with emoji, markdown syntax, and double-spaces removed.
 
     Safe to call on any string. Returns the input unchanged when there's
     nothing to strip.
@@ -57,10 +108,12 @@ def clean_for_tts(text: str) -> str:
     if not text:
         return text
     cleaned = _EMOJI_RE.sub("", text)
+    for pattern, replacement in _MARKDOWN_SUBS:
+        cleaned = pattern.sub(replacement, cleaned)
+    cleaned = _ORPHAN_MARKDOWN_RE.sub("", cleaned)
     if cleaned == text:
         return text
-    # Collapse any double-spaces an emoji removal may have left behind
-    # (e.g. "you 😄 there" → "you  there"). Also trim leading/trailing
-    # space introduced if an emoji was at a string boundary.
-    cleaned = re.sub(r"  +", " ", cleaned).strip()
+    # Collapse double-spaces left by removals and trim boundaries.
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned
