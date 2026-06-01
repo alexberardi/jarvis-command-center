@@ -224,6 +224,42 @@ def create_settings_request(
 
 
 @router.get(
+    "/nodes/{node_id}/settings/requests",
+    response_model=list[SettingsRequestResponse],
+)
+def list_pending_settings_requests(
+    node_id: str,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+    db: Session = Depends(get_db),
+):
+    """Return the node's still-pending, non-expired settings requests.
+
+    Backstops the MQTT publish path: a settings_request published
+    while the node was offline beyond Mosquitto's persistence window
+    (broker restart, fresh-provision before the first persistent
+    session is established) is otherwise lost forever and the mobile
+    snapshot poll spins on 202 indefinitely. The node calls this on
+    every MQTT (re)connect and re-runs the snapshot pipeline for each
+    pending ID, so the worst-case time-to-recovery for a dropped
+    publish is bounded by the next reconnect — typically seconds.
+    """
+    if node_context.node.node_id != node_id:
+        raise HTTPException(status_code=403, detail="Cannot access other node's requests")
+
+    pending = (
+        db.query(SettingsRequest)
+        .filter(
+            SettingsRequest.node_id == node_id,
+            SettingsRequest.status == "pending",
+            SettingsRequest.expires_at > datetime.utcnow(),
+        )
+        .order_by(SettingsRequest.created_at.asc())
+        .all()
+    )
+    return pending
+
+
+@router.get(
     "/nodes/{node_id}/settings/requests/{request_id}",
     response_model=SettingsRequestResponse,
 )
