@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, Response
 from pydantic import BaseModel
 
 from app.core.clients import TTSClient, WhisperClient
+from app.core.tts_text import clean_for_tts
 from app.deps import verify_user_jwt, verify_household_role, AuthenticatedUser
 
 logger = logging.getLogger("uvicorn")
@@ -71,5 +72,5 @@ async def mobile_tts(
         user_id=user.user_id,
     )
 
-    audio = await client.speak(request.text)
+    audio = await client.speak(clean_for_tts(request.text))
     return Response(content=audio, media_type="audio/wav")

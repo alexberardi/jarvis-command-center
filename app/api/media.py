@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from app.deps import verify_api_key
 from app.context_providers.node_context_provider import NodeContextProvider
 from app.core.clients import TTSClient, WhisperClient
+from app.core.tts_text import clean_for_tts
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -45,7 +46,7 @@ async def tts_speak(
         household_id=node_context.household_id,
         node_id=node_context.node.node_id,
     )
-    audio = await client.speak(request.text)
+    audio = await client.speak(clean_for_tts(request.text))
     return Response(content=audio, media_type="audio/wav")
 
 
@@ -63,7 +64,7 @@ async def tts_speak_stream(
         household_id=node_context.household_id,
         node_id=node_context.node.node_id,
     )
-    audio_iter, audio_meta = await client.speak_stream(request.text)
+    audio_iter, audio_meta = await client.speak_stream(clean_for_tts(request.text))
     return StreamingResponse(
         audio_iter,
         media_type="audio/raw",
