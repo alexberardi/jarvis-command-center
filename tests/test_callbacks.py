@@ -465,6 +465,30 @@ class TestResultFansOutOnNewNotification:
                 app.dependency_overrides.clear()
         mock_post.assert_not_called()
 
+    def test_new_notification_pushes_to_user(self, test_db):
+        """Callbacks always have a user_id (the JWT-authenticated tapper),
+        so the fan-out push should land on that user — not the household."""
+        node = _create_node(test_db)
+        job = _create_job(test_db, node=node, user_id=42)
+        job.navigation_type = "new_notification"
+        test_db.commit()
+
+        client = _node_client_for(test_db, node)
+        with patch("app.services.inbox_notification_service.post_inbox_item_sync") as mock_post:
+            mock_post.return_value = "inbox-x"
+            try:
+                client.post(
+                    f"/api/v0/callbacks/{job.id}/result",
+                    json={
+                        "success": True,
+                        "context_data": {"inbox": {"title": "Tom Hanks"}},
+                    },
+                )
+            finally:
+                app.dependency_overrides.clear()
+        assert mock_post.call_args.kwargs["target_type"] == "user"
+        assert mock_post.call_args.kwargs["user_id"] == 42
+
     def test_failed_result_does_not_create_inbox(self, test_db):
         node = _create_node(test_db)
         job = _create_job(test_db, node=node)

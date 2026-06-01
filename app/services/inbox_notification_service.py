@@ -7,11 +7,40 @@ mobile app can render buttons and the user can confirm or cancel.
 
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 logger = logging.getLogger("uvicorn")
+
+# Allowed push fan-out targets. "household" broadcasts to every device
+# registered to the household; "user" sends only to the named user's
+# devices. Defaults are deliberately "household" everywhere callers
+# don't specify it so back-compat lands silently — but new callers (or
+# commands with a clear single-user owner like a voice request) should
+# pass "user" explicitly.
+PushTargetType = Literal["user", "household"]
+
+
+def _resolve_push_target(
+    target_type: PushTargetType,
+    user_id: int | None,
+    household_id: str,
+) -> tuple[str, str]:
+    """Return ``(target_type, target_id)`` for the notifications service.
+
+    Falls back to household if "user" is requested without a user_id —
+    losing the push is worse than buzzing the household by accident, and
+    the caller gets a warning either way.
+    """
+    if target_type == "user":
+        if user_id is None:
+            logger.warning(
+                "push target_type=user but user_id is None; falling back to household",
+            )
+            return ("household", household_id)
+        return ("user", str(user_id))
+    return ("household", household_id)
 
 
 async def push_confirmation_to_inbox(
@@ -24,6 +53,7 @@ async def push_confirmation_to_inbox(
     command_name: str,
     actions: list[dict[str, str]],
     draft: dict[str, Any] | None = None,
+    target_type: PushTargetType = "household",
 ) -> str | None:
     """Push a confirmation item to the notifications inbox.
 
@@ -82,6 +112,8 @@ async def push_confirmation_to_inbox(
                 notifications_url,
                 app_headers,
                 household_id=household_id,
+                user_id=user_id,
+                target_type=target_type,
                 title=title,
                 body=summary,
                 inbox_item_id=inbox_item_id,
@@ -101,11 +133,16 @@ async def _send_push(
     title: str,
     body: str,
     inbox_item_id: str,
+    user_id: int | None = None,
+    target_type: PushTargetType = "household",
 ) -> None:
     """Send a push notification linked to the inbox item."""
+    resolved_type, resolved_id = _resolve_push_target(
+        target_type, user_id, household_id,
+    )
     payload: dict[str, Any] = {
-        "target_type": "household",
-        "target_id": household_id,
+        "target_type": resolved_type,
+        "target_id": resolved_id,
         "title": title,
         "body": body,
         "data": {
@@ -164,6 +201,7 @@ def post_inbox_item_sync(
     push: bool = True,
     push_category: str | None = None,
     push_type: str | None = None,
+    target_type: PushTargetType = "household",
 ) -> str | None:
     """Post an inbox item and (optionally) fire a push, both via sync httpx.
 
@@ -200,12 +238,15 @@ def post_inbox_item_sync(
 
     if push:
         try:
+            resolved_type, resolved_id = _resolve_push_target(
+                target_type, user_id, household_id,
+            )
             with httpx.Client(timeout=10.0) as client:
                 client.post(
                     f"{notifications_url}/api/v0/notify",
                     json={
-                        "target_type": "household",
-                        "target_id": household_id,
+                        "target_type": resolved_type,
+                        "target_id": resolved_id,
                         "title": title,
                         "body": summary,
                         "data": {

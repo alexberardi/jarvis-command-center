@@ -287,6 +287,13 @@ def post_callback_result(
                 from app.services.inbox_notification_service import post_inbox_item_sync
                 metadata = dict(inbox.get("metadata") or {})
                 metadata.setdefault("node_id", node_ctx.node.node_id)
+                # Callbacks always have a user_id (the tapping user from
+                # the JWT on the original POST /callbacks). Push them
+                # user-scoped by default so only the user who tapped
+                # gets the buzz, not the whole household.
+                target_type = inbox.get("target_type")
+                if target_type not in ("user", "household"):
+                    target_type = "user" if job.user_id is not None else "household"
                 post_inbox_item_sync(
                     household_id=job.household_id,
                     user_id=job.user_id,
@@ -296,6 +303,7 @@ def post_callback_result(
                     category=inbox.get("category") or "callback_result",
                     metadata=metadata,
                     push=bool(inbox.get("create_push_notification", False)),
+                    target_type=target_type,
                 )
             except Exception as e:
                 # Inbox creation is best-effort — the result still records.

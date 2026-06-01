@@ -10,6 +10,7 @@ import logging
 import os
 import tempfile
 import time
+from typing import Literal
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -210,6 +211,11 @@ class PushNotificationRequest(BaseModel):
     priority: str = "default"
     category: str = "alert"
     user_id: int | None = None
+    # "household" broadcasts to every device; "user" sends only to the
+    # named user_id's devices. Defaults to "household" for back-compat —
+    # commands with a clear owner (reminders, voice-triggered single-user
+    # results) should pass "user" explicitly.
+    target_type: Literal["user", "household"] = "household"
 
 
 class PushNotificationResponse(BaseModel):
@@ -246,6 +252,7 @@ async def node_push_notification(
         body=request.body,
         command_name="reminder",
         actions=[],  # No actions — informational only
+        target_type=request.target_type,
     )
 
     return PushNotificationResponse(
@@ -318,6 +325,11 @@ class NodeInboxItemRequest(BaseModel):
     Commands gate it behind their own user-facing setting — e.g. reminder
     reads ``REMINDER_PUSH_NOTIFICATIONS`` — and pass the resolved boolean
     here. Always-on push for every node-emitted inbox item would be noisy.
+
+    ``target_type`` controls who the *push* lands on when create_push_notification
+    is True. Defaults to "household" for back-compat; commands with a
+    clear owner (e.g. voice-triggered with a known speaker_user_id)
+    should pass "user".
     """
     title: str
     summary: str = ""
@@ -326,6 +338,7 @@ class NodeInboxItemRequest(BaseModel):
     metadata: dict | None = None
     user_id: int | None = None
     create_push_notification: bool = False
+    target_type: Literal["user", "household"] = "household"
 
 
 class NodeInboxItemResponse(BaseModel):
@@ -378,5 +391,6 @@ def node_post_inbox_item(
         category=request.category or "general",
         metadata=metadata,
         push=request.create_push_notification,
+        target_type=request.target_type,
     )
     return NodeInboxItemResponse(id=inbox_id, sent=inbox_id is not None)
