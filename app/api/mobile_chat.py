@@ -269,8 +269,15 @@ async def _wait_for_result_file(request_id: str, timeout: float = 10.0) -> dict[
 async def _route_tool_call_to_node(
     node_id: str, tool_call: dict[str, Any],
     user_id: int | None = None,
+    voice_command: str | None = None,
 ) -> dict[str, Any]:
-    """Route a single tool call to a node via MQTT and wait for the result."""
+    """Route a single tool call to a node via MQTT and wait for the result.
+
+    ``voice_command`` is the user's original utterance (from mobile chat,
+    that's the text they typed). The node forwards it into
+    ``RequestInformation`` so commands can inspect the raw phrase — used by
+    e.g. the spotify command's playlist-intent detection.
+    """
     from app.services.node_command_service import get_node_command_service
 
     func = tool_call.get("function", {})
@@ -288,6 +295,8 @@ async def _route_tool_call_to_node(
     }
     if user_id is not None:
         details["user_id"] = user_id
+    if voice_command:
+        details["voice_command"] = voice_command
 
     service = get_node_command_service()
     service.publish_command_with_id(node_id, "tool_call", details, request_id)
@@ -442,7 +451,10 @@ async def _chat_stream(
                 for tc in tool_calls:
                     _tc_name = tc.get("function", {}).get("name", "?")
                     with timing.measure(f"mqtt_tool_{_tc_name}", service="node", metadata={"command": _tc_name}):
-                        tc_result = await _route_tool_call_to_node(node.node_id, tc, user_id=user.user_id)
+                        tc_result = await _route_tool_call_to_node(
+                            node.node_id, tc, user_id=user.user_id,
+                            voice_command=request.message,
+                        )
                     tool_results.append(tc_result)
 
                     # Extract actions from tool output
