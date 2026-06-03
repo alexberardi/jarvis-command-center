@@ -105,6 +105,84 @@ class TestWarmupConversation:
                 assert "get_weather" in tool_names
 
 
+class TestSttNoisePreFilter:
+    """The pre-LLM gate added 2026-06-02: bracketed / empty transcripts
+    must return ``not_for_me`` without invoking the LLM at all. Locks in
+    that the engine is not even constructed for these inputs."""
+
+    @pytest.mark.asyncio
+    async def test_asterisk_sniff_short_circuits_without_llm(self):
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock()
+        mock_client = MagicMock()
+        handler = ConversationHandler(model=mock_model, llm_client=mock_client)
+
+        with patch("app.core.conversation_handler.ToolExecutionEngine") as MockEngine:
+            with patch("app.core.conversation_handler.conversation_cache") as mock_cache:
+                # Cache should NEVER be consulted — we short-circuit before
+                # touching it. Set a return value anyway so a mistaken read
+                # would still let the test reach the engine assertion.
+                mock_cache.get_messages.return_value = [{"role": "system", "content": "sys"}]
+                mock_cache.get_tools.return_value = []
+                mock_cache.get_available_commands.return_value = []
+
+                result = await handler.process_voice_command_with_tools(
+                    voice_command="*sniff*",
+                    conversation_id="test-conv",
+                )
+
+        assert result["stop_reason"] == "not_for_me"
+        assert result["assistant_message"] == ""
+        MockEngine.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_string_short_circuits(self):
+        from app.core.conversation_handler import ConversationHandler
+
+        handler = ConversationHandler(model=MagicMock(), llm_client=MagicMock())
+
+        with patch("app.core.conversation_handler.ToolExecutionEngine") as MockEngine:
+            result = await handler.process_voice_command_with_tools(
+                voice_command="",
+                conversation_id="test-conv",
+            )
+
+        assert result["stop_reason"] == "not_for_me"
+        MockEngine.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_real_command_does_not_short_circuit(self):
+        """Sanity: legitimate commands still reach the engine."""
+        from app.core.conversation_handler import ConversationHandler
+
+        handler = ConversationHandler(model=MagicMock(), llm_client=MagicMock())
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.conversation_handler.conversation_cache") as mock_cache:
+            mock_cache.get_messages.return_value = messages
+            mock_cache.get_tools.return_value = []
+            mock_cache.get_available_commands.return_value = []
+            mock_cache.get_node_context.return_value = {}
+            mock_cache.get_timezone.return_value = None
+
+            with patch("app.core.conversation_handler.ToolExecutionEngine") as MockEngine:
+                mock_engine = MagicMock()
+                mock_engine.execute = AsyncMock(return_value={
+                    "stop_reason": "complete",
+                    "assistant_message": "Sure",
+                })
+                MockEngine.return_value = mock_engine
+
+                await handler.process_voice_command_with_tools(
+                    voice_command="what's the weather",
+                    conversation_id="test-conv",
+                )
+
+                # Engine must have been invoked exactly once.
+                mock_engine.execute.assert_called_once()
+
+
 class TestProcessVoiceCommand:
     """Tests for processing voice commands."""
 

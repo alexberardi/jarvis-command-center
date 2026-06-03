@@ -139,6 +139,66 @@ class TestNotForMeInstruction:
         assert "thanks" in NOT_FOR_ME_INSTRUCTION
         assert "never mind" in NOT_FOR_ME_INSTRUCTION
 
+    def test_sentinel_is_framed_as_first_class_action(self):
+        # The prompt must name the sentinel as a terminal action that
+        # outranks other rules. Without this framing the model sees the
+        # sentinel as a meta-comment that competes with the "must call a
+        # tool" guards, which is what let the 2026-06-02 regression slip
+        # through.
+        body = NOT_FOR_ME_INSTRUCTION.lower()
+        assert "first-class" in body or "first class" in body
+        assert "terminal action" in body
+        assert "outranks" in body
+
+    def test_requires_positive_addressing_signal(self):
+        # The new rule: don't answer just because nothing fired the
+        # negative cues — require a positive signal that this utterance
+        # is for you.
+        body = NOT_FOR_ME_INSTRUCTION.lower()
+        assert "positive" in body
+        # All three positive-signal categories must be named.
+        assert "names you explicitly" in body
+        assert "clear imperative" in body
+        # The wording "question only you can answer" is load-bearing — it
+        # tells the model the question must require Jarvis specifically.
+        assert "only you can answer" in body
+
+    def test_stt_artifact_cue_present(self):
+        # The 2026-06-02 prod hallucination ("*sniff*" → "I smell
+        # something burning") needs the LLM to recognize Whisper's
+        # bracketed action notation as non-speech, not as content.
+        body = NOT_FOR_ME_INSTRUCTION
+        assert "STT artifact" in body
+        assert "*sniff*" in body
+        assert "*laughter*" in body or "[laughter]" in body or "<inaudible>" in body
+
+    def test_emotional_fragment_cue_present(self):
+        # Prevents "I'm sorry" / "oh no" / a sob from triggering a
+        # therapist-style response from Jarvis.
+        body = NOT_FOR_ME_INSTRUCTION
+        assert "emotional reaction" in body or "emotional fragment" in body
+        # The exact "I'm sorry" example is the smoking-gun input from the
+        # 2026-06-02 incident — lock the wording.
+        assert "I'm sorry" in body
+
+    def test_quiet_hint_branch_holds_the_answer_bias(self):
+        # The "Silencing a real request is worse" guardrail must live
+        # under the quiet-hint branch, NOT as the unconditional default
+        # — under an ambient/no-hint signal we require positive evidence
+        # instead.
+        body = NOT_FOR_ME_INSTRUCTION
+        # The phrase still appears (existing guardrail test) AND must be
+        # qualified with "quiet-hint" framing nearby. Soft check: look
+        # for the qualifier within ~200 chars of the phrase.
+        idx = body.find("Silencing a real request is worse")
+        assert idx != -1
+        window = body[max(0, idx - 200):idx + 200].lower()
+        assert "quiet" in window, (
+            "The 'silencing a real request is worse' bias must be scoped "
+            "to the quiet-hint branch; otherwise it overrides the new "
+            "positive-evidence rule on ambient turns."
+        )
+
 
 class TestBuildIdentityHeader:
     """Test build_identity_header output."""

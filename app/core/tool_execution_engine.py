@@ -15,6 +15,7 @@ from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 from app.core.conversation_cache import conversation_cache
+from app.core.not_for_me import contains_sentinel
 from app.services.settings_service import get_settings_service
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.tool_builder import ToolBuilder
@@ -707,6 +708,31 @@ class ToolExecutionEngine:
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
             messages.append(assistant_msg)
+
+            # ``<not_for_me/>`` short-circuit. Must run BEFORE the
+            # force-tool-calls / must-call retry guards below: those treat
+            # ``finish_reason="stop"`` with no tool call as "the model
+            # refused to pick a tool, try again", which strips the sentinel
+            # and burns iterations until the model gives up and produces
+            # real prose. That bug let "I'm sorry" → <not_for_me/> →
+            # <not_for_me/> → "It's okay. How can I assist you?" reach TTS
+            # in the 2026-06-02 prod incident. The sentinel is a valid
+            # terminal action and outranks every retry guard.
+            if contains_sentinel(raw_content) or contains_sentinel(
+                assistant_message if isinstance(assistant_message, str) else None
+            ):
+                logger.info(
+                    "🚫 not_for_me sentinel detected at iter %d — short-circuit return",
+                    iteration + 1,
+                )
+                _log_usage(iteration + 1, "not_for_me")
+                result = {
+                    "stop_reason": "not_for_me",
+                    "assistant_message": raw_content,
+                }
+                if reasoning_parts:
+                    result["reasoning"] = "\n\n".join(reasoning_parts)
+                return result
 
             # Handle different finish reasons
             if finish_reason == "stop":
