@@ -183,6 +183,130 @@ class TestToolExecutionEngineBasics:
         assert "LLM unavailable" in result["error"]
 
 
+class TestNotForMeShortCircuit:
+    """The engine MUST short-circuit on ``<not_for_me/>`` before any retry
+    guard pops the assistant message. Without this, the force-tool-calls
+    and must-call guards keep retrying the sentinel until the model gives
+    up and emits prose — the 2026-06-02 prod regression where "I'm sorry"
+    → ``<not_for_me/>`` × 2 → ``"It's okay. How can I assist you?"``
+    reached TTS.
+    """
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        cache.get_available_commands.return_value = []
+        # The combination that produced the prod bug: force_tool_calls=True
+        # (Qwen3 compressed provider sets this) and a router decision so
+        # both retry branches would have fired.
+        cache.get_force_tool_calls.return_value = True
+        cache.get_router_decision.return_value = {"used": True}
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_sentinel_returns_not_for_me_stop_reason(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Iter 1 emits the sentinel → engine returns ``not_for_me``
+        without invoking the force-tool-calls retry."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": '{"message": "<not_for_me/>", "tool_calls": []}'},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-nfm",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "not_for_me"
+
+    @pytest.mark.asyncio
+    async def test_sentinel_short_circuits_force_tool_retry(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The bug-fix path: even with force_tool_calls=True the engine
+        must NOT retry. Exactly one LLM call should fire."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        call_count = [0]
+
+        def chat_completion_side_effect(*args, **kwargs):
+            call_count[0] += 1
+            return {
+                "choices": [{
+                    "message": {"content": '{"message": "<not_for_me/>", "tool_calls": []}'},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+
+        mock_llm_client.chat_completion.side_effect = chat_completion_side_effect
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-nfm",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+            )
+
+        assert call_count[0] == 1, (
+            "Force-tool-calls guard must NOT pop the sentinel and retry — "
+            "the prod incident saw 3 LLM calls and prose break-through."
+        )
+
+    @pytest.mark.asyncio
+    async def test_sentinel_detected_via_raw_content_when_message_field_empty(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Some providers parse out the structured ``message`` field. The
+        short-circuit must look at raw_content too so a sentinel-in-JSON
+        still wins even if the parsed message is the empty string."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                # Bare sentinel content (no JSON wrapper) — covers the
+                # native-tool path where assistant_message == raw_content.
+                "message": {"content": "<not_for_me/>"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-nfm",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "not_for_me"
+
+
 class TestMustCallGuard:
     """Tests for must-call tool guard logic."""
 

@@ -18,6 +18,7 @@ from app.core.conversation_cache import conversation_cache
 from app.core.direction_hint import build_direction_hint
 from app.core.not_for_me import contains_sentinel
 from app.core.prompt_providers.shared.core_rules import NOT_FOR_ME_INSTRUCTION
+from app.core.transcript_filter import is_stt_noise
 from app.core.tts_text import clean_for_tts
 from app.services.settings_service import get_settings_service
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
@@ -351,6 +352,27 @@ class ConversationHandler:
         timing = latency_logger.get_request(conversation_id)
         logger.info(f"🎯 Processing tool-based command: '{voice_command}'")
 
+        # Pre-LLM STT-noise filter. Whisper occasionally emits bracketed
+        # action notation (``*sniff*``, ``[laughter]``) for non-speech; if
+        # we hand that to the LLM it hallucinates context (e.g. "I smell
+        # something burning" off ``*sniff*``). Short-circuit to not_for_me
+        # before any inference work — saves an LLM round-trip and forces
+        # the node to push its wake-suppression gate forward.
+        if is_stt_noise(voice_command):
+            logger.info(
+                "🚫 not_for_me_prefilter | "
+                "conversation_id=%s speaker_user_id=%s "
+                "pre_wake_speech_secs=%.2f transcript=%r",
+                conversation_id,
+                speaker_user_id,
+                pre_wake_speech_seconds if pre_wake_speech_seconds is not None else -1.0,
+                voice_command,
+            )
+            return {
+                "stop_reason": "not_for_me",
+                "assistant_message": "",
+            }
+
         # Get conversation state from cache
         with timing.measure("cache_lookups") if timing else nullcontext():
             messages = conversation_cache.get_messages(conversation_id)
@@ -566,6 +588,17 @@ class ConversationHandler:
         from app.core.streaming_handler import extract_sentences
 
         _t0 = _time.time()
+
+        # Pre-LLM STT-noise filter — same gate the blocking path runs. Bail
+        # out before opening any LLM stream so the blocking path (which the
+        # caller falls through to when we return None) can emit the
+        # ``not_for_me`` response without the streaming pre-buffer eating
+        # tokens for nothing.
+        if is_stt_noise(voice_command):
+            logger.debug(
+                "Streaming path: STT-noise transcript, deferring to blocking path"
+            )
+            return None
 
         # Get conversation state from cache
         messages = conversation_cache.get_messages(conversation_id)
@@ -841,6 +874,14 @@ class ConversationHandler:
         """
         # Gate behind env flag; default off until validated under load.
         if os.getenv("JARVIS_STREAM_TOOL_RESPONSES", "false").lower() != "true":
+            return None
+
+        # STT-noise pre-filter — same gate the other two voice paths run.
+        # Falls through to the blocking path which converts to not_for_me.
+        if is_stt_noise(voice_command):
+            logger.debug(
+                "Tool-streaming path: STT-noise transcript, deferring to blocking path"
+            )
             return None
 
         import time as _time

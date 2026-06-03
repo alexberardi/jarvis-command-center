@@ -16,7 +16,15 @@ the cue isn't actionable.
 from __future__ import annotations
 
 # Below this: "quiet before wake" — actively boost confidence in "directed".
-QUIET_THRESHOLD_S: float = 0.5
+# Raised from 0.5s after the 2026-06-02 prod incident where side-conversation
+# wakes measured 0.00s and 0.32s (both under the old 0.5s floor) and so got
+# the "directed" hint, which biases the prompt toward ANSWER on borderline.
+# At 1.5s we still trust truly-quiet rooms (a clear walk-up addressing
+# Jarvis) but stop over-claiming "directed" when speech-like audio briefly
+# dips below the VAD threshold in the middle of an ongoing conversation.
+# The middle band (1.5–4.5s) emits no hint, which is the correct posture
+# when the acoustic signal isn't decisive.
+QUIET_THRESHOLD_S: float = 1.5
 # Above this: "ongoing conversation" — actively boost confidence in not_for_me.
 # Set near the top of the window: until we have per-mic calibration, only
 # treat near-saturated windows as a strong "ambient" signal. A 2.0s default
