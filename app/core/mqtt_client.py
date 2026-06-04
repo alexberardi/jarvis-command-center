@@ -186,6 +186,57 @@ class MQTTClient:
 
         return result_holder[0] if result_holder else None
 
+    def request_response(
+        self,
+        request_topic: str,
+        response_topic: str,
+        payload: str,
+        timeout: float = 10.0,
+    ) -> Optional[str]:
+        """Synchronous request/response round-trip with a node.
+
+        Subscribes to `response_topic` BEFORE publishing the request to
+        avoid the race where the node responds faster than we can
+        subscribe. Used by the mobile command-data browser, where mobile
+        is sitting and waiting for an interactive CRUD response — the
+        file-callback pattern (see `bluetooth.py`, `node_commands.py`)
+        adds 100ms polling latency that hurts UX here.
+
+        Args:
+            request_topic: Topic to publish the request to (node listens).
+            response_topic: Topic to subscribe to for the response. Should
+                be unique per-request (e.g. include a correlation_id) so
+                concurrent in-flight requests don't collide.
+            payload: JSON string to publish.
+            timeout: Max seconds to wait for the response.
+
+        Returns:
+            The response payload as a string, or None if timed out.
+        """
+        import threading
+
+        if self.client is None:
+            return None
+
+        result_holder: list[str] = []
+        event = threading.Event()
+
+        def on_message(_client: mqtt.Client, _userdata: object, msg: mqtt.MQTTMessage) -> None:
+            result_holder.append(msg.payload.decode("utf-8", errors="replace"))
+            event.set()
+
+        self.client.subscribe(response_topic, qos=1)
+        self.client.message_callback_add(response_topic, on_message)
+
+        try:
+            self.client.publish(request_topic, payload, qos=1)
+            event.wait(timeout=timeout)
+        finally:
+            self.client.message_callback_remove(response_topic)
+            self.client.unsubscribe(response_topic)
+
+        return result_holder[0] if result_holder else None
+
     def disconnect(self) -> None:
         """Disconnect from broker."""
         if self.client is not None:
