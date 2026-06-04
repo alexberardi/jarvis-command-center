@@ -518,6 +518,10 @@ app.include_router(mobile_voice_profiles.router, prefix="/api/v0/mobile", tags=[
 app.include_router(node_tools.router, prefix="/api/v0/mobile", tags=["node-tools"])
 app.include_router(routine_builder.router, prefix="/api/v0/mobile/routines", tags=["routine-builder"])
 
+# Include mobile command-data browser router (JWT auth, MQTT round-trip)
+from app.api import mobile_command_data
+app.include_router(mobile_command_data.router, prefix="/api/v0/mobile", tags=["mobile-command-data"])
+
 # Settings router is included in startup_event after service_config is initialized
 
 
