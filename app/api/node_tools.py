@@ -34,7 +34,11 @@ async def get_node_tools(
     """Get a node's tool definitions via MQTT.
 
     Returns:
-        {client_tools: [...], available_commands: [...]}
+        {
+            client_tools: [...],
+            available_commands: [...],
+            installed_packages: [{name, version}, ...],
+        }
     """
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
@@ -47,11 +51,13 @@ async def get_node_tools(
         return {
             "client_tools": tools["client_tools"],
             "available_commands": tools["available_commands"],
+            "installed_packages": tools.get("installed_packages", []),
         }
 
     return {
         "client_tools": [],
         "available_commands": [],
+        "installed_packages": [],
     }
 
 
