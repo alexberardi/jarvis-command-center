@@ -261,6 +261,73 @@ async def node_push_notification(
     )
 
 
+# ── Node LLM Passthrough ──────────────────────────────────────────────
+
+
+class NodeLLMChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class NodeLLMChatRequest(BaseModel):
+    """One-shot LLM chat from a node. Generic primitive — nodes/agents build
+    their own prompts and decide what to do with the response. CC does not
+    interpret the messages; it just authenticates the node and forwards to
+    the LLM proxy. Use this whenever an agent needs to ask the model a
+    question (notification gating, summarization, classification, etc.).
+    """
+    messages: list[NodeLLMChatMessage]
+    model: str = "live"
+    temperature: float = 0.0
+
+
+class NodeLLMChatResponse(BaseModel):
+    content: str
+
+
+@router.post(
+    "/node/llm/chat",
+    response_model=NodeLLMChatResponse,
+)
+async def node_llm_chat(
+    request: NodeLLMChatRequest,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+) -> NodeLLMChatResponse:
+    """Forward a one-shot chat completion to the LLM proxy on behalf of a node.
+
+    Returns just the first choice's content string — that's all agents
+    typically need. If a caller needs raw choices/logprobs/tool_calls later,
+    return the structured object too; until then, flatten to keep clients
+    trivial.
+    """
+    from app.core.llm_proxy_client import LLMProxyClient
+
+    client = LLMProxyClient()
+    try:
+        result = await client.lightweight_chat(
+            messages=[m.model_dump() for m in request.messages],
+            model=request.model,
+            temperature=request.temperature,
+        )
+    except Exception as e:
+        logger.warning(
+            "node_llm_chat: lightweight_chat failed node=%s error=%s",
+            node_context.node.node_id,
+            e,
+        )
+        raise
+
+    content = ""
+    if isinstance(result, dict):
+        choices = result.get("choices") or []
+        if choices:
+            content = (
+                choices[0].get("message", {}).get("content", "") or ""
+            )
+
+    return NodeLLMChatResponse(content=content)
+
+
 # ── Node Send Link (tap-to-open URL push) ─────────────────────────────
 
 
