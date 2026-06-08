@@ -29,7 +29,11 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_db
 from app.models import Device, Node
-from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext
+from app.provisioning import (
+    ProvisioningAuthContext,
+    require_household_access,
+    verify_provisioning_auth,
+)
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
@@ -169,6 +173,7 @@ def list_cameras(
     db: Session = Depends(get_db),
 ) -> list[CameraResponse]:
     """List camera devices for a household."""
+    require_household_access(household_id, auth)
     devices = (
         db.query(Device)
         .filter(
@@ -213,6 +218,7 @@ async def start_camera_stream(
     Credentials are fetched from the node via MQTT. Legacy mobile versions
     may still send credentials in the body — those are used directly.
     """
+    require_household_access(household_id, auth)
     device = (
         db.query(Device)
         .filter(
@@ -307,6 +313,7 @@ async def stop_camera_stream(
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
 ) -> dict:
     """Stop a camera stream and remove it from go2rtc."""
+    require_household_access(household_id, auth)
     stream_name: str | None = _active_streams.pop(device_id, None)
     if not stream_name:
         return {"status": "not_streaming"}

@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.admin import NodeCreateResponse, _register_node_with_auth
-from app.deps import ADMIN_API_KEY, _get_auth_base_url, get_db
+from app.deps import ADMIN_API_KEY, _get_auth_base_url, get_db, verify_household_role
 from app.models import Node, ProvisioningToken
 
 router = APIRouter()
@@ -104,6 +104,19 @@ def verify_provisioning_auth(
         raise HTTPException(status_code=401, detail="Invalid or expired JWT")
 
     raise HTTPException(status_code=401, detail="Authentication required")
+
+
+def require_household_access(household_id: str | None, auth: ProvisioningAuthContext) -> None:
+    """Enforce that a JWT-authenticated caller belongs to the household.
+
+    Admin-key callers bypass (they're infrastructure, not user-scoped).
+    Raises 403 for non-members.
+    """
+    if auth.auth_type != "jwt" or auth.user_id is None:
+        return
+    if not household_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    verify_household_role(auth.user_id, household_id, required_role="member")
 
 
 # ============================================================
