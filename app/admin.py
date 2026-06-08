@@ -234,12 +234,17 @@ def _deactivate_node_with_auth(node_id: str) -> bool:
 def list_nodes(
     household_id: str | None = None,
     include_inactive: bool = False,
+    user: AuthenticatedUser = Depends(verify_user_jwt),
     db: Session = Depends(get_db),
 ):
     """List nodes registered with this command center.
 
+    Scoped to households the requesting user is a member of. Superusers see
+    everything.
+
     Args:
-        household_id: Optional filter by household UUID.
+        household_id: Optional filter by household UUID. Non-superusers
+            must be a member of the household.
         include_inactive: Include rows with is_active=False (default: hide them).
             Soft-deleted nodes (e.g. after a successful factory reset) are
             preserved for audit + foreign-key integrity but should not appear
@@ -249,11 +254,20 @@ def list_nodes(
     if not include_inactive:
         query = query.filter(Node.is_active.is_(True))
     if household_id:
+        if not user.is_superuser:
+            verify_household_role(user.user_id, household_id, required_role="member")
         query = query.filter(Node.household_id == household_id)
     nodes = query.all()
 
     results: list[NodeResponse] = []
     for node in nodes:
+        if not user.is_superuser and not household_id:
+            if not node.household_id:
+                continue
+            try:
+                verify_household_role(user.user_id, node.household_id, required_role="member")
+            except HTTPException:
+                continue
         resp = NodeResponse.model_validate(node)
         resp.online = node.is_online()
         results.append(resp)
@@ -261,11 +275,19 @@ def list_nodes(
 
 
 @router.get("/nodes/{node_id}", response_model=NodeResponse)
-def get_node(node_id: str, db: Session = Depends(get_db)):
-    """Get a single node by ID."""
+def get_node(
+    node_id: str,
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+    db: Session = Depends(get_db),
+):
+    """Get a single node by ID. Requires household membership (or superuser)."""
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+    if not user.is_superuser:
+        if not node.household_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        verify_household_role(user.user_id, node.household_id, required_role="member")
     resp = NodeResponse.model_validate(node)
     resp.online = node.is_online()
     return resp

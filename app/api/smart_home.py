@@ -14,9 +14,21 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, verify_api_key
+from app.deps import get_db, verify_api_key, verify_household_role
 from app.models import ConfigPush, Device, DeviceListRequest, DeviceScanRequest, Node, Room
 from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext
+
+
+def _require_household_access(household_id: str | None, auth: ProvisioningAuthContext) -> None:
+    """Enforce that a JWT-authenticated caller belongs to the household.
+
+    Admin-key callers bypass (they're infrastructure, not user-scoped).
+    """
+    if auth.auth_type != "jwt" or auth.user_id is None:
+        return
+    if not household_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    verify_household_role(auth.user_id, household_id, required_role="member")
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
@@ -1379,6 +1391,7 @@ def request_device_scan(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+    _require_household_access(node.household_id, auth)
 
     now = datetime.utcnow()
     scan_request = DeviceScanRequest(
@@ -1462,6 +1475,7 @@ def poll_device_scan(
     ).first()
     if not scan_request:
         raise HTTPException(status_code=404, detail="Scan request not found")
+    _require_household_access(scan_request.household_id, auth)
 
     now = datetime.utcnow()
 
@@ -1631,6 +1645,7 @@ def request_device_list(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+    _require_household_access(node.household_id, auth)
 
     # Aggregate devices from all enabled managers on the node
     manager_name = "all"
@@ -1722,6 +1737,7 @@ def poll_device_list(
     ).first()
     if not list_request:
         raise HTTPException(status_code=404, detail="Device list request not found")
+    _require_household_access(list_request.household_id, auth)
 
     now = datetime.utcnow()
 
