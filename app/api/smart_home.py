@@ -14,21 +14,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, verify_api_key, verify_household_role
+from app.deps import get_db, verify_api_key
 from app.models import ConfigPush, Device, DeviceListRequest, DeviceScanRequest, Node, Room
-from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext
-
-
-def _require_household_access(household_id: str | None, auth: ProvisioningAuthContext) -> None:
-    """Enforce that a JWT-authenticated caller belongs to the household.
-
-    Admin-key callers bypass (they're infrastructure, not user-scoped).
-    """
-    if auth.auth_type != "jwt" or auth.user_id is None:
-        return
-    if not household_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    verify_household_role(auth.user_id, household_id, required_role="member")
+from app.provisioning import (
+    ProvisioningAuthContext,
+    require_household_access,
+    verify_provisioning_auth,
+)
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
@@ -75,6 +67,7 @@ def get_smart_home_config(
     db: Session = Depends(get_db),
 ) -> SmartHomeConfigWithNodes:
     """Get smart home configuration for a household (device manager + primary node + node list)."""
+    require_household_access(household_id, auth)
     from app.services.settings_service import get_settings_service
 
     settings = get_settings_service()
@@ -108,6 +101,7 @@ def update_smart_home_config(
     db: Session = Depends(get_db),
 ) -> SmartHomeConfigResponse:
     """Update smart home configuration for a household."""
+    require_household_access(household_id, auth)
     from app.services.settings_service import get_settings_service
 
     settings = get_settings_service()
@@ -532,6 +526,7 @@ def list_rooms(
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
     db: Session = Depends(get_db),
 ) -> list[RoomResponse]:
+    require_household_access(household_id, auth)
     rooms = db.query(Room).filter(Room.household_id == household_id).all()
     return [_build_room_response(room, db) for room in rooms]
 
@@ -543,6 +538,7 @@ def create_room(
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
     db: Session = Depends(get_db),
 ) -> RoomResponse:
+    require_household_access(household_id, auth)
     normalized = body.name.strip().lower()
     existing = db.query(Room).filter(
         Room.household_id == household_id,
@@ -585,6 +581,7 @@ def update_room(
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
     db: Session = Depends(get_db),
 ) -> RoomResponse:
+    require_household_access(household_id, auth)
     room = db.query(Room).filter(Room.id == room_id, Room.household_id == household_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -631,6 +628,7 @@ def delete_room(
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
     db: Session = Depends(get_db),
 ) -> None:
+    require_household_access(household_id, auth)
     room = db.query(Room).filter(Room.id == room_id, Room.household_id == household_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -647,6 +645,7 @@ def get_room_tree(
     db: Session = Depends(get_db),
 ) -> list[RoomTreeNode]:
     """Return rooms as a nested tree structure."""
+    require_household_access(household_id, auth)
     rooms = db.query(Room).filter(Room.household_id == household_id).all()
 
     # Build lookup and count maps
@@ -696,6 +695,7 @@ def list_devices(
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
     db: Session = Depends(get_db),
 ) -> list[DeviceResponse]:
+    require_household_access(household_id, auth)
     query = db.query(Device).filter(Device.household_id == household_id)
     if room_id:
         if recursive:
@@ -769,6 +769,7 @@ def import_devices(
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
     db: Session = Depends(get_db),
 ) -> dict:
+    require_household_access(household_id, auth)
     created = 0
     updated = 0
     for item in body.devices:
@@ -832,6 +833,7 @@ def update_device(
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
     db: Session = Depends(get_db),
 ) -> DeviceResponse:
+    require_household_access(household_id, auth)
     dev = db.query(Device).filter(Device.id == device_id, Device.household_id == household_id).first()
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -876,6 +878,7 @@ def delete_device(
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
     db: Session = Depends(get_db),
 ) -> None:
+    require_household_access(household_id, auth)
     dev = db.query(Device).filter(Device.id == device_id, Device.household_id == household_id).first()
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -891,6 +894,7 @@ def assign_device_rooms(
     auth: ProvisioningAuthContext = Depends(verify_provisioning_auth),
     db: Session = Depends(get_db),
 ) -> dict:
+    require_household_access(household_id, auth)
     updated = 0
     for assignment in body.assignments:
         dev = db.query(Device).filter(
@@ -1020,6 +1024,7 @@ def control_device(
 
     Flow: CC publishes MQTT → node executes → node POSTs result back to CC.
     """
+    require_household_access(household_id, auth)
     import time
 
     dev = db.query(Device).filter(
@@ -1150,6 +1155,7 @@ def control_external_device(
     Same MQTT flow as control_device but skips the DB device lookup.
     Uses the primary_node_id from settings, falling back to any household node.
     """
+    require_household_access(household_id, auth)
     import time
 
     from app.services.settings_service import get_settings_service
@@ -1251,6 +1257,7 @@ def get_device_state(
 
     Flow: CC publishes MQTT → node queries adapter → node POSTs result → CC returns.
     """
+    require_household_access(household_id, auth)
     import time
 
     dev = db.query(Device).filter(
@@ -1391,7 +1398,7 @@ def request_device_scan(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
-    _require_household_access(node.household_id, auth)
+    require_household_access(node.household_id, auth)
 
     now = datetime.utcnow()
     scan_request = DeviceScanRequest(
@@ -1475,7 +1482,7 @@ def poll_device_scan(
     ).first()
     if not scan_request:
         raise HTTPException(status_code=404, detail="Scan request not found")
-    _require_household_access(scan_request.household_id, auth)
+    require_household_access(scan_request.household_id, auth)
 
     now = datetime.utcnow()
 
@@ -1645,7 +1652,7 @@ def request_device_list(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
-    _require_household_access(node.household_id, auth)
+    require_household_access(node.household_id, auth)
 
     # Aggregate devices from all enabled managers on the node
     manager_name = "all"
@@ -1737,7 +1744,7 @@ def poll_device_list(
     ).first()
     if not list_request:
         raise HTTPException(status_code=404, detail="Device list request not found")
-    _require_household_access(list_request.household_id, auth)
+    require_household_access(list_request.household_id, auth)
 
     now = datetime.utcnow()
 
