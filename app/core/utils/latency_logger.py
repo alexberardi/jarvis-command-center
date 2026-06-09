@@ -44,6 +44,7 @@ class RequestTiming:
     node_id: Optional[str] = None
     household_id: Optional[str] = None
     user_command: Optional[str] = None
+    assistant_message: Optional[str] = None
     trace_status: str = "ok"           # overall trace status
     error_message: Optional[str] = None
 
@@ -255,6 +256,7 @@ class LatencyLogger:
                         node_id=timing.node_id,
                         household_id=timing.household_id,
                         user_command=timing.user_command,
+                        assistant_message=timing.assistant_message,
                         status=timing.trace_status,
                         error_message=timing.error_message,
                         total_duration_ms=round(total_ms, 1),
