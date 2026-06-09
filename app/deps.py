@@ -320,3 +320,51 @@ def verify_household_role(
             detail=result.get("reason", "Insufficient permissions"),
         )
 
+
+def resolve_household_role(user_id: int, household_id: str) -> str:
+    """Resolve a user's role in a household via jarvis-auth.
+
+    Returns the role string ("member", "power_user", "admin"). Raises 403 if
+    the user is not a member of the household.
+
+    Used by endpoints that need to branch logic by role (e.g. memory CRUD,
+    where MEMBER sees own-only and POWER_USER+ sees own + household-wide).
+    """
+    if not JARVIS_APP_KEY:
+        logger.warning("JARVIS_APP_KEY not set — defaulting role to 'member'")
+        return "member"
+
+    auth_url = _get_auth_base_url().rstrip("/")
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(
+                f"{auth_url}/internal/validate-household-access",
+                headers={
+                    "X-Jarvis-App-Id": JARVIS_APP_ID,
+                    "X-Jarvis-App-Key": JARVIS_APP_KEY,
+                },
+                json={
+                    "user_id": user_id,
+                    "household_id": household_id,
+                    "required_role": "member",
+                },
+            )
+    except httpx.RequestError as exc:
+        logger.error("Failed to reach jarvis-auth for role lookup: %s", exc)
+        raise HTTPException(status_code=502, detail="Auth service unavailable") from exc
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail="Auth service error")
+
+    result = resp.json()
+    if not result.get("valid"):
+        raise HTTPException(
+            status_code=403,
+            detail=result.get("reason", "Not a household member"),
+        )
+
+    role = result.get("role")
+    if not role:
+        raise HTTPException(status_code=502, detail="Auth service did not return role")
+    return str(role)
+

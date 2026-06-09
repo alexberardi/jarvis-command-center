@@ -467,6 +467,10 @@ app.include_router(test_install.router, prefix="/api/v0", tags=["test-install"])
 from app.api import memories
 app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
 
+# Mobile-facing memory CRUD (user JWT, role-scoped)
+from app.api import mobile_memories
+app.include_router(mobile_memories.router, prefix="/api/v0", tags=["mobile-memories"])
+
 # Include transcript feedback router (Phase 1 — mobile rating UI)
 from app.api import transcripts
 app.include_router(transcripts.router, prefix="/api/v0", tags=["transcripts"])
