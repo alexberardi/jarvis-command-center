@@ -1063,6 +1063,7 @@ async def handle_voice_stream(
 
             duration = time.time() - start_time
             logger.info(f"✅ Streaming audio response in {duration:.2f}s")
+            timing.assistant_message = assistant_message
             latency_logger.end_request(request.conversation_id)
 
             # Include the text in a header so the node can display it
@@ -1107,6 +1108,7 @@ async def handle_voice_stream(
         logger.info(
             f"✅ Returning 202 JSON (stop_reason={stop_reason}) in {duration:.2f}s"
         )
+        timing.assistant_message = assistant_message
         latency_logger.end_request(request.conversation_id)
 
         return JSONResponse(

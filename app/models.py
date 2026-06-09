@@ -666,6 +666,7 @@ class RequestTrace(Base):
     node_id = Column(String, ForeignKey('nodes.node_id', ondelete='SET NULL'), nullable=True)
     household_id = Column(String(255), nullable=True, index=True)
     user_command = Column(Text, nullable=True)
+    assistant_message = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, server_default="ok")
     error_message = Column(Text, nullable=True)
     total_duration_ms = Column(Float, nullable=False)

@@ -34,6 +34,7 @@ def list_traces(
     status: Optional[str] = Query(None),
     source: Optional[str] = Query(None),
     household_id: Optional[str] = Query(None),
+    node_id: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     """List recent request traces (newest first).
@@ -49,6 +50,8 @@ def list_traces(
         query = query.filter(RequestTrace.source == source)
     if household_id:
         query = query.filter(RequestTrace.household_id == household_id)
+    if node_id:
+        query = query.filter(RequestTrace.node_id == node_id)
 
     total = query.count()
     rows = query.offset(offset).limit(limit).all()
@@ -66,7 +69,9 @@ def list_traces(
             "request_type": row.request_type,
             "source": row.source,
             "node_id": row.node_id,
+            "household_id": row.household_id,
             "user_command": row.user_command,
+            "assistant_message": row.assistant_message,
             "status": row.status,
             "total_duration_ms": row.total_duration_ms,
             "span_count": span_count,
@@ -99,6 +104,7 @@ def get_trace(
         "node_id": row.node_id,
         "household_id": row.household_id,
         "user_command": row.user_command,
+        "assistant_message": row.assistant_message,
         "status": row.status,
         "error_message": row.error_message,
         "total_duration_ms": row.total_duration_ms,

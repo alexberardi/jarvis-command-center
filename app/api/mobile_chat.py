@@ -405,6 +405,7 @@ async def _chat_stream(
                     done_event["reasoning"] = accumulated_reasoning
                 yield _sse_event(done_event)
 
+                timing.assistant_message = assistant_message
                 latency_logger.end_request(conversation_id)
 
                 # Fire-and-forget: log transcript for passive memory extraction
@@ -429,6 +430,7 @@ async def _chat_stream(
                     "validation": validation,
                     "trace_summary": timing.to_trace_summary(),
                 })
+                timing.assistant_message = assistant_message
                 latency_logger.end_request(conversation_id)
                 return
 
@@ -517,6 +519,7 @@ async def _chat_stream(
                 if request.include_reasoning and accumulated_reasoning:
                     done_event["reasoning"] = accumulated_reasoning
                 yield _sse_event(done_event)
+                timing.assistant_message = assistant_message
                 latency_logger.end_request(conversation_id)
                 return
 
