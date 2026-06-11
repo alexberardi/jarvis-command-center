@@ -434,7 +434,7 @@ class PackageInstallRequest(Base):
     command_name = Column(String(255), nullable=False)
     github_repo_url = Column(Text, nullable=False)
     git_tag = Column(String(100), nullable=True)
-    status = Column(String(20), nullable=False, default="pending")  # pending, completed, failed, expired
+    status = Column(String(20), nullable=False, default="pending")  # pending, restarting, completed, failed, expired
     results_json = Column(Text, nullable=True)  # JSON object with install result
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
