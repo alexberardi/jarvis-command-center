@@ -92,6 +92,10 @@ class ProviderCredentialsResponse(BaseModel):
     refresh_token: str | None = None
     token_data: dict | None = None
     base_url: str | None = None
+    # The user who initiated the OAuth flow — owner of user-scoped tokens.
+    # None for admin-key flows and sessions created before this field existed;
+    # nodes fall back to legacy (no user context) storage in that case.
+    user_id: int | None = None
 
 
 # =============================================================================
@@ -201,7 +205,9 @@ def _get_external_url(request: Request) -> str:
 # =============================================================================
 
 
-def _publish_auth_ready(provider: str, node_id: str, session_id: str) -> None:
+def _publish_auth_ready(
+    provider: str, node_id: str, session_id: str, user_id: int | None = None
+) -> None:
     """Publish MQTT message: jarvis/auth/{provider}/ready."""
     from app.node_settings import get_mqtt_client
 
@@ -215,6 +221,8 @@ def _publish_auth_ready(provider: str, node_id: str, session_id: str) -> None:
         "provider": provider,
         "node_id": node_id,
         "session_id": session_id,
+        # Nullable — owner of user-scoped tokens (the user who ran the flow).
+        "user_id": user_id,
     })
 
     try:
@@ -323,7 +331,8 @@ def create_auth_session(
     if getattr(cfg, "client_secret", None):
         client_secret_enc = _encrypt_value(cfg.client_secret)
 
-    # Create session
+    # Create session. The JWT caller (mobile) is the owner of any
+    # user-scoped tokens this flow produces; admin-key callers have no user.
     session = AuthSession(
         id=str(uuid4()),
         provider=body.provider,
@@ -337,6 +346,7 @@ def create_auth_session(
         client_id=effective_client_id,
         client_secret_enc=client_secret_enc,
         redirect_uri=redirect_uri,
+        user_id=auth.user_id,
         expires_at=datetime.utcnow() + timedelta(minutes=SESSION_TTL_MINUTES),
     )
     db.add(session)
@@ -451,7 +461,7 @@ async def oauth_callback(
     )
 
     # Publish MQTT notification
-    _publish_auth_ready(session.provider, session.node_id, session.id)
+    _publish_auth_ready(session.provider, session.node_id, session.id, session.user_id)
 
     # Redirect to custom scheme so mobile WebView detects completion
     return RedirectResponse(
@@ -554,7 +564,7 @@ async def exchange_code(
     )
 
     # Publish MQTT notification
-    _publish_auth_ready(session.provider, session.node_id, session.id)
+    _publish_auth_ready(session.provider, session.node_id, session.id, session.user_id)
 
     return {"status": "ok", "session_id": session_id}
 
@@ -622,4 +632,5 @@ async def get_provider_credentials(
         refresh_token=refresh_token,
         token_data=token_data,
         base_url=session.provider_base_url,
+        user_id=session.user_id,
     )
