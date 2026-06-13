@@ -657,3 +657,182 @@ class TestGetServerToolNames:
 
         server_names = get_server_tool_names([])
         assert server_names == set()
+
+
+class _StreamRecorder:
+    """Callable that records whether it was invoked and yields the given
+    deltas as an llm_client.chat_completion_stream() async iterator."""
+
+    def __init__(self, deltas):
+        self.deltas = deltas
+        self.called = False
+
+    def __call__(self, *args, **kwargs):
+        self.called = True
+
+        async def _gen():
+            for d in self.deltas:
+                yield {"delta": d}
+            yield {"done": True}
+
+        return _gen()
+
+
+class TestStreamingContinueFastPathAndGuard:
+    """Regression coverage for the 'Task completed.' generic-filler bug.
+
+    The streaming voice continue path (stream_continue_with_tool_results)
+    must (1) speak a command's own message verbatim without an LLM call,
+    (2) still hit the LLM for knowledge-delegation results, and (3) never
+    speak raw JSON / generic filler — substituting a tool-derived message.
+    """
+
+    @staticmethod
+    def _handler():
+        from app.core.conversation_handler import ConversationHandler
+        handler = ConversationHandler(model=MagicMock(), llm_client=MagicMock())
+        handler.prompt_provider = None  # text-based path
+        return handler
+
+    @staticmethod
+    def _tts_client(spoken: List[str]) -> MagicMock:
+        client = MagicMock()
+
+        async def fake_speak_stream(text: str, timeout: float = 30.0):
+            spoken.append(text)
+
+            async def _iter():
+                yield b"\x00" * 10
+
+            return _iter(), {"sample_rate": "22050"}
+
+        client.speak_stream = AsyncMock(side_effect=fake_speak_stream)
+        return client
+
+    @staticmethod
+    async def _drain(gen):
+        async for _ in gen:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_fast_path_speaks_tool_message_without_llm(self):
+        """A tool result carrying a clean message is spoken verbatim and the
+        formatting LLM is never called."""
+        handler = self._handler()
+        handler.llm_client.chat_completion_stream = MagicMock()  # must NOT be called
+        spoken: List[str] = []
+        tts = self._tts_client(spoken)
+        tool_results = [
+            {"tool_call_id": "t1", "output": {"message": "Added eggplant to your shopping list."}}
+        ]
+        with patch("app.core.conversation_handler.conversation_cache") as mock_cache:
+            mock_cache.get_messages.return_value = [{"role": "user", "content": "add eggplant"}]
+            gen = await handler.stream_continue_with_tool_results("conv-1", tool_results, tts)
+            assert gen is not None
+            await self._drain(gen)
+
+        handler.llm_client.chat_completion_stream.assert_not_called()
+        assert spoken == ["Added eggplant to your shopping list."]
+        mock_cache.update_messages.assert_called_once()
+        committed = mock_cache.update_messages.call_args[0][1]
+        assert committed[-1] == {
+            "role": "assistant",
+            "content": "Added eggplant to your shopping list.",
+        }
+
+    @pytest.mark.asyncio
+    async def test_knowledge_query_falls_through_to_llm(self):
+        """answer_question-style results (echo only the query) must still hit
+        the formatting LLM rather than being fast-pathed."""
+        rec = _StreamRecorder(["Quantum entanglement is ", "a real phenomenon."])
+        handler = self._handler()
+        handler.llm_client.chat_completion_stream = rec
+        spoken: List[str] = []
+        tts = self._tts_client(spoken)
+        tool_results = [{"tool_call_id": "t1", "output": {"query": "quantum entanglement"}}]
+        with patch("app.core.conversation_handler.conversation_cache") as mock_cache:
+            mock_cache.get_messages.return_value = [
+                {"role": "user", "content": "explain quantum entanglement"}
+            ]
+            mock_cache.get_node_context.return_value = {}
+            gen = await handler.stream_continue_with_tool_results("conv-2", tool_results, tts)
+            assert gen is not None
+            await self._drain(gen)
+
+        assert rec.called, "knowledge query must reach the formatting LLM"
+        assert any("Quantum entanglement" in s for s in spoken), f"spoken={spoken}"
+
+    @pytest.mark.asyncio
+    async def test_guard_substitutes_and_never_speaks_raw_json(self):
+        """When the formatting LLM re-emits a bare tool-call (raw JSON) instead
+        of prose, the user must never hear the JSON — a tool-derived message is
+        substituted, and the cache is not polluted with JSON."""
+        rec = _StreamRecorder(['{"name": "get_calendar_events", ', '"arguments": {}}'])
+        handler = self._handler()
+        handler.llm_client.chat_completion_stream = rec
+        spoken: List[str] = []
+        tts = self._tts_client(spoken)
+        tool_results = [
+            {"tool_call_id": "t1", "output": {"success": False, "error": "I couldn't reach your calendar."}}
+        ]
+        with patch("app.core.conversation_handler.conversation_cache") as mock_cache:
+            mock_cache.get_messages.return_value = [
+                {"role": "user", "content": "what's on my calendar"}
+            ]
+            mock_cache.get_node_context.return_value = {}
+            gen = await handler.stream_continue_with_tool_results("conv-3", tool_results, tts)
+            assert gen is not None
+            await self._drain(gen)
+
+        assert not any(s.strip().startswith("{") for s in spoken), f"spoke raw JSON: {spoken}"
+        assert any("couldn't reach your calendar" in s for s in spoken), f"spoken={spoken}"
+        if mock_cache.update_messages.called:
+            committed = mock_cache.update_messages.call_args[0][1]
+            assert not committed[-1]["content"].strip().startswith("{")
+
+    @pytest.mark.asyncio
+    async def test_native_provider_skips_fast_path(self):
+        """Native-tools providers must not use the fast-path (their cached
+        history must preserve the role='tool' message) — they fall through to
+        the LLM commit path even when a clean message is present."""
+        rec = _StreamRecorder(["Added eggplant to your list."])
+        handler = self._handler()
+        handler.llm_client.chat_completion_stream = rec
+        provider = MagicMock()
+        provider.supports_native_tools = True
+        provider.think_delimiters = ("<think>", "</think>")
+        handler.prompt_provider = provider
+        spoken: List[str] = []
+        tts = self._tts_client(spoken)
+        tool_results = [
+            {"tool_call_id": "t1", "output": {"message": "Added eggplant to your shopping list."}}
+        ]
+        with patch("app.core.conversation_handler.conversation_cache") as mock_cache:
+            mock_cache.get_messages.return_value = [{"role": "user", "content": "add eggplant"}]
+            mock_cache.get_node_context.return_value = {}
+            gen = await handler.stream_continue_with_tool_results("conv-4", tool_results, tts)
+            assert gen is not None
+            await self._drain(gen)
+
+        assert rec.called, "native provider must not be fast-pathed"
+
+    @pytest.mark.asyncio
+    async def test_empty_after_clean_falls_through_to_llm(self):
+        """A message that clean_for_tts reduces to empty (emoji/markdown-only)
+        must NOT fast-path into a 0-byte audio stream — it falls through to the
+        LLM path instead of producing a silent 'successful' turn."""
+        rec = _StreamRecorder(["Done and done."])
+        handler = self._handler()
+        handler.llm_client.chat_completion_stream = rec
+        spoken: List[str] = []
+        tts = self._tts_client(spoken)
+        # Emoji-only message → clean_for_tts() → "" → fast-path must not fire.
+        tool_results = [{"tool_call_id": "t1", "output": {"message": "👍"}}]
+        with patch("app.core.conversation_handler.conversation_cache") as mock_cache:
+            mock_cache.get_messages.return_value = [{"role": "user", "content": "do the thing"}]
+            mock_cache.get_node_context.return_value = {}
+            gen = await handler.stream_continue_with_tool_results("conv-5", tool_results, tts)
+            assert gen is not None
+            await self._drain(gen)
+
+        assert rec.called, "empty-after-clean message must fall through to the LLM path"
