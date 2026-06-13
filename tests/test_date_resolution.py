@@ -449,3 +449,48 @@ class TestResolveRelativeTime:
         from app.core.date_resolution import resolve_relative_time
         result = resolve_relative_time("in_30_minutes", {})
         assert result is None
+
+
+class TestNoTimezoneStillProducesValidISO:
+    """Regression: when no timezone is available (CC restart, conversation TTL
+    expiry, a node that omits timezone, or the speaker-mismatch rebuild that
+    used to clobber the cached zone to None), relative dates like "today" must
+    still resolve to a tz-aware ISO value (ending in 'Z').
+
+    Otherwise is_iso_datetime() rejects them, param validation fails on
+    resolved_datetimes=["today"], the invalid-param retry fires, iter-2
+    degrades to an empty response, and the node speaks "Task completed."
+    """
+
+    def test_today_is_iso_valid_without_timezone(self):
+        from app.core.general_context import generate_date_context_object
+        from app.core.date_resolution import flatten_date_context
+        from app.core.param_validation import is_iso_datetime
+
+        flat = flatten_date_context(generate_date_context_object(None))
+
+        for key in ("today", "tomorrow", "yesterday"):
+            val = flat.get(key)
+            assert isinstance(val, str) and val, f"missing resolved value for {key!r}"
+            assert val.endswith("Z"), f"{key} resolved without tz: {val!r}"
+            assert is_iso_datetime(val), f"{key} failed is_iso_datetime: {val!r}"
+
+    def test_today_is_iso_valid_with_empty_string_timezone(self):
+        from app.core.general_context import generate_date_context_object
+        from app.core.date_resolution import flatten_date_context
+        from app.core.param_validation import is_iso_datetime
+
+        flat = flatten_date_context(generate_date_context_object(""))
+        val = flat.get("today")
+        assert isinstance(val, str) and val.endswith("Z")
+        assert is_iso_datetime(val)
+
+    def test_valid_timezone_still_iso_valid(self):
+        from app.core.general_context import generate_date_context_object
+        from app.core.date_resolution import flatten_date_context
+        from app.core.param_validation import is_iso_datetime
+
+        flat = flatten_date_context(generate_date_context_object("America/New_York"))
+        val = flat.get("today")
+        assert isinstance(val, str) and val.endswith("Z")
+        assert is_iso_datetime(val)
