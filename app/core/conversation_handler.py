@@ -69,6 +69,24 @@ def get_server_tool_names(tools: Optional[List[Dict[str, Any]]]) -> Set[str]:
     }
 
 
+# Generic completion-filler phrases a small model emits when it gives up on a
+# tool turn (instead of calling/correcting a tool). These are never a useful
+# spoken response, so the terminal-filler guard in
+# ``process_voice_command_with_tools`` rewrites them to a clarification.
+# Compared case-insensitively after stripping trailing whitespace/punctuation.
+# Deliberately narrow — excludes "done"/"okay" (sanctioned terse confirmations)
+# to avoid suppressing legitimate replies.
+_GENERIC_FILLER_RESPONSES: frozenset[str] = frozenset({
+    "task completed",
+    "task complete",
+    "task is complete",
+    "task done",
+    "task finished",
+    "completed",
+    "all tasks completed",
+})
+
+
 class ConversationHandler:
     """
     Orchestrates conversation flow for voice commands.
@@ -317,6 +335,33 @@ class ConversationHandler:
             except Exception as e:
                 logger.warning(f"⚠️ Warmup inference failed (non-fatal): {e}")
 
+    @staticmethod
+    def _rewrite_terminal_filler(result: Dict[str, Any]) -> Dict[str, Any]:
+        """Terminal-filler guard: a completed tool turn must never degrade into
+        a bare generic acknowledgment like "Task completed." When the engine's
+        final prose is known filler (e.g. the model gave up after an
+        invalid-param retry instead of emitting a corrected tool call), rewrite
+        it to a clarification so the user retries rather than hearing
+        meaningless filler. Non-prose outcomes (not_for_me, tool_calls,
+        validation, error) are left untouched.
+        """
+        am_norm = (result.get("assistant_message") or "").strip().lower().rstrip(" .!")
+        if (
+            result.get("stop_reason") not in (
+                "not_for_me", "tool_calls", "validation_required",
+                "error", "server_tool_complete",
+            )
+            and am_norm in _GENERIC_FILLER_RESPONSES
+        ):
+            logger.warning(
+                "🛟 Terminal-filler guard: replacing generic filler %r with a clarification",
+                result.get("assistant_message"),
+            )
+            result["assistant_message"] = (
+                "Sorry, I didn't quite catch that — could you say it again?"
+            )
+        return result
+
     async def process_voice_command_with_tools(
         self,
         voice_command: str,
@@ -560,6 +605,9 @@ class ConversationHandler:
         conversation_cache.update_messages(conversation_id, messages)
         if result.get("stop_reason") == "error":
             logger.error("❌ Tool loop returned stop_reason=error: %s", result)
+
+        result = self._rewrite_terminal_filler(result)
+
         return result
 
     # --- Streaming-eligible server tools (bypass tool execution loop) ---

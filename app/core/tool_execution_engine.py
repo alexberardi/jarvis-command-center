@@ -836,8 +836,22 @@ class ToolExecutionEngine:
                     logger.info("ISO date guard: incorrect ISO dates, retrying")
                     continue
 
-                # Always validate/inject datetime params
-                tool_calls = await _inject_date_keys(tool_calls, date_keys, tools)
+                # Always validate/inject datetime params. Build the schema
+                # lookup from the FULL cached tool list — NOT the local `tools`
+                # variable, which may have been keyword-filtered or router-pruned
+                # before this call. If the model calls a tool the router pruned
+                # (mispredicted intent), that tool is absent from `tools`, so its
+                # datetime params never get resolved and a relative value like
+                # "today" survives. Param validation, however, reads the FULL
+                # available_commands cache — so it flags the un-resolved "today"
+                # as non-ISO, fires the invalid-param retry, and the turn
+                # degrades into "Task completed." filler. Using the full cached
+                # schema here keeps injection and validation in agreement.
+                schema_tools = list(tools or [])
+                _cached_tools = conversation_cache.get_tools(conversation_id)
+                if isinstance(_cached_tools, list):
+                    schema_tools = schema_tools + _cached_tools
+                tool_calls = await _inject_date_keys(tool_calls, date_keys, schema_tools)
                 if date_keys:
                     logger.info("Processed date keys: %s", date_keys)
 

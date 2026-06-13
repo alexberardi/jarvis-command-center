@@ -836,3 +836,45 @@ class TestStreamingContinueFastPathAndGuard:
             await self._drain(gen)
 
         assert rec.called, "empty-after-clean message must fall through to the LLM path"
+
+
+class TestTerminalFillerGuard:
+    """The terminal-filler guard rewrites generic 'Task completed.'-style prose
+    on a completed tool turn so it never reaches TTS, while leaving real
+    responses and non-prose outcomes untouched."""
+
+    @staticmethod
+    def _guard(result):
+        from app.core.conversation_handler import ConversationHandler
+        return ConversationHandler._rewrite_terminal_filler(result)
+
+    def test_replaces_task_completed(self):
+        out = self._guard({"stop_reason": "complete", "assistant_message": "Task completed."})
+        assert out["assistant_message"] != "Task completed."
+        assert "say it again" in out["assistant_message"].lower()
+
+    def test_replaces_filler_variants_case_insensitive(self):
+        for filler in ["task complete", "Task Completed", "COMPLETED.", "Task finished!", "task is complete"]:
+            out = self._guard({"stop_reason": "complete", "assistant_message": filler})
+            assert out["assistant_message"] not in (filler,), f"did not rewrite {filler!r}"
+
+    def test_keeps_real_response(self):
+        msg = "You have 1 event tonight at 7: Boys Night."
+        out = self._guard({"stop_reason": "complete", "assistant_message": msg})
+        assert out["assistant_message"] == msg
+
+    def test_keeps_sanctioned_terse_done(self):
+        # "Done." is a sanctioned fallback (conversation_handler.py:~1607) — not filler.
+        out = self._guard({"stop_reason": "complete", "assistant_message": "Done."})
+        assert out["assistant_message"] == "Done."
+
+    def test_ignores_non_prose_outcomes(self):
+        # tool_calls / not_for_me / validation must never be rewritten even if
+        # assistant_message happens to match.
+        for sr in ["tool_calls", "not_for_me", "validation_required", "error", "server_tool_complete"]:
+            out = self._guard({"stop_reason": sr, "assistant_message": "Task completed."})
+            assert out["assistant_message"] == "Task completed.", f"rewrote on stop_reason={sr}"
+
+    def test_handles_missing_assistant_message(self):
+        out = self._guard({"stop_reason": "complete"})
+        assert out.get("assistant_message") in (None,)  # untouched (no filler match)

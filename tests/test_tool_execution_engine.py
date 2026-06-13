@@ -680,6 +680,88 @@ class TestDateKeyInjection:
         )
 
     @pytest.mark.asyncio
+    async def test_pruned_tool_schema_resolved_from_cache(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Regression: when the router PRUNES the called tool out of the `tools`
+        list passed to execute(), date injection must still find its schema via
+        the full cached tool list (conversation_cache.get_tools). Otherwise a
+        relative value like 'today' survives, param validation flags it, and the
+        turn degrades into 'Task completed.' filler.
+        """
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": json.dumps({
+                    "message": "Checking calendar.",
+                    "tool_calls": [{
+                        "name": "get_calendar_events",
+                        "arguments": {"resolved_datetimes": ["today"]}
+                    }]
+                })},
+                "finish_reason": "tool_calls"
+            }],
+            "date_keys": ["today"],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }
+
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        # The FULL cached schema knows get_calendar_events.resolved_datetimes is
+        # array<datetime>. The router pruned it, so it is NOT in the `tools` arg.
+        full_schema = [{
+            "function": {
+                "name": "get_calendar_events",
+                "parameters": {
+                    "properties": {
+                        "resolved_datetimes": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "date-time"}
+                        }
+                    }
+                }
+            }
+        }]
+        mock_conversation_cache.get_tools.return_value = full_schema
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                captured_calls = []
+
+                def capture_calls(tool_calls, **kwargs):
+                    captured_calls.extend(tool_calls)
+                    return ([], tool_calls)
+                mock_executor.execute_tool_calls.side_effect = capture_calls
+
+                with patch("app.core.tool_execution_engine.generate_date_context_object") as mock_date_ctx:
+                    mock_date_ctx.return_value = {
+                        "current": {
+                            "date_iso": "2025-01-15",
+                            "datetime": "2025-01-15T12:00:00-05:00",
+                            "utc_start_of_day": "2025-01-15T05:00:00Z"
+                        },
+                        "relative_dates": {
+                            "today": {"utc_start_of_day": "2025-01-15T05:00:00Z"}
+                        }
+                    }
+
+                    await engine.execute(
+                        conversation_id="test-conv-pruned",
+                        messages=[{"role": "system", "content": "You are a helpful assistant."}],
+                        tools=[],  # router pruned get_calendar_events out of the LLM-facing list
+                        user_utterance="what's on my calendar today",
+                    )
+
+        assert captured_calls, "Expected client tool calls to be captured"
+        args = json.loads(captured_calls[0]["function"]["arguments"])
+        resolved = args.get("resolved_datetimes", [])
+        assert resolved and resolved[0] != "today", (
+            f"Expected 'today' resolved to ISO via cached schema, got {resolved}"
+        )
+        assert "2025-01-15" in resolved[0], f"Expected ISO date, got {resolved[0]}"
+
+    @pytest.mark.asyncio
     async def test_empty_datetime_array_filled_from_date_keys(
         self, mock_llm_client, mock_conversation_cache
     ):
