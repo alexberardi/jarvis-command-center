@@ -61,8 +61,13 @@ def generate_date_context_object(timezone_str: str = None) -> dict:
     # Helper function to get UTC start of day for a given date in user's timezone
     def get_utc_start_of_day(date_obj, user_tz_str):
         if not user_tz_str:
-            return date_obj.strftime("%Y-%m-%dT00:00:00")
-        
+            # No timezone available — treat as UTC midnight. Emitting the 'Z'
+            # is critical: without it, is_iso_datetime() (which requires
+            # tzinfo) rejects the value, so a relative date like "today"
+            # fails param validation, triggers the invalid-param retry, and
+            # degrades the turn into the node's "Task completed." fallback.
+            return date_obj.strftime("%Y-%m-%dT00:00:00Z")
+
         try:
             user_tz = pytz.timezone(user_tz_str)
             # Create datetime at start of day in user's timezone
@@ -79,7 +84,9 @@ def generate_date_context_object(timezone_str: str = None) -> dict:
             return utc_start.strftime("%Y-%m-%dT%H:%M:%SZ")
         except Exception as e:
             logger.error(f"❌ Error calculating UTC start of day: {e}")
-            return date_obj.strftime("%Y-%m-%dT00:00:00")
+            # Fall back to UTC midnight WITH 'Z' so the value stays tz-aware
+            # and passes is_iso_datetime (see the no-timezone branch above).
+            return date_obj.strftime("%Y-%m-%dT00:00:00Z")
     
     # Calculate all the date variations
     tomorrow = now + timedelta(days=1)

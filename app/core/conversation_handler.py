@@ -2618,7 +2618,14 @@ class ConversationHandler:
 
         # Rebuild system prompt with correct memories and replace in cache
         tools = conversation_cache.get_tools(conversation_id)
-        timezone = node_context.get("timezone")
+        # Source timezone from the cache (top-level field set at warmup), NOT
+        # from node_context — node_context never carries "timezone", so the
+        # old node_context.get("timezone") returned None and clobbered the
+        # cached zone to None on every speaker-mismatch rebuild. With no zone,
+        # date resolution emits a non-'Z' "today" that fails param validation
+        # → invalid-param retry → empty turn → node "Task completed." fallback.
+        # Mirrors the correct sibling at the pruned-tools rebuild path.
+        timezone = conversation_cache.get_timezone(conversation_id)
         available_command_flags = ""
         available_commands = conversation_cache.get_available_commands(conversation_id) or []
         if available_commands:
