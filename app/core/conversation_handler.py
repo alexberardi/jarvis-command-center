@@ -1188,16 +1188,83 @@ class ConversationHandler:
         # Work on a copy so fall-back doesn't pollute the cache.
         messages = list(cached_messages)
 
-        # Two modes for adding tool results to the prompt:
-        # - Native tools (Qwen3 with proper chat template): role="tool"
-        #   messages keyed by tool_call_id.
-        # - Text-based (most local models): role="tool" gets dropped by the
-        #   chat template, so we strip any existing tool messages and inject
-        #   the results as a single user message instead.
+        # Native-tools providers (Qwen3 with a proper chat template) keep
+        # role="tool" messages keyed by tool_call_id; text-based providers drop
+        # them. Computed up front because the fast-path below only applies to
+        # text-based providers (it commits a text-mode history shape).
         use_native_continue: bool = (
             self.prompt_provider is not None
             and self.prompt_provider.supports_native_tools
         )
+
+        # ── Fast-path ──────────────────────────────────────────────────────
+        # If every tool result already carries a clean spoken message/response
+        # string, speak it directly and skip the formatting LLM call entirely.
+        # This mirrors the blocking text-mode path (_format_tool_result_text_
+        # mode) so the voice path never re-renders a perfectly good answer into
+        # generic filler ("Task completed.") — and it shaves the ~2-3s
+        # formatting call off the turn. Excluded:
+        #   • knowledge-delegation results (answer_question etc.) — they carry
+        #     no message and MUST still hit the LLM;
+        #   • native-tools providers — their cached history must preserve the
+        #     role="tool" message, so reuse the (correct) LLM commit path.
+        fast_context = "\n".join(
+            out if isinstance(out, str) else json.dumps(out)
+            for out in (tr.get("output", {}) for tr in tool_results)
+        )
+        if (
+            tool_results
+            and not use_native_continue
+            and not self._is_knowledge_delegation(fast_context)
+        ):
+            fast_parts: List[str] = []
+            for tr in tool_results:
+                output = tr.get("output", {})
+                if isinstance(output, str):
+                    try:
+                        output = json.loads(output)
+                    except (json.JSONDecodeError, TypeError):
+                        output = {}
+                if isinstance(output, dict):
+                    msg = output.get("message") or output.get("response")
+                    if isinstance(msg, str) and msg.strip():
+                        fast_parts.append(msg.strip())
+            spoken = (
+                clean_for_tts(" ".join(fast_parts))
+                if fast_parts and len(fast_parts) == len(tool_results)
+                else ""
+            )
+            # Only fast-path when there is actually something to speak. If
+            # clean_for_tts wiped the message to empty (emoji/markdown-only),
+            # fall through to the LLM path (which has its own tool-result
+            # fallback) rather than streaming a 0-byte 200 the node would
+            # treat as a successful but silent turn.
+            if spoken:
+                # Commit the spoken turn to cache so follow-up turns see a
+                # coherent history (mirrors the LLM branch's commit below).
+                committed = [m for m in messages if m.get("role") != "tool"]
+                committed.append({"role": "assistant", "content": spoken})
+                conversation_cache.update_messages(conversation_id, committed)
+                logger.info(
+                    "🚀 Streaming continue fast-path: speaking tool message "
+                    "directly (%d chars), skipping formatting LLM call",
+                    len(spoken),
+                )
+                _FAST_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+                async def _fast_audio_generator():
+                    for sentence in _FAST_SENTENCE_BOUNDARY.split(spoken):
+                        sentence = sentence.strip()
+                        if not sentence:
+                            continue
+                        try:
+                            audio_iter, _meta = await tts_client.speak_stream(sentence)
+                            async for chunk in audio_iter:
+                                yield chunk
+                        except Exception as e:
+                            logger.warning("TTS error (fast-path): %s", e)
+
+                return _fast_audio_generator()
 
         # Two parallel lists:
         # - `messages` is what we COMMIT to the conversation cache (must
@@ -1240,7 +1307,11 @@ class ConversationHandler:
                     "role": "user",
                     "content": (
                         f"Here are the tool results. Craft a natural response using the "
-                        f"ACTUAL values — never use placeholders. Be brief and conversational.\n\n"
+                        f"ACTUAL values — never use placeholders. If the results are "
+                        f"empty or contain no items, say so plainly (e.g. \"You have "
+                        f"nothing on your calendar today\"). Never reply with a bare "
+                        f"acknowledgment like \"Task completed\", \"Done\", or \"Okay\" — "
+                        f"always state the actual result. Be brief and conversational.\n\n"
                         f"{tool_context}"
                     ),
                 })
@@ -1254,7 +1325,10 @@ class ConversationHandler:
                 "role": "system",
                 "content": (
                     "Respond naturally in plain text. Do not use JSON format "
-                    "or call any tools. Use the tool results above to answer."
+                    "or call any tools. Use the tool results above to answer. "
+                    "Never reply with a generic acknowledgment like \"Task "
+                    "completed\" or \"Done\" — always state the actual result, "
+                    "and if there is nothing to report, say so plainly."
                 ),
             })
 
@@ -1279,10 +1353,40 @@ class ConversationHandler:
         )
         think_stripper = ThinkBlockStripper.from_pair(think_pair)
 
+        def _looks_unspeakable(text: str) -> bool:
+            """True if `text` is empty, raw JSON (a bare tool-call re-emit),
+            or leftover think-residue — i.e. must NOT be sent to TTS."""
+            t = text.strip()
+            if not t:
+                return True
+            if "<think" in t.lower():
+                return True
+            return t.startswith("{") or t.startswith("[")
+
+        def _tool_result_fallback() -> str:
+            """Spoken text derived from the tool results when the formatting
+            LLM fails to produce usable prose (mirrors blocking path 1586-1613)."""
+            parts: List[str] = []
+            for tr in tool_results:
+                out = tr.get("output", {})
+                if isinstance(out, str):
+                    try:
+                        out = json.loads(out)
+                    except (json.JSONDecodeError, TypeError):
+                        out = {}
+                if isinstance(out, dict):
+                    m = out.get("message") or out.get("response")
+                    if m:
+                        parts.append(str(m))
+                    elif out.get("success") is False:
+                        parts.append(out.get("error", "The command failed."))
+            return clean_for_tts(" ".join(parts)).strip()
+
         async def _audio_generator():
             token_buffer = ""
             full_response = ""
             sentences_sent = 0
+            substituted: Optional[str] = None
 
             try:
                 async for event in self.llm_client.chat_completion_stream(
@@ -1321,13 +1425,15 @@ class ConversationHandler:
                                     "TTS error sentence %d: %s", sentences_sent, e,
                                 )
 
-                # Flush trailing partial
+                # Flush trailing partial — but never speak raw JSON / think
+                # residue (a model that re-emits a bare tool-call instead of
+                # prose). Suppress it; the substitution below handles it.
                 remaining_text = clean_for_tts(
                     _TOOL_CALL_TAG_RE.sub(
                         "", think_stripper.strip_complete_blocks(token_buffer)
                     ).strip()
                 )
-                if remaining_text:
+                if remaining_text and not _looks_unspeakable(remaining_text):
                     sentences_sent += 1
                     try:
                         audio_iter, _meta = await tts_client.speak_stream(remaining_text)
@@ -1336,15 +1442,46 @@ class ConversationHandler:
                     except Exception as e:
                         logger.warning("TTS error final sentence: %s", e)
 
+                # Guard: if nothing usable was spoken (model emitted only JSON /
+                # think-residue / empty), substitute a tool-derived message so
+                # the user never hears raw JSON, silence, or "Task completed."
+                if sentences_sent == 0:
+                    substituted = _tool_result_fallback()
+                    if substituted:
+                        logger.info(
+                            "Streaming continue produced no usable prose — "
+                            "substituting tool-result fallback: %s", substituted,
+                        )
+                        for sentence in _SENTENCE_BOUNDARY.split(substituted):
+                            sentence = sentence.strip()
+                            if not sentence:
+                                continue
+                            try:
+                                audio_iter, _meta = await tts_client.speak_stream(sentence)
+                                async for chunk in audio_iter:
+                                    yield chunk
+                            except Exception as e:
+                                logger.warning("TTS error (fallback): %s", e)
+                    else:
+                        logger.warning(
+                            "Streaming continue produced no usable prose and no "
+                            "tool-result fallback available — staying silent",
+                        )
+
             except Exception as e:
                 logger.error("Streaming continue iter error: %s", e)
                 return
 
             # Commit the conversation (tool results + final assistant message)
-            # to the cache, with scaffolding scrubbed.
+            # to the cache, with scaffolding scrubbed. Prefer the substituted
+            # text; never commit raw JSON / think-residue to the cache.
             clean_response = _TOOL_CALL_TAG_RE.sub(
                 "", think_stripper.strip_complete_blocks(full_response)
             ).strip()
+            if substituted:
+                clean_response = substituted
+            elif _looks_unspeakable(clean_response):
+                clean_response = ""
             if clean_response:
                 messages.append({"role": "assistant", "content": clean_response})
                 conversation_cache.update_messages(conversation_id, messages)
