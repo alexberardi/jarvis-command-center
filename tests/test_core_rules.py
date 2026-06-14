@@ -22,6 +22,7 @@ from app.core.prompt_providers.shared.core_rules import (
     build_fallback_line,
     build_identity_header,
     build_rules_block,
+    build_speaker_block,
 )
 
 
@@ -201,44 +202,63 @@ class TestNotForMeInstruction:
 
 
 class TestBuildIdentityHeader:
-    """Test build_identity_header output."""
+    """build_identity_header is now SPEAKER-AGNOSTIC: identity + room/style
+    only, no speaker name and no memories (those moved to build_speaker_block
+    so the cached prefix is identical across household members)."""
 
-    def test_default_values(self):
-        result = build_identity_header("kitchen", "alex", "brief")
+    def test_agnostic_output(self):
+        result = build_identity_header("kitchen", "brief")
         assert result == (
             "You are Jarvis, a function calling voice assistant.\n"
-            "Context: room=kitchen, style=brief\n"
-            "You are speaking with alex."
+            "Context: room=kitchen, style=brief"
         )
 
-    def test_unknown_defaults(self):
-        # user="default" sentinel suppresses the "speaking with" line
-        result = build_identity_header("unknown", "default", "brief")
-        assert "room=unknown" in result
-        assert "style=brief" in result
-        assert "You are speaking with" not in result
-
-    def test_custom_values(self):
-        result = build_identity_header("living_room", "bob", "verbose")
+    def test_no_speaker_or_memories_for_any_input(self):
+        result = build_identity_header("living_room", "verbose")
         assert "room=living_room" in result
         assert "style=verbose" in result
-        assert "You are speaking with bob." in result
+        assert "You are speaking with" not in result
+        assert "User Profile" not in result
 
-    def test_starts_with_jarvis(self):
-        result = build_identity_header("r", "u", "v")
+    def test_starts_with_jarvis_two_lines(self):
+        result = build_identity_header("r", "v")
         assert result.startswith("You are Jarvis")
+        assert len(result.split("\n")) == 2
 
-    def test_three_lines_with_user(self):
-        # Identity + Context + "speaking with" line = 3 lines when user is set
-        result = build_identity_header("r", "u", "v")
-        lines = result.split("\n")
-        assert len(lines) == 3
+    def test_identical_across_speakers(self):
+        # The whole point: the cached prefix must be byte-identical regardless
+        # of who is speaking (speaker is no longer an input).
+        assert build_identity_header("kitchen", "brief") == build_identity_header("kitchen", "brief")
 
-    def test_two_lines_without_user(self):
-        # user="default" omits the speaking-with line → 2 lines
-        result = build_identity_header("r", "default", "v")
-        lines = result.split("\n")
-        assert len(lines) == 2
+
+class TestBuildSpeakerBlock:
+    """build_speaker_block carries the per-turn speaker name + memories that
+    used to live in the identity header — now injected as a trailing system
+    message after the cached prefix."""
+
+    def test_name_and_memories(self):
+        result = build_speaker_block("alex", "- Likes coffee black")
+        assert "You are speaking with alex." in result
+        assert "User Profile - If user asks" in result
+        assert "- Likes coffee black" in result
+
+    def test_default_name_no_memories_is_empty(self):
+        assert build_speaker_block("default", "") == ""
+
+    def test_name_only(self):
+        result = build_speaker_block("alex", "")
+        assert result == "You are speaking with alex."
+        assert "User Profile" not in result
+
+    def test_memories_only_no_name(self):
+        # default sentinel suppresses the speaking-with line, memories remain
+        result = build_speaker_block("default", "- Vegetarian")
+        assert "You are speaking with" not in result
+        assert "User Profile" in result
+        assert "- Vegetarian" in result
+
+    def test_empty_inputs(self):
+        assert build_speaker_block("", "") == ""
 
 
 class TestBuildRulesBlock:

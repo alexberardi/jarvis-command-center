@@ -35,30 +35,38 @@ class IJarvisPromptProvider(ABC):
     # of manually pulling fields out of node_context.
 
     def build_context_header(self, node_context: Dict[str, Any]) -> str:
-        """Build the identity + room + user context header from node_context.
+        """Build the SPEAKER-AGNOSTIC identity + room/style header.
 
-        Extracts room, speaker name, voice mode, and user memories from the
-        node context dict and returns a formatted header block. This is the
-        single source of truth for how context reaches the prompt — providers
-        should call this instead of manually extracting fields.
+        This is the LEADING (cached) segment of the system prompt — it must be
+        identical across all household members so the llama.cpp prefix cache
+        hits regardless of who is speaking. Speaker name + memories are NOT
+        included here; they are injected per-turn via :meth:`build_speaker_context`
+        as a trailing system message after the cached prefix.
 
         Returns a string like::
 
             You are Jarvis, a function calling voice assistant.
-            Context: room=kitchen, user=alex, style=brief
-
-            User Profile - If user asks a question about one of these items
-            you must respond with an answer:
-            - Likes coffee black
+            Context: room=kitchen, style=brief
         """
         from app.core.prompt_providers.shared.core_rules import build_identity_header
 
         ctx = node_context or {}
         room: str = ctx.get("room", "unknown")
-        user: str = ctx.get("speaker_name") or ctx.get("user", "default")
         voice_mode: str = ctx.get("voice_mode", "brief")
+        return build_identity_header(room, voice_mode)
+
+    def build_speaker_context(self, node_context: Dict[str, Any]) -> str:
+        """Build the per-turn SPEAKER-SPECIFIC block (name + memories) from
+        node_context, returned for injection as a trailing system message
+        after the cached prefix. Returns "" when there is nothing
+        speaker-specific to say (unknown speaker / no memories).
+        """
+        from app.core.prompt_providers.shared.core_rules import build_speaker_block
+
+        ctx = node_context or {}
+        user: str = ctx.get("speaker_name") or ctx.get("user", "default")
         user_memories: str = ctx.get("user_memories", "")
-        return build_identity_header(room, user, voice_mode, user_memories)
+        return build_speaker_block(user, user_memories)
 
     @property
     @abstractmethod

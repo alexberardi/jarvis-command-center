@@ -179,7 +179,9 @@ class TestQwen25MediumUntrainedPrompt:
             sample_node_context, "America/New_York", sample_tools
         )
         assert "room=kitchen" in prompt
-        assert "You are speaking with alex" in prompt
+        # Speaker is no longer baked into the cached prefix — it's injected
+        # per-turn as a trailing system message (build_speaker_context).
+        assert "You are speaking with" not in prompt
         assert "style=brief" in prompt
 
     def test_prompt_includes_tools_xml_tags(
@@ -423,3 +425,39 @@ class TestQwen25MediumUntrainedParseResponse:
         result = provider.parse_response(raw)
         parsed = json.loads(result)
         assert parsed["tool_calls"][0]["arguments"]["resolved_datetimes"] == ["today", "tomorrow"]
+
+
+class TestSpeakerAgnosticPrompt:
+    """The system prompt (cached prefix) must be byte-identical across speakers
+    — speaker name + memories now live in a per-turn trailing block
+    (build_speaker_context), not in the prompt. This is the prefix-cache-hit
+    guarantee that removes the speaker-switch warmup/mismatch bug."""
+
+    def test_prompt_identical_across_speakers(self, provider, sample_tools):
+        ctx_alex = {
+            "room": "kitchen", "speaker_name": "alex", "voice_mode": "brief",
+            "user_memories": "- Likes coffee black",
+        }
+        ctx_bob = {
+            "room": "kitchen", "speaker_name": "bob", "voice_mode": "brief",
+            "user_memories": "- Allergic to peanuts",
+        }
+        p_alex = provider.build_system_prompt(ctx_alex, "America/New_York", sample_tools)
+        p_bob = provider.build_system_prompt(ctx_bob, "America/New_York", sample_tools)
+        assert p_alex == p_bob, "system prompt must not depend on the speaker"
+        assert "alex" not in p_alex and "bob" not in p_alex
+        # The actual memory CONTENT must not be in the cached prefix (it moves
+        # to the per-turn speaker block). ("User Profile" as a phrase appears
+        # in a static rule, so we check the memory text itself, not the label.)
+        assert "Likes coffee black" not in p_alex
+        assert "Allergic to peanuts" not in p_bob
+
+    def test_speaker_context_carries_name_and_memories(self, provider):
+        block = provider.build_speaker_context(
+            {"speaker_name": "alex", "user_memories": "- Likes coffee black"}
+        )
+        assert "You are speaking with alex." in block
+        assert "Likes coffee black" in block
+
+    def test_speaker_context_empty_for_unknown(self, provider):
+        assert provider.build_speaker_context({"voice_mode": "brief"}) == ""

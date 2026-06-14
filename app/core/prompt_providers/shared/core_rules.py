@@ -182,40 +182,62 @@ TOOL_CALL_FORMAT_JSON: str = (
 
 def build_identity_header(
     room: str,
-    user: str,
     voice_mode: str,
-    user_memories: str = "",
 ) -> str:
-    """Return the identity + context header used by all providers.
+    """Return the SPEAKER-AGNOSTIC identity + context header — the leading
+    (cached) segment of every provider's system prompt.
 
-    The memory block is labeled ``User Profile`` and carries the inline
-    must-respond directive — placing the rule directly with the data
-    means the model cannot read the facts without reading the rule.
-    This is a deliberate counter to the model's bias to silence
-    questions about anything in the profile.
+    Speaker name and memories are deliberately NOT here: they are
+    speaker-specific, and because this header sits at the very start of the
+    prompt, including them would change byte 0 of the llama.cpp prefix on
+    every speaker change → full cache miss + the mismatch-rebuild path that
+    used to clobber the cached timezone. They are injected per-turn as a
+    trailing system message via :func:`build_speaker_block`. ``room`` and
+    ``voice_mode`` are node-level (constant for a conversation), so they stay
+    in the cached prefix and keep it identical across all household members.
 
     Example output::
 
         You are Jarvis, a function calling voice assistant.
-        Context: room=kitchen, user=alex, style=brief
+        Context: room=kitchen, style=brief
+    """
+    return (
+        "You are Jarvis, a function calling voice assistant.\n"
+        f"Context: room={room}, style={voice_mode}"
+    )
+
+
+def build_speaker_block(speaker_name: str, user_memories: str = "") -> str:
+    """Return the per-turn SPEAKER-SPECIFIC block (name + memories).
+
+    Injected as a trailing ``role=system`` message AFTER the cached prefix so
+    a speaker change never invalidates it. The memory block is labeled
+    ``User Profile`` and carries the inline must-respond directive — placing
+    the rule directly with the data means the model cannot read the facts
+    without reading the rule (a deliberate counter to the model's bias to
+    stay silent about profile items).
+
+    Returns ``""`` when there is nothing speaker-specific to say (unknown
+    speaker, no memories) — callers should skip appending an empty block.
+
+    Example output::
+
+        You are speaking with alex.
 
         User Profile - If user asks a question about one of these items
         you must respond with an answer:
         - Likes coffee black
-        - Follows baseball (Yankees games)
     """
-    header = (
-        "You are Jarvis, a function calling voice assistant.\n"
-        f"Context: room={room}, style={voice_mode}"
-    )
-    if user and user != "default":
-        header += f"\nYou are speaking with {user}."
+    block = ""
+    if speaker_name and speaker_name != "default":
+        block = f"You are speaking with {speaker_name}."
     if user_memories:
-        header += (
-            "\n\nUser Profile - If user asks a question about one of these "
+        prefix = "\n\n" if block else ""
+        block += (
+            f"{prefix}User Profile - If user asks a question about one of these "
             f"items you must respond with an answer:\n{user_memories}"
         )
-    return header
+    return block
 
 
 def build_rules_block(

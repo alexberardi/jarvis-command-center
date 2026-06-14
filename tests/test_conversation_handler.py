@@ -816,6 +816,47 @@ class TestStreamingContinueFastPathAndGuard:
 
         assert rec.called, "native provider must not be fast-pathed"
 
+    def test_transient_system_block_identification_and_dedup(self):
+        """Per-turn transient system blocks (speaker, router hint, stream
+        override) must be de-duplicated: exactly one of each per turn, never
+        accumulating across turns."""
+        from app.core.conversation_handler import _is_transient_system_block as T
+
+        name_only = {"role": "system", "content": "You are speaking with alex."}
+        combo = {"role": "system", "content": (
+            "You are speaking with alex.\n\nUser Profile - If user asks a "
+            "question about one of these items you must respond with an "
+            "answer:\n- coffee black"
+        )}
+        mem_only = {"role": "system", "content": (
+            "User Profile - If user asks a question about one of these items "
+            "you must respond with an answer:\n- vegetarian"
+        )}
+        router = {"role": "system", "content": "Router hint: likely tool is 'get_weather'."}
+        override = {"role": "system", "content": "Respond naturally in plain text. Do not use JSON format or call any tools."}
+        static_rule = {"role": "system", "content": "User Profile are different: those are fair game"}
+        prefix = {"role": "system", "content": "You are Jarvis, a function calling voice assistant."}
+        user = {"role": "user", "content": "what's the weather"}
+
+        # transient blocks (stripped + re-derived each turn)
+        assert T(name_only) and T(combo) and T(mem_only)
+        assert T(router) and T(override)
+        # NOT transient: the cached prefix, the static rule, user turns
+        assert not T(static_rule)
+        assert not T(prefix)
+        assert not T(user)
+
+        # Per-turn strip+append: a history carrying prior speaker + router +
+        # override blocks collapses, then exactly one fresh set is re-added.
+        msgs = [prefix, name_only, router, override, user, combo]
+        msgs[:] = [m for m in msgs if not T(m)]
+        assert not any(T(m) for m in msgs)
+        msgs.append({"role": "system", "content": "You are speaking with bob."})
+        msgs.append({"role": "system", "content": "Router hint: likely tool is 'get_calendar_events'."})
+        assert sum(1 for m in msgs if T(m)) == 2  # one speaker + one router, no dupes
+        # the cached prefix and real history are untouched
+        assert prefix in msgs and user in msgs
+
     @pytest.mark.asyncio
     async def test_empty_after_clean_falls_through_to_llm(self):
         """A message that clean_for_tts reduces to empty (emoji/markdown-only)
