@@ -87,6 +87,34 @@ _GENERIC_FILLER_RESPONSES: frozenset[str] = frozenset({
 })
 
 
+def _is_transient_system_block(msg: Dict[str, Any]) -> bool:
+    """True if ``msg`` is a PER-TURN ephemeral system block that is re-derived
+    every turn — the speaker block (name + memories), the router hint, or the
+    plain-text streaming override. These must be stripped before re-injection
+    so they don't accumulate across multi-turn conversations and bloat the
+    prompt toward the model's context limit (there must be exactly one of each
+    per turn, not N after N turns).
+
+    Matched by content prefix:
+      - "You are speaking with …" / "User Profile - If user asks …"  (speaker)
+      - "Router hint:"                                                (router)
+      - "Respond naturally in plain text"                            (stream override)
+
+    Does NOT match the cached system prompt (messages[0]) — including the
+    static "User Profile are different…" rule baked inside it — nor genuine
+    user/assistant conversation history.
+    """
+    if not isinstance(msg, dict) or msg.get("role") != "system":
+        return False
+    content = msg.get("content") or ""
+    return (
+        content.startswith("You are speaking with ")
+        or content.startswith("User Profile - If user asks")
+        or content.startswith("Router hint:")
+        or content.startswith("Respond naturally in plain text")
+    )
+
+
 class ConversationHandler:
     """
     Orchestrates conversation flow for voice commands.
@@ -424,22 +452,11 @@ class ConversationHandler:
             tools = conversation_cache.get_tools(conversation_id)
             available_commands = conversation_cache.get_available_commands(conversation_id) or []
 
-        # --- Speaker mismatch detection (parallel warmup) ---
-        # Warmup may have used a cached/predicted speaker_user_id. If STT
-        # identified a different speaker, reload memories and rebuild the
-        # system prompt so the LLM sees the correct user context.
-        if speaker_user_id is not None and messages:
-            node_context = conversation_cache.get_node_context(conversation_id)
-            warmup_speaker = node_context.get("speaker_user_id") if node_context else None
-            if warmup_speaker != speaker_user_id:
-                logger.info(
-                    "Speaker mismatch detected, reloading memories: warmup=%s actual=%s",
-                    warmup_speaker, speaker_user_id,
-                )
-                await self._reload_memories_for_speaker(
-                    conversation_id, speaker_user_id, node_context, messages,
-                )
-
+        # NOTE: the speaker (name + memories) is no longer baked into the
+        # cached system prompt. It is injected per-turn as a trailing system
+        # message below (see _build_turn_speaker_message), so the warmup prefix
+        # stays speaker-agnostic and a speaker change can never invalidate the
+        # cache or clobber the cached timezone (the old mismatch-rebuild bug).
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Cache lookups done")
 
         # Propagate model.advanced_thinking to the prompt provider so
@@ -475,6 +492,22 @@ class ConversationHandler:
                 messages=messages, conversation_id=conversation_id,
                 available_commands=available_commands,
             )
+
+        # Inject the per-turn speaker block (name + memories) as a trailing
+        # system message AFTER the cached/pruned prefix — never into messages[0].
+        # Resolved fresh from the actual turn speaker; replaces the old
+        # mismatch-rebuild path (which clobbered the prefix + timezone).
+        # Strip any prior per-turn transient system blocks (speaker, router
+        # hint, stream override) first — exactly ONE of each per turn, so they
+        # never accumulate across a multi-turn conversation and bloat the
+        # prompt toward the model's context limit.
+        messages[:] = [m for m in messages if not _is_transient_system_block(m)]
+        _speaker_msg = await self._build_turn_speaker_message(
+            conversation_id, speaker_user_id,
+            conversation_cache.get_node_context(conversation_id),
+        )
+        if _speaker_msg:
+            messages.append({"role": "system", "content": _speaker_msg})
 
         # Add router hint if decision was used
         if router_decision and router_decision.get("used"):
@@ -689,16 +722,20 @@ class ConversationHandler:
             predicted_tool, confidence,
         )
 
-        # Speaker mismatch detection (same as blocking path)
-        if speaker_user_id is not None:
-            node_context = conversation_cache.get_node_context(conversation_id)
-            warmup_speaker = node_context.get("speaker_user_id") if node_context else None
-            if warmup_speaker != speaker_user_id:
-                await self._reload_memories_for_speaker(
-                    conversation_id, speaker_user_id, node_context, messages,
-                )
-                # Re-fetch messages after reload
-                messages = conversation_cache.get_messages(conversation_id) or messages
+        # Inject the per-turn speaker block (name + memories) as a trailing
+        # system message — the cached prefix stays speaker-agnostic, so a
+        # speaker change can't invalidate it or clobber the cached timezone.
+        # Strip any prior per-turn transient system blocks (speaker, router
+        # hint, stream override) first — exactly ONE of each per turn, so they
+        # never accumulate across a multi-turn conversation and bloat the
+        # prompt toward the model's context limit.
+        messages[:] = [m for m in messages if not _is_transient_system_block(m)]
+        _speaker_msg = await self._build_turn_speaker_message(
+            conversation_id, speaker_user_id,
+            conversation_cache.get_node_context(conversation_id),
+        )
+        if _speaker_msg:
+            messages.append({"role": "system", "content": _speaker_msg})
 
         # Sync advanced thinking setting so suffix adapts
         self._sync_advanced_thinking(conversation_id)
@@ -993,18 +1030,24 @@ class ConversationHandler:
             predicted_tool, confidence,
         )
 
-        # Speaker mismatch handling (mirrors blocking path)
-        if speaker_user_id is not None:
-            node_context = conversation_cache.get_node_context(conversation_id)
-            warmup_speaker = node_context.get("speaker_user_id") if node_context else None
-            if warmup_speaker != speaker_user_id:
-                await self._reload_memories_for_speaker(
-                    conversation_id, speaker_user_id, node_context, cached_messages,
-                )
-                cached_messages = conversation_cache.get_messages(conversation_id) or cached_messages
-
         # Work on a copy so fall-back doesn't pollute the cache.
         messages = list(cached_messages)
+
+        # Inject the per-turn speaker block (name + memories) as a trailing
+        # system message into the working copy — the cached prefix stays
+        # speaker-agnostic, so a speaker change can't invalidate it or clobber
+        # the cached timezone (the old mismatch-rebuild bug).
+        # Strip any prior per-turn transient system blocks (speaker, router
+        # hint, stream override) first — exactly ONE of each per turn, so they
+        # never accumulate across a multi-turn conversation and bloat the
+        # prompt toward the model's context limit.
+        messages[:] = [m for m in messages if not _is_transient_system_block(m)]
+        _speaker_msg = await self._build_turn_speaker_message(
+            conversation_id, speaker_user_id,
+            conversation_cache.get_node_context(conversation_id),
+        )
+        if _speaker_msg:
+            messages.append({"role": "system", "content": _speaker_msg})
 
         # Sync advanced thinking setting so suffix adapts
         self._sync_advanced_thinking(conversation_id)
@@ -2542,35 +2585,64 @@ class ConversationHandler:
             logger.warning(f"⚠️ Failed to check memory settings, defaulting to enabled: {e}")
             return True, True
 
-    async def _reload_memories_for_speaker(
+    async def _build_turn_speaker_message(
         self,
         conversation_id: str,
-        speaker_user_id: int,
+        speaker_user_id: int | None,
         node_context: Dict[str, Any] | None,
-        messages: list,
-    ) -> None:
-        """Reload user memories after a speaker mismatch from parallel warmup.
+    ) -> Optional[str]:
+        """Build the per-turn speaker block (name + memories) injected as a
+        trailing system message AFTER the cached prefix.
 
-        When warmup ran during recording, it used the last-known speaker's
-        memories.  If STT identified a different speaker, we swap the
-        memories in the system prompt and update the conversation cache so
-        the LLM sees the correct user context.
+        Replaces the old speaker-mismatch rebuild. The warmup prefix is now
+        speaker-agnostic, so instead of rewriting messages[0] (which clobbered
+        the prefix AND the cached timezone), we resolve the actual turn speaker
+        and emit a small trailing block. ``node_context`` is the LIVE cached
+        dict, so updating it here also keeps transcript attribution correct for
+        a speaker that differs from the warmup guess. Returns None when there
+        is nothing speaker-specific to say (unknown speaker / no memories).
         """
-        if node_context is None:
-            return
+        from app.core.prompt_providers.shared.core_rules import build_speaker_block
 
-        _memory_enabled, _ = self._get_memory_settings(node_context)
-        if not _memory_enabled:
-            return
+        ctx = node_context or {}
+        warmup_speaker = ctx.get("speaker_user_id")
+        effective = speaker_user_id if speaker_user_id is not None else warmup_speaker
 
-        household_id = node_context.get("household_id")
-        if not household_id:
-            return
+        # Turn speaker differs from the warmup guess → re-resolve name +
+        # memories for the real speaker and update the cached node_context.
+        # No prompt/cache rebuild (that was the bug).
+        if effective is not None and effective != warmup_speaker:
+            await self._resolve_speaker_into_context(effective, ctx)
 
-        # Update node_context with actual speaker
+        name = ctx.get("speaker_name") or "default"
+        memories = ctx.get("user_memories", "") or ""
+        block = build_speaker_block(name, memories)
+
+        logger.info(
+            "[TURN cid=%s] [SPEAKER] resolved_user_id=%s source=%s name=%r "
+            "memories_chars=%d block=%s",
+            conversation_id,
+            effective,
+            "stt" if speaker_user_id is not None else "warmup-cached",
+            name,
+            len(memories),
+            "yes" if block else "none",
+        )
+        return block or None
+
+    async def _resolve_speaker_into_context(
+        self,
+        speaker_user_id: int,
+        node_context: Dict[str, Any],
+    ) -> None:
+        """Resolve display name + load memories for ``speaker_user_id`` into the
+        (live cached) ``node_context``. Called when the turn speaker differs
+        from the warmup guess. Does NOT rebuild the cached system prompt — that
+        rewrite was the source of the prefix/timezone clobber.
+        """
         node_context["speaker_user_id"] = speaker_user_id
 
-        # Resolve display name so the prompt says "user=alex" not "user=default"
+        # Resolve display name (independent of the memory setting).
         try:
             from app.core import service_config
             from app.core.utils.speaker_resolver import resolve_speaker_name
@@ -2578,13 +2650,17 @@ class ConversationHandler:
             speaker_name = await resolve_speaker_name(auth_url, speaker_user_id)
             if speaker_name:
                 node_context["speaker_name"] = speaker_name
-                logger.info(
-                    "🔄 Speaker name resolved for mismatch reload: %s (user_id=%s)",
-                    speaker_name, speaker_user_id,
-                )
         except Exception as e:
-            logger.warning("⚠️ Failed to resolve speaker name during reload: %s", e)
+            logger.warning("⚠️ Failed to resolve speaker name for turn: %s", e)
 
+        # Load memories for the new speaker — only when memory is enabled.
+        # Always overwrite user_memories so we never carry the previous
+        # speaker's memories into this turn's block.
+        _memory_enabled, _ = self._get_memory_settings(node_context)
+        household_id = node_context.get("household_id")
+        if not _memory_enabled or not household_id:
+            node_context["user_memories"] = ""
+            return
         try:
             from app.db import get_session_local
             from app.services.memory_service import MemoryService
@@ -2592,8 +2668,7 @@ class ConversationHandler:
             pinned_max_chars = 500
             try:
                 from app.services.settings_service import get_settings_service
-                settings = get_settings_service()
-                val = settings.get("memory.pinned_max_chars")
+                val = get_settings_service().get("memory.pinned_max_chars")
                 if val is not None:
                     pinned_max_chars = int(val)
             except Exception:
@@ -2608,50 +2683,16 @@ class ConversationHandler:
                 )
                 node_context["user_memories"] = memories_text or ""
                 logger.info(
-                    f"🔄 Reloaded {len(memories_text or '')} chars of memories for speaker {speaker_user_id}"
+                    "🔄 Loaded %d chars of memories for turn speaker %s",
+                    len(memories_text or ""), speaker_user_id,
                 )
             finally:
                 db.close()
         except Exception as e:
-            logger.warning(f"⚠️ Failed to reload memories for speaker {speaker_user_id}: {e}")
-            return
-
-        # Rebuild system prompt with correct memories and replace in cache
-        tools = conversation_cache.get_tools(conversation_id)
-        # Source timezone from the cache (top-level field set at warmup), NOT
-        # from node_context — node_context never carries "timezone", so the
-        # old node_context.get("timezone") returned None and clobbered the
-        # cached zone to None on every speaker-mismatch rebuild. With no zone,
-        # date resolution emits a non-'Z' "today" that fails param validation
-        # → invalid-param retry → empty turn → node "Task completed." fallback.
-        # Mirrors the correct sibling at the pruned-tools rebuild path.
-        timezone = conversation_cache.get_timezone(conversation_id)
-        available_command_flags = ""
-        available_commands = conversation_cache.get_available_commands(conversation_id) or []
-        if available_commands:
-            from app.core.voice_command_helpers import build_available_command_flags
-            available_command_flags = build_available_command_flags(
-                [cmd for cmd in available_commands if cmd.get("command_name")]
+            logger.warning(
+                "⚠️ Failed to load memories for turn speaker %s: %s",
+                speaker_user_id, e,
             )
-
-        new_system_prompt = self._get_system_prompt(
-            node_context, timezone, tools, available_command_flags
-        )
-
-        # Replace the system message in the conversation
-        if messages and messages[0].get("role") == "system":
-            messages[0]["content"] = new_system_prompt
-        else:
-            messages.insert(0, {"role": "system", "content": new_system_prompt})
-
-        # Update cache
-        conversation_cache.set(
-            conversation_id=conversation_id,
-            messages=messages,
-            available_commands=available_commands,
-            timezone=timezone,
-            tools=tools,
-            node_context=node_context,
-        )
+            node_context["user_memories"] = ""
 
 
