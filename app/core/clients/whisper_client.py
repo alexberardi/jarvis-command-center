@@ -87,6 +87,7 @@ class WhisperClient:
         filename: str,
         speaker_audio: bytes | None = None,
         speaker_audio_filename: str | None = None,
+        speaker_recognition: bool = True,
         timeout: float = 60.0,
         **params: Any,
     ) -> dict[str, Any]:
@@ -103,6 +104,12 @@ class WhisperClient:
                 the speaker pass more signal for short utterances ("delete it")
                 without confusing Whisper's text output.
             speaker_audio_filename: Filename for the speaker_audio upload.
+            speaker_recognition: When False, tell Whisper to skip the voice
+                speaker-recognition pass. Use this on paths that already know
+                the speaker from authentication (e.g. mobile push-to-talk,
+                identified by JWT) — voice matching is only meaningful on
+                shared nodes, and a memberless request would otherwise exercise
+                the speaker path for no benefit.
             timeout: Request timeout in seconds
             **params: Additional parameters (language, task, etc.)
 
@@ -120,9 +127,14 @@ class WhisperClient:
                 (speaker_audio_filename or "speaker.wav", speaker_audio),
             ))
 
+        # speaker_recognition is a query param on Whisper's /transcribe; only
+        # send it when opting out so the default (node) path is unchanged.
+        query = None if speaker_recognition else {"speaker_recognition": "false"}
+
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 url,
+                params=query,
                 files=files,
                 data=params if params else None,
                 headers=self._build_headers(),
