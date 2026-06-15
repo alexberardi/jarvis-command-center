@@ -52,7 +52,15 @@ async def mobile_stt(
     if language:
         params["language"] = language
 
-    result = await client.transcribe(audio_bytes, filename, **params)
+    # Mobile push-to-talk knows exactly who is speaking — the authenticated
+    # JWT user — so skip Whisper's voice speaker-recognition pass entirely
+    # (it only makes sense on shared nodes) and attribute the speaker from
+    # auth. Sending a memberless request through the voice pass is both
+    # useless here and, historically, a cache-poison vector in whisper.
+    result = await client.transcribe(
+        audio_bytes, filename, speaker_recognition=False, **params
+    )
+    result["speaker"] = {"user_id": user.user_id, "confidence": 1.0, "source": "jwt"}
     return {"text": result.get("text", ""), "raw": result}
 
 
