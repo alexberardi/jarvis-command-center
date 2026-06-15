@@ -35,6 +35,7 @@ dependencies = [
     "ddgs>=7.0.0",
     "jarvis-web-scraper @ git+https://github.com/alexberardi/jarvis-web-scraper.git@60ac1bf",
     "pyyaml",
+    "croniter",
 ]
 
 [project.optional-dependencies]

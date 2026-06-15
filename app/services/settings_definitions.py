@@ -412,4 +412,27 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         env_fallback="ADMIN_API_KEY",
         is_secret=True,
     ),
+
+    # Routines: scheduler + execution audit retention
+    SettingDefinition(
+        key="routines.scheduler_enabled",
+        category="routines",
+        value_type="bool",
+        default=False,
+        description="Enable the CC-side cron/interval scheduler that fires scheduled routines",
+    ),
+    SettingDefinition(
+        key="routines.scheduler_interval_seconds",
+        category="routines",
+        value_type="int",
+        default=30,
+        description="How often the routine scheduler wakes to check for due routines",
+    ),
+    SettingDefinition(
+        key="routines.execution_ttl_days",
+        category="routines",
+        value_type="int",
+        default=7,
+        description="Days to retain routine_executions audit rows before cleanup",
+    ),
 ]

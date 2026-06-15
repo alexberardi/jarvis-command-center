@@ -772,15 +772,41 @@ def import_devices(
     require_household_access(household_id, auth)
     created = 0
     updated = 0
+    # Ensure every imported device ends up with a household-unique name. HA
+    # discovery often reports several devices with the same friendly name
+    # (e.g. "ZW6HD"); we suffix collisions ("ZW6HD (2)") rather than reject the
+    # batch. Names of devices NOT in this import are reserved; every device in
+    # the batch (new OR re-imported) is (re)assigned a unique name — so a
+    # re-import also resolves pre-existing duplicates without churning others.
+    batch_entity_ids = {it.entity_id for it in body.devices}
+    assigned = {
+        n.lower()
+        for (eid, n) in db.query(Device.entity_id, Device.name)
+        .filter(Device.household_id == household_id)
+        .all()
+        if eid not in batch_entity_ids
+    }
+
+    def _unique_name(desired: str) -> str:
+        base = (desired or "").strip() or "Device"
+        candidate = base
+        i = 2
+        while candidate.lower() in assigned:
+            candidate = f"{base} ({i})"
+            i += 1
+        assigned.add(candidate.lower())
+        return candidate
+
     for item in body.devices:
         is_controllable = item.domain not in _SENSOR_DOMAINS
+        unique_name = _unique_name(item.name)
         existing = db.query(Device).filter(
             Device.household_id == household_id,
             Device.entity_id == item.entity_id,
         ).first()
 
         if existing:
-            existing.name = item.name
+            existing.name = unique_name
             existing.domain = item.domain
             existing.device_class = item.device_class
             existing.manufacturer = item.manufacturer
@@ -802,7 +828,7 @@ def import_devices(
                 household_id=household_id,
                 room_id=item.room_id,
                 entity_id=item.entity_id,
-                name=item.name,
+                name=unique_name,
                 domain=item.domain,
                 device_class=item.device_class,
                 manufacturer=item.manufacturer,
@@ -837,6 +863,30 @@ def update_device(
     dev = db.query(Device).filter(Device.id == device_id, Device.household_id == household_id).first()
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
+
+    # Block renaming to a name already used by another device in the household —
+    # duplicate names are ambiguous for routine/voice device resolution.
+    if body.name is not None:
+        from sqlalchemy import func
+
+        new_name = body.name.strip()
+        if not new_name:
+            raise HTTPException(status_code=422, detail="Device name cannot be empty")
+        clash = (
+            db.query(Device)
+            .filter(
+                Device.household_id == household_id,
+                Device.id != device_id,
+                func.lower(Device.name) == new_name.lower(),
+            )
+            .first()
+        )
+        if clash:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A device named '{new_name}' already exists in this household",
+            )
+        body.name = new_name
 
     data = body.model_dump(exclude_unset=True)
     for key, value in data.items():

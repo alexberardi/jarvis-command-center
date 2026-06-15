@@ -356,6 +356,53 @@ async def startup_event():
 
     asyncio.create_task(_periodic_adapter_training())
 
+    # Routine scheduler — fire cron/interval routines on their target node.
+    async def _periodic_routine_scheduler() -> None:
+        while True:
+            try:
+                interval = int(settings_service.get("routines.scheduler_interval_seconds") or 30)
+            except (TypeError, ValueError):
+                interval = 30
+            await asyncio.sleep(max(10, interval))
+            try:
+                enabled = settings_service.get("routines.scheduler_enabled")
+                if enabled is not True and str(enabled).lower() not in ("true", "1", "yes"):
+                    continue
+                from app.services.routine_scheduler import run_due_routines
+                db = SessionLocal()
+                try:
+                    fired = await run_due_routines(db)
+                    if fired:
+                        logger.info("Routine scheduler fired %d routine(s)", fired)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("Routine scheduler tick failed: %s", e)
+
+    asyncio.create_task(_periodic_routine_scheduler())
+
+    # Routine-execution audit TTL cleanup (daily).
+    async def _periodic_routine_execution_cleanup() -> None:
+        while True:
+            await asyncio.sleep(86400)
+            try:
+                ttl_days = int(settings_service.get("routines.execution_ttl_days") or 7)
+                from app.models import RoutineExecution as RE
+                from datetime import datetime, timedelta
+                cutoff = datetime.utcnow() - timedelta(days=ttl_days)
+                db = SessionLocal()
+                try:
+                    removed = db.query(RE).filter(RE.started_at < cutoff).delete()
+                    db.commit()
+                    if removed:
+                        logger.info("Routine-execution cleanup removed %d rows", removed)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("Routine-execution cleanup failed: %s", e)
+
+    asyncio.create_task(_periodic_routine_execution_cleanup())
+
     # Enrich llm.interface with available prompt providers dynamically
     if "llm.interface" in settings_service.definitions:
         from app.core.prompt_provider_factory import PromptProviderFactory
@@ -514,13 +561,17 @@ from app.api import traces as traces_api
 app.include_router(traces_api.admin_router, prefix="/api/v0/admin", tags=["traces-admin"])
 app.include_router(traces_api.mobile_router, prefix="/api/v0/mobile", tags=["traces-mobile"])
 
-# Include mobile chat, audio, node tools, and routine builder endpoints (JWT auth)
-from app.api import mobile_chat, mobile_audio, mobile_voice_profiles, node_tools, routine_builder
+# Include mobile chat, audio, and node tools endpoints (JWT auth)
+from app.api import mobile_chat, mobile_audio, mobile_voice_profiles, node_tools
 app.include_router(mobile_chat.router, prefix="/api/v0/mobile", tags=["mobile-chat"])
 app.include_router(mobile_audio.router, prefix="/api/v0/mobile", tags=["mobile-audio"])
 app.include_router(mobile_voice_profiles.router, prefix="/api/v0/mobile", tags=["mobile-voice-profiles"])
 app.include_router(node_tools.router, prefix="/api/v0/mobile", tags=["node-tools"])
-app.include_router(routine_builder.router, prefix="/api/v0/mobile/routines", tags=["routine-builder"])
+
+# Routines: server-owned per-household routines (mobile CRUD + node pull).
+# Router carries both /households/{id}/routines and /nodes/{id}/routines paths.
+from app.api import routines
+app.include_router(routines.router, prefix="/api/v0", tags=["routines"])
 
 # Include mobile command-data browser router (JWT auth, MQTT round-trip)
 from app.api import mobile_command_data
