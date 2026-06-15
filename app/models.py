@@ -715,3 +715,58 @@ class CallbackJob(Base):
     completed_at = Column(DateTime, nullable=True)
 
     node = relationship("Node", backref=backref("callback_jobs", passive_deletes=True), passive_deletes=True)
+
+
+class Routine(Base):
+    """A named bundle of commands triggered by a phrase, run-now, or a schedule.
+
+    Source of truth for routines lives here (per household). Mobile is a thin
+    CRUD client; nodes pull the household set (pull-on-nudge) into their local
+    CommandDataRepository and execute on-node via the RoutineCommand engine.
+
+    JSON-bearing columns are Text (project convention — see protocols/results_json):
+    - trigger_phrases: JSON array of strings
+    - steps: JSON array of {command, args:[{key,value}], label} in the MOBILE-native
+      shape (args is an ARRAY of pairs). The node-pull endpoint flattens args to an
+      object {k:v} at the boundary. Stored mobile-native so the editor round-trips.
+    - schedule: JSON object or null. null = voice/run-now only. Shape:
+      {type:"cron"|"interval", cron?:str, interval_seconds?:int, timezone:str,
+       target_node_id:str, enabled:bool, last_fired_at?:str(iso)}.
+    """
+    __tablename__ = 'routines'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    household_id = Column(String(255), nullable=False, index=True)
+    # Node-facing key (the CommandDataRepository data_key). Stable across renames.
+    slug = Column(String(255), nullable=False)
+    name = Column(String(255), nullable=False)
+    trigger_phrases = Column(Text, nullable=False, default="[]")
+    steps = Column(Text, nullable=False, default="[]")
+    response_instruction = Column(Text, nullable=False, default="")
+    response_length = Column(String(16), nullable=False, default="short")  # short|medium|long
+    schedule = Column(Text, nullable=True)  # JSON object or NULL
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('household_id', 'slug', name='uq_routine_household_slug'),
+    )
+
+
+class RoutineExecution(Base):
+    """Audit trail of routine runs (run-now + scheduled). Voice runs may also be
+    recorded if the node reports them. TTL-cleaned by a background worker."""
+    __tablename__ = 'routine_executions'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    routine_id = Column(String(36), ForeignKey('routines.id', ondelete='CASCADE'), nullable=True, index=True)
+    household_id = Column(String(255), nullable=False, index=True)
+    node_id = Column(String, nullable=True)
+    trigger = Column(String(16), nullable=False)  # voice|run_now|scheduled
+    status = Column(String(16), nullable=False)    # success|partial|failed|timeout
+    passed = Column(Integer, nullable=False, default=0)
+    failed = Column(Integer, nullable=False, default=0)
+    error = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
