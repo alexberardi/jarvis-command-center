@@ -1,172 +1,92 @@
-# Voice API
+# jarvis-command-center
 
-A minimal FastAPI app for handling voice commands from remote nodes.
+The "brain" of the Jarvis ecosystem — the central voice-orchestration service. It receives voice commands and chat from Pi Zero nodes and the mobile/web clients, builds prompts, calls the LLM proxy for inference, routes to tools, runs routines and agents, manages long-term memory with embeddings, and coordinates STT/TTS and node management.
 
-- Supports both SQLite (default) and PostgreSQL databases
-- Validates incoming requests via `X-API-Key` header
-- Includes an admin API to manage nodes
-- Alembic for migrations
-- Admin POST/PATCH/DELETE routes protected by `ADMIN_API_KEY` from `.env`
+This is a large FastAPI service (tens of thousands of lines across `app/`, dozens of routers under `/api/v0`), **not** a minimal app. It requires **PostgreSQL with the `pgvector` extension** (used for memory/embedding storage) — there is no SQLite mode; the database layer rejects any non-PostgreSQL URL.
 
-## Database Configuration
+Runs on **port 7703**.
 
-The application supports both SQLite and PostgreSQL databases. Configure using environment variables:
+## What it does
 
-### Environment Variables
-- `DB_TYPE`: Database type (`sqlite` or `postgres`, default: `sqlite`)
-- `DB_URL`: Database connection URL
-  - For SQLite: File path or SQLite URL (default: `sqlite:///./data/voice_api.db`)
-  - For PostgreSQL: Full PostgreSQL URL (e.g., `postgresql://user:pass@localhost:5432/dbname`)
+- Voice + chat orchestration for nodes and the mobile/web clients
+- Prompt building, model routing, and streaming via the LLM proxy
+- Tool registry, tool routing/classification, and tool execution
+- Long-term memory + embeddings (pgvector) and memory extraction
+- Routines (scheduled/triggered) and agents
+- Node provisioning, node settings, node commands, OTA node updates, Bluetooth
+- Smart-home, media, cameras, OAuth relay integration
+- Training-data extraction and tool-router classifier (optional)
+- MQTT messaging to/from nodes
 
-### Quick Setup
-Run the database setup script to configure your database:
+## Requirements
+
+- Python 3.11+
+- Docker & Docker Compose (recommended)
+- PostgreSQL **with pgvector** (the standalone compose profile uses the `pgvector/pgvector:pg15` image)
+
+## Setup & run
+
 ```bash
-python setup_database.py
-```
+cp .env.example .env   # then edit values
 
-### Manual Configuration
+# Local dev (kills the port, installs sibling jarvis client libs, hot reload):
+./run.sh
 
-#### SQLite (Default)
-```bash
-export DB_TYPE=sqlite
-export DB_URL=sqlite:///./data/voice_api.db
-```
-
-#### PostgreSQL
-```bash
-export DB_TYPE=postgres
-export DB_URL=postgresql://username:password@localhost:5432/jarvis_command_center
-```
-
-#### PostgreSQL (Docker container connecting to host DB)
-If the API container should connect to a PostgreSQL instance running on your host:
-```bash
-export DB_TYPE=postgres
-export DB_URL=postgresql://postgres:postgres@host.docker.internal:5432/jarvis_command_center_db
-```
-
-## Testing
-
-The project includes comprehensive database tests to ensure both SQLite and PostgreSQL work correctly.
-
-### Running Database Tests
-
-#### SQLite Tests (Default)
-```bash
-python run_database_tests.py --type sqlite
-```
-
-#### PostgreSQL Tests (Requires PostgreSQL Server)
-```bash
-# Check if PostgreSQL is available
-python run_database_tests.py --check-postgres
-
-# Run PostgreSQL tests
-python run_database_tests.py --type postgres
-```
-
-#### Docker PostgreSQL Tests
-```bash
-python run_database_tests.py --type docker
-```
-
-#### All Tests
-```bash
-python run_database_tests.py --type all
-```
-
-### Test Coverage
-
-The database test suite covers:
-
-- **Configuration Tests**: Environment variable parsing, URL generation
-- **Connection Tests**: Database engine creation and connection validation
-- **Integration Tests**: ORM operations, CRUD functionality
-- **FastAPI Integration**: API endpoints with different database backends
-- **Migration Tests**: Alembic integration with both databases
-- **Error Handling**: Invalid configurations and connection failures
-
-### Test Files
-
-- `tests/test_database_config.py`: Core database configuration and integration tests
-- `tests/test_postgres_integration.py`: PostgreSQL-specific integration tests
-- `run_database_tests.py`: Test runner script with different configurations
-
-## Dev Run
-```bash
-uvicorn app.main:app --reload --port 7703
-```
-Optional debugger port override:
-```bash
-export DEBUG_PORT=5680
-```
-
-## Tool Router Classifier (Optional)
-You can optionally train and load a tiny local tool router classifier.
-
-### Customize Training
-Provide extra training examples as JSONL (one per line):
-```json
-{"utterance": "Who won the Super Bowl this year?", "tool_name": "search_web"}
-```
-Save it locally (e.g. `temp/tool_router_extra_training.jsonl`) and set:
-```bash
-export JARVIS_TOOL_CLASSIFIER_EXTRA_TRAINING_PATH=/app/temp/tool_router_extra_training.jsonl
-```
-This file is gitignored so each user can maintain their own custom training data.
-
-### Train
-```bash
-python -m app.core.tool_router.training
-```
-
-### Enable
-```bash
-export JARVIS_TOOL_CLASSIFIER_ENABLED=true
-export JARVIS_TOOL_CLASSIFIER_MODEL_PATH=/app/temp/tool_classifier.bin
-```
-
-## Docker Dev Run with Hot Reload
-```bash
+# Docker dev (hot reload):
+./run.sh --docker          # add --build, or --rebuild for a clean build
+# equivalently:
 docker compose -f docker-compose.dev.yaml up --build
 ```
 
-## Docker Run with PostgreSQL
+The app module is `app.main:app` and the service listens on **7703**. Alembic migrations (`alembic upgrade head`) run automatically on container startup. To run a bundled pgvector Postgres for local testing, use the compose `standalone` profile:
+
 ```bash
-docker-compose -f docker-compose.postgres.yaml up --build
+docker compose -f docker-compose.dev.yaml --profile standalone up
 ```
 
-## Docker Run (Production-style)
+To run Uvicorn directly (you must provide a reachable Postgres):
+
 ```bash
-docker build -t voice-api .
-docker run -p 7703:7703 voice-api
+uvicorn app.main:app --reload --port 7703
 ```
+
+## Environment
+
+Copy `.env.example` to `.env`. Key variables:
+
+| Variable | Purpose |
+|---|---|
+| `DB_URL` / `DATABASE_URL` | **Required.** PostgreSQL connection string (must be `postgresql://...`; pgvector required). |
+| `MIGRATIONS_DATABASE_URL` | Postgres URL used for Alembic migrations (use `localhost` even when running in Docker). |
+| `ADMIN_API_KEY` | Protects admin POST/PATCH/DELETE endpoints. |
+| `JARVIS_CONFIG_URL` | jarvis-config-service URL (service discovery). Set `JARVIS_CONFIG_URL_STYLE=dockerized` in Docker. |
+| `JARVIS_APP_ID` / `JARVIS_APP_KEY` | App-to-app credentials (key populated via service registration). |
+| `JARVIS_RELAY_URL` | Public OAuth relay used to bounce provider auth codes back to the mobile app. |
+| `JARVIS_MQTT_BROKER_URL` | MQTT broker for node messaging. |
+| `JARVIS_MODEL_INTERFACE` | Model adapter interface (e.g. `JarvisAdapterModel`). |
 
 ## Endpoints
-- `GET /ping` → Health check
-- `POST /voice` → Voice input (requires `X-API-Key` header)
-- `GET /admin/nodes` → List all nodes
-- `POST /admin/nodes` → Create a node (requires `ADMIN_API_KEY`)
-- `PATCH /admin/nodes/{node_id}` → Update a node (requires `ADMIN_API_KEY`)
-- `DELETE /admin/nodes/{node_id}` → Delete a node (requires `ADMIN_API_KEY`)
+
+- `GET /health` — health check
+- `GET /api/v0/ping` — basic liveness (`{"message": "pong"}`)
+- Routers are mounted under `/api/v0` (and `/api/v0/admin`, `/api/v0/mobile`) — see `app/main.py` for the full set (admin, nodes, provisioning, chat, routines, agents, memories, smart-home, media, OAuth, node-updates, etc.). Node-facing routes authenticate with `X-API-Key`; admin routes use `ADMIN_API_KEY`.
 
 ## Migrations
+
 ```bash
-# Run migrations (uses DB_TYPE and DB_URL environment variables)
-alembic upgrade head
-
-# Create new migration
-alembic revision --autogenerate -m "description"
-
-# View migration history
-alembic history
+alembic upgrade head                                  # apply
+alembic revision --autogenerate -m "description"      # create
+alembic history                                       # view
 ```
 
-## Database Storage
+## Optional: tool-router classifier
 
-### SQLite
-The SQLite database is stored in `./data/voice_api.db` on the host machine and mounted into the container to ensure it persists across container rebuilds.
+A small local FastText tool-router classifier can be trained and enabled:
 
-### PostgreSQL
-For PostgreSQL, ensure your database server is running and accessible. The application will create tables automatically on first run.
+```bash
+export JARVIS_TOOL_CLASSIFIER_EXTRA_TRAINING_PATH=/app/temp/tool_router_extra_training.jsonl
+python -m app.core.tool_router.training
 
+export JARVIS_TOOL_CLASSIFIER_ENABLED=true
+export JARVIS_TOOL_CLASSIFIER_MODEL_PATH=/app/temp/tool_classifier.bin
+```
