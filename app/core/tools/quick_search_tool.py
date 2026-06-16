@@ -7,9 +7,12 @@ Unlike deep_research, this blocks until results are ready (~5-10s).
 Example: "What's the latest on the Mars mission?"
 """
 
+import ipaddress
 import logging
+import socket
 import time
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 import httpx
 
@@ -20,6 +23,95 @@ logger = logging.getLogger("uvicorn")
 _NUM_RESULTS = 2
 _MAX_CHARS_PER_PAGE = 4000
 _SCRAPE_TIMEOUT = 8
+_MAX_REDIRECTS = 5
+# 3xx codes that carry a Location and should be followed (matches httpx semantics).
+_REDIRECT_CODES = {301, 302, 303, 307, 308}
+_SENSITIVE_HEADERS = {"authorization", "cookie", "proxy-authorization"}
+
+
+def _ip_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True if ``ip`` is unsafe for outbound fetching (SSRF guard).
+
+    Loopback, private, link-local (169.254/16 cloud metadata, fe80::/10),
+    reserved (incl. NAT64), multicast, unspecified, and — via ``not is_global``
+    — CGNAT 100.64/10 and other non-global ranges. IPv4-mapped IPv6 is judged as
+    its embedded IPv4.
+    """
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+        or not ip.is_global
+    )
+
+
+def _is_blocked_host(host: str | None) -> bool:
+    """True if ``host`` is, or DNS-resolves to, a private/disallowed address.
+
+    Self-contained (does not depend on the pinned jarvis-web-scraper, which may
+    lag this fix): resolves names via DNS, blocks if ANY resolved address is
+    unsafe, and fails closed on unresolvable hosts. ``host`` must be bare (the
+    caller passes ``urlparse().hostname``).
+    """
+    if not host:
+        return True
+    try:
+        return _ip_blocked(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    if host.lower() in {"localhost", "localhost."}:
+        return True
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return True
+    for info in infos:
+        try:
+            if _ip_blocked(ipaddress.ip_address(info[4][0])):
+                return True
+        except ValueError:
+            return True
+    return False
+
+
+def _safe_get(
+    client: httpx.Client,
+    url: str,
+    headers: dict[str, str],
+    max_redirects: int = _MAX_REDIRECTS,
+) -> httpx.Response:
+    """GET ``url`` following redirects manually so every hop's host is revalidated.
+
+    The naive ``follow_redirects=True`` lets a public URL 302 to ``127.0.0.1`` /
+    ``169.254.169.254`` / a LAN host. Re-checking each hop closes that (SSRF).
+    The client must be created with ``follow_redirects=False``.
+    """
+    current = url
+    current_headers = dict(headers)
+    for _ in range(max_redirects + 1):
+        parsed = urlparse(current)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Invalid URL or redirect target")
+        if _is_blocked_host(parsed.hostname):
+            raise ValueError("URL points to a private or disallowed host")
+        resp = client.get(current, headers=current_headers)
+        if resp.status_code in _REDIRECT_CODES and "location" in resp.headers:
+            next_url = str(httpx.URL(current).join(resp.headers["location"]))
+            if urlparse(next_url).hostname != parsed.hostname:
+                current_headers = {
+                    k: v for k, v in current_headers.items()
+                    if k.lower() not in _SENSITIVE_HEADERS
+                }
+            current = next_url
+            continue
+        return resp
+    raise ValueError("Too many redirects")
 
 
 class QuickSearchTool(IServerTool):
@@ -130,12 +222,15 @@ def _scrape_results(search_results: list[dict[str, str]]) -> list[dict[str, str]
     """
     sources: list[dict[str, str]] = []
 
-    with httpx.Client(timeout=_SCRAPE_TIMEOUT, follow_redirects=True) as client:
+    # follow_redirects=False + manual walk so each redirect hop is re-validated
+    # against the private-host blocklist (SSRF guard). A blocked URL raises and
+    # falls through to the snippet fallback below.
+    with httpx.Client(timeout=_SCRAPE_TIMEOUT, follow_redirects=False) as client:
         for r in search_results:
             url = r["url"]
             title = r.get("title", "Untitled")
             try:
-                resp = client.get(url, headers={
+                resp = _safe_get(client, url, {
                     "User-Agent": "Mozilla/5.0 (compatible; JarvisBot/1.0)",
                 })
                 if resp.status_code == 200:
