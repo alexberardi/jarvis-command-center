@@ -522,6 +522,11 @@ app.include_router(mobile_memories.router, prefix="/api/v0", tags=["mobile-memor
 from app.api import transcripts
 app.include_router(transcripts.router, prefix="/api/v0", tags=["transcripts"])
 
+# Self-scoped account-data purge (user JWT) — account-deletion contract.
+# jarvis-auth fans out to DELETE /api/v0/me/data during DELETE /auth/me.
+from app.api import me as me_api
+app.include_router(me_api.router, prefix="/api/v0", tags=["me"])
+
 # Include adapter proposal router (Phase 7.1 — user-approved deploy flow)
 from app.api import adapters as adapters_api
 app.include_router(adapters_api.router, prefix="/api/v0", tags=["adapters"])
