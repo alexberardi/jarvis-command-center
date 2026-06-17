@@ -240,6 +240,57 @@ def build_speaker_block(speaker_name: str, user_memories: str = "") -> str:
     return block
 
 
+# Marker prefix for the per-turn "recently shown" transient block. Kept in sync
+# with conversation_handler._is_transient_system_block so the block is stripped
+# and rebuilt every turn instead of accumulating across a multi-turn conversation.
+RECENTLY_SHOWN_PREFIX = "RECENTLY SHOWN"
+
+# Cap how many items get re-injected, to bound prompt growth and preserve the
+# cached-prefix KV reuse. A surfaced list longer than this is truncated with a
+# note (the user can narrow it down by description).
+_MAX_REFERENCED_ITEMS = 8
+
+
+def render_referenced_items_block(items: list) -> str:
+    """Render the per-turn RECENTLY SHOWN block from stashed referenceable items.
+
+    Produces a numbered list the model uses to resolve "those" / "#3" / "the one
+    from abc" to a ref_id, then call ``act_on_items(action, ref_ids)``. Ordinals
+    are 1-based list positions (derived here, never stored) so they match the
+    order the items were spoken in. Returns ``""`` when there is nothing to show
+    (callers should skip appending an empty block).
+
+    Each item is a wire dict: ``{ref_id, label, attrs, actions}``.
+    """
+    if not items:
+        return ""
+    shown = items[:_MAX_REFERENCED_ITEMS]
+    lines = [
+        f"{RECENTLY_SHOWN_PREFIX} (act on these by number; pass the ref_id to act_on_items):"
+    ]
+    actions: set[str] = set()
+    for i, item in enumerate(shown, start=1):
+        if not isinstance(item, dict):
+            continue
+        ref_id = item.get("ref_id", "")
+        label = item.get("label", "")
+        lines.append(f"{i} [{ref_id}] {label}")
+        for a in item.get("actions") or []:
+            actions.add(a)
+    if len(items) > len(shown):
+        lines.append(
+            f"(+{len(items) - len(shown)} more not shown — ask the user to narrow it down)"
+        )
+    if actions:
+        lines.append("Valid actions: " + ", ".join(sorted(actions)) + ".")
+    lines.append(
+        "When the user refers to these by a number, 'those', 'the first/last one', "
+        "or by naming a sender/topic, resolve it to the matching ref_id(s) and call "
+        "act_on_items. Only use ref_ids and actions listed above."
+    )
+    return "\n".join(lines)
+
+
 def build_rules_block(
     *,
     param_names_rule: str | None = RULE_USE_ACTUAL_PARAM_NAMES,

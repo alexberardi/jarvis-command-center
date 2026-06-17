@@ -35,6 +35,7 @@ class ConversationCache:
                 'timezone': timezone,
                 'node_context': node_context,
                 'router_decision': None,
+                'referenced_items': None,
                 'timestamp': time.time()
             }
             logger.info(f"💾 Cached messages, commands, and {len(tools or [])} tools for conversation {conversation_id[:8]}...")
@@ -143,7 +144,39 @@ class ConversationCache:
                 return None
             return entry.get('router_decision')
 
-    
+    def set_referenced_items(self, conversation_id: str, items: Optional[List[Dict]]) -> None:
+        """Store the items a tool just surfaced ("recently shown" list).
+
+        These are re-injected into the prompt each turn so the LLM can resolve
+        "those" / "#3" / "the one from abc" to a ref_id and call act_on_items.
+        Latest surfacing wins; callers pass None/[] only when there is something
+        to store (a non-surfacing turn leaves the prior list intact)."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                logger.warning(f"❌ Cannot set referenced items for non-existent conversation {conversation_id[:8]}...")
+                return
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                logger.warning(f"❌ Cannot set referenced items for expired conversation {conversation_id[:8]}...")
+                return
+            entry['referenced_items'] = items
+            logger.info(f"🗂️ Stored {len(items or [])} referenced items for conversation {conversation_id[:8]}...")
+
+    def get_referenced_items(self, conversation_id: str) -> List[Dict]:
+        """Retrieve the recently-shown items for a conversation (empty if none/expired)."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                return []
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                return []
+            return entry.get('referenced_items') or []
+
+
     def add_message(self, conversation_id: str, message: ConversationMessage) -> None:
         """Add a message to the existing conversation."""
         with self.lock:

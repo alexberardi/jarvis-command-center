@@ -17,7 +17,11 @@ from typing import Any, Dict, List, Optional, Set
 from app.core.conversation_cache import conversation_cache
 from app.core.direction_hint import build_direction_hint
 from app.core.not_for_me import contains_sentinel
-from app.core.prompt_providers.shared.core_rules import NOT_FOR_ME_INSTRUCTION
+from app.core.prompt_providers.shared.core_rules import (
+    NOT_FOR_ME_INSTRUCTION,
+    RECENTLY_SHOWN_PREFIX,
+    render_referenced_items_block,
+)
 from app.core.transcript_filter import is_stt_noise
 from app.core.tts_text import clean_for_tts
 from app.services.settings_service import get_settings_service
@@ -112,7 +116,46 @@ def _is_transient_system_block(msg: Dict[str, Any]) -> bool:
         or content.startswith("User Profile - If user asks")
         or content.startswith("Router hint:")
         or content.startswith("Respond naturally in plain text")
+        or content.startswith(RECENTLY_SHOWN_PREFIX)
     )
+
+
+def _stash_referenced_items(conversation_id: str, tool_results: List[Dict[str, Any]]) -> None:
+    """Remember any ``referenceable_items`` a tool result carried this turn.
+
+    Surfacing commands (e.g. "what emails do I have?") return items the node
+    forwards inside each tool result's ``output``. We stash them per
+    conversation so the next turn's prompt can re-inject a numbered "recently
+    shown" block, letting the model resolve "those"/"#3" to a ref_id and call
+    act_on_items. Only stashes when items are present — a non-surfacing turn
+    (e.g. mark_read) leaves the prior list intact.
+    """
+    items: List[Dict[str, Any]] = []
+    for tr in tool_results or []:
+        output = tr.get("output") if isinstance(tr, dict) else None
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except (json.JSONDecodeError, TypeError):
+                output = None
+        if isinstance(output, dict):
+            ri = output.get("referenceable_items")
+            if isinstance(ri, list) and ri:
+                items.extend(ri)
+    if items:
+        conversation_cache.set_referenced_items(conversation_id, items)
+
+
+def _append_referenced_items_block(messages: List[Dict[str, Any]], conversation_id: str) -> None:
+    """Append the per-turn RECENTLY SHOWN transient block, if any items are stashed.
+
+    Mirrors the speaker-block pattern: a trailing ``role=system`` message after
+    the cached prefix, stripped+rebuilt every turn via _is_transient_system_block.
+    No-op when nothing has been surfaced.
+    """
+    block = render_referenced_items_block(conversation_cache.get_referenced_items(conversation_id))
+    if block:
+        messages.append({"role": "system", "content": block})
 
 
 class ConversationHandler:
@@ -313,6 +356,14 @@ class ConversationHandler:
             node_context=node_context,
         )
 
+        # Seed the recently-shown items the node carried over in node_context, so
+        # a follow-up on this fresh conversation ("mark those as read") gets the
+        # RECENTLY SHOWN block. The LLM-path same-conversation follow-up is seeded
+        # separately from the tool result; this covers pre-route / re-wake starts.
+        _recent_items = (node_context or {}).get("recently_shown_items")
+        if _recent_items:
+            conversation_cache.set_referenced_items(conversation_id, _recent_items)
+
         # If prompt provider mandates tool calls, store the flag so the
         # tool execution engine can enforce it (retry on finish_reason=stop).
         if self.prompt_provider is not None and getattr(self.prompt_provider, 'force_tool_calls', False):
@@ -508,6 +559,10 @@ class ConversationHandler:
         )
         if _speaker_msg:
             messages.append({"role": "system", "content": _speaker_msg})
+
+        # Per-turn "recently shown" block (mirrors the speaker block): lets the
+        # model resolve "those"/"#3"/"the one from abc" to a ref_id for act_on_items.
+        _append_referenced_items_block(messages, conversation_id)
 
         # Add router hint if decision was used
         if router_decision and router_decision.get("used"):
@@ -736,6 +791,10 @@ class ConversationHandler:
         )
         if _speaker_msg:
             messages.append({"role": "system", "content": _speaker_msg})
+
+        # Per-turn "recently shown" block (mirrors the speaker block): lets the
+        # model resolve "those"/"#3"/"the one from abc" to a ref_id for act_on_items.
+        _append_referenced_items_block(messages, conversation_id)
 
         # Sync advanced thinking setting so suffix adapts
         self._sync_advanced_thinking(conversation_id)
@@ -1049,6 +1108,10 @@ class ConversationHandler:
         if _speaker_msg:
             messages.append({"role": "system", "content": _speaker_msg})
 
+        # Per-turn "recently shown" block (mirrors the speaker block): lets the
+        # model resolve "those"/"#3"/"the one from abc" to a ref_id for act_on_items.
+        _append_referenced_items_block(messages, conversation_id)
+
         # Sync advanced thinking setting so suffix adapts
         self._sync_advanced_thinking(conversation_id)
 
@@ -1270,6 +1333,10 @@ class ConversationHandler:
         import time as _time
 
         _t0 = _time.time()
+
+        # Remember any items a tool surfaced this turn (parity with the blocking
+        # continue) so a later turn can re-inject the "recently shown" list.
+        _stash_referenced_items(conversation_id, tool_results)
 
         cached_messages = conversation_cache.get_messages(conversation_id)
         if not cached_messages:
@@ -1608,6 +1675,10 @@ class ConversationHandler:
 
         if not messages:
             raise ValueError(f"Conversation {conversation_id} not found or expired")
+
+        # Remember any items a tool surfaced this turn so the next turn can
+        # re-inject them ("mark those as read" / "send me #3").
+        _stash_referenced_items(conversation_id, tool_results)
 
         # Add tool result messages to conversation history
         for result in tool_results:
