@@ -6,6 +6,7 @@ import json
 import urllib.parse
 from pathlib import Path
 import hashlib
+import hmac
 from uuid import uuid4
 from datetime import datetime
 from typing import Optional
@@ -135,6 +136,20 @@ async def startup_event():
     _setup_service_config()
     # Then set up remote logging
     _setup_remote_logging()
+
+    # Async-job callback auth posture — surface a missing token loudly at boot (fail-closed).
+    if not os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN"):
+        if _insecure_callbacks_allowed():
+            logger.warning(
+                "⚠️ JARVIS_ADAPTER_CALLBACK_TOKEN is unset and JARVIS_ALLOW_INSECURE_CALLBACKS is "
+                "enabled — adapter/deep-research/memory-extraction callbacks are UNAUTHENTICATED. "
+                "Do NOT run this in production."
+            )
+        else:
+            logger.error(
+                "🔒 JARVIS_ADAPTER_CALLBACK_TOKEN is unset — async-job callbacks will be REJECTED "
+                "(503). Set the token, or set JARVIS_ALLOW_INSECURE_CALLBACKS=1 for trusted local dev."
+            )
 
     # Connect MCP client (non-blocking, service works without it)
     try:
@@ -697,6 +712,13 @@ async def start_conversation(
             if "agents" in request.node_context:
                 node_context["agents"] = request.node_context["agents"]
                 logger.info(f"📦 Received agent context: {list(request.node_context['agents'].keys())}")
+
+            # Carry over the node's most-recently-shown list so we can re-inject
+            # the RECENTLY SHOWN block for a follow-up ("mark those as read") on a
+            # fresh conversation (pre-route / re-wake), where there's no tool
+            # result to stash from. Trusted — it comes from the authenticated node.
+            if "recently_shown_items" in request.node_context:
+                node_context["recently_shown_items"] = request.node_context["recently_shown_items"]
 
             # Extract speaker identity from voice recognition
             speaker_user_id = request.node_context.get("speaker_user_id")
@@ -1416,16 +1438,54 @@ async def train_adapter(
     }
 
 
+def _insecure_callbacks_allowed() -> bool:
+    """True only if an operator has explicitly opted into UNAUTHENTICATED async-job callbacks.
+
+    Intended for trusted local/dev environments that don't set a token. Never enable in
+    production — it disables the only auth on endpoints that mutate node state / inbox content.
+    """
+    return os.getenv("JARVIS_ALLOW_INSECURE_CALLBACKS", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _verify_callback_auth(request: Request) -> None:
+    """Authenticate an inbound async-LLM-job callback (FAIL-CLOSED).
+
+    Shared by /adapters/jobs/callback, /deep-research/callback, /memory-extraction/callback
+    (and the planned /daily-briefing/callback). These callbacks set node adapter_hash, write
+    inbox content, and fan out household pushes, so an unauthenticated path is a real
+    injection / spam vector.
+
+    Posture:
+      - JARVIS_ADAPTER_CALLBACK_TOKEN set  → require an exact `Bearer <token>` match (401 otherwise).
+      - token unset                        → REJECT with 503 (misconfiguration is loud), UNLESS
+                                             JARVIS_ALLOW_INSECURE_CALLBACKS is explicitly enabled.
+
+    This replaces the previous fail-OPEN behaviour where an unset token silently accepted any
+    caller (the outbound enqueue side only attaches the bearer when the token is set, so a
+    token-less deployment is now loudly closed instead of silently open).
+    """
+    callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
+    if not callback_token:
+        if _insecure_callbacks_allowed():
+            return
+        raise HTTPException(
+            status_code=503,
+            detail="Callback authentication is not configured (set JARVIS_ADAPTER_CALLBACK_TOKEN)",
+        )
+    auth_header = request.headers.get("authorization", "")
+    # Constant-time compare to avoid leaking the token via response timing.
+    if not hmac.compare_digest(auth_header, f"Bearer {callback_token}"):
+        raise HTTPException(status_code=401, detail="Unauthorized callback")
+
+
 @v0_router.post("/adapters/jobs/callback", name="adapter_training_callback")
 async def adapter_training_callback(request: Request):
     """Receive llm-proxy training job callbacks and update node adapter_hash on success."""
     from app.models import Node
 
-    callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
-    if callback_token:
-        auth_header = request.headers.get("authorization", "")
-        if auth_header != f"Bearer {callback_token}":
-            raise HTTPException(status_code=401, detail="Unauthorized callback")
+    _verify_callback_auth(request)
 
     payload = await request.json()
     job_id = payload.get("job_id")
@@ -1479,11 +1539,7 @@ async def adapter_training_callback(request: Request):
 @v0_router.post("/deep-research/callback", name="deep_research_callback")
 async def deep_research_callback(request: Request):
     """Receive LLM queue callback for deep research summarization."""
-    callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
-    if callback_token:
-        auth_header = request.headers.get("authorization", "")
-        if auth_header != f"Bearer {callback_token}":
-            raise HTTPException(status_code=401, detail="Unauthorized callback")
+    _verify_callback_auth(request)
 
     payload = await request.json()
     job_id = payload.get("job_id")
@@ -1503,11 +1559,7 @@ async def deep_research_callback(request: Request):
 @v0_router.post("/memory-extraction/callback", name="memory_extraction_callback")
 async def memory_extraction_callback(request: Request):
     """Receive LLM queue callback for passive memory extraction."""
-    callback_token = os.getenv("JARVIS_ADAPTER_CALLBACK_TOKEN")
-    if callback_token:
-        auth_header = request.headers.get("authorization", "")
-        if auth_header != f"Bearer {callback_token}":
-            raise HTTPException(status_code=401, detail="Unauthorized callback")
+    _verify_callback_auth(request)
 
     payload = await request.json()
     job_id = payload.get("job_id")
