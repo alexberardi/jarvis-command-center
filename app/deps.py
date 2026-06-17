@@ -159,7 +159,7 @@ def verify_api_key(x_api_key: str = Header(...), db: Session = Depends(get_db)):
 
 def verify_admin_key(x_api_key: str = Header(...)):
     if x_api_key != ADMIN_API_KEY:
-        logger.warning("Unauthorized admin access attempt with API key: %s", x_api_key)
+        logger.warning("Unauthorized admin access attempt with API key: %s", x_api_key[:8] + "...")
         raise HTTPException(status_code=401, detail="Invalid Admin API Key")
 
 

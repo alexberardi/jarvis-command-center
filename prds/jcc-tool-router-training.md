@@ -33,7 +33,7 @@ This PRD documents how a client trains the tool router FastText model via the AP
   "extra_training": [
     { "utterance": "Score for the Lakers game", "tool_name": "get_sports_scores" }
   ],
-  "output_model_path": "/home/alex/jarvis-command-center/temp/tool_classifier.bin",
+  "output_model_path": "/path/to/jarvis-command-center/temp/tool_classifier.bin",
   "save_training_jsonl": true,
   "epoch": 25,
   "lr": 0.5,
@@ -54,8 +54,8 @@ This PRD documents how a client trains the tool router FastText model via the AP
 {
   "status": "success",
   "examples": 128,
-  "model_path": "/home/alex/jarvis-command-center/temp/tool_classifier.bin",
-  "training_jsonl_path": "/home/alex/jarvis-command-center/temp/tool_router_training.jsonl"
+  "model_path": "/path/to/jarvis-command-center/temp/tool_classifier.bin",
+  "training_jsonl_path": "/path/to/jarvis-command-center/temp/tool_router_training.jsonl"
 }
 ```
 
@@ -90,6 +90,6 @@ curl -X POST http://localhost:8002/api/v0/tool-router/train \
     "extra_training": [
       {"utterance":"Score for the Lakers game","tool_name":"get_sports_scores"}
     ],
-    "output_model_path": "/home/alex/jarvis-command-center/temp/tool_classifier.bin"
+    "output_model_path": "/path/to/jarvis-command-center/temp/tool_classifier.bin"
   }'
 ```

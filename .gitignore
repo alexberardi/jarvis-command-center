@@ -31,6 +31,7 @@ env/
 ENV/
 env.bak/
 venv.bak/
+test_env/
 
 # VS Code and IDE files
 .vscode/
@@ -86,10 +87,14 @@ services.json
 temp_*.py
 *.tmp
 *.bak
+temp/
 temp/tool_classifier.bin
 temp/tool_router_extra_training.jsonl
 temp/tool_router_training.jsonl
 temp/test_results*.json
+
+# Training data bloat (large generated datasets, kept on disk only)
+training-data/**/*.jsonl
 
 # Logs
 logs/
