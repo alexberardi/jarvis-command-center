@@ -334,7 +334,8 @@ Most behavior is controlled by **settings** (in DB), not env vars. Env vars are 
 | `JARVIS_MCP_URL` | MCP server (optional) |
 | `JARVIS_LLM_PROXY_API_URL` | Fallback only — prefer config-service discovery |
 | `LLM_PROXY_INTERNAL_TOKEN` | Token for queue-enqueue calls |
-| `JARVIS_ADAPTER_CALLBACK_TOKEN` | Validates inbound callbacks (adapter / deep-research / memory) |
+| `JARVIS_ADAPTER_CALLBACK_TOKEN` | Validates inbound async-job callbacks (adapter / deep-research / memory). **Fail-closed:** if unset, those callbacks return 503 (not open) — set it in any non-trivial deploy. |
+| `JARVIS_ALLOW_INSECURE_CALLBACKS` | Explicit opt-out (`1`/`true`) to run async-job callbacks **unauthenticated** when the token is unset — trusted local dev only, logged loudly at startup. Never set in prod. |
 | `JARVIS_TEST_MODE` | Enables adapter override on `conversation/start` (eval harness only) |
 | `JARVIS_STREAM_TOOL_RESPONSES` | Enables the tool-stream voice path |
 | `JARVIS_LOG_CONSOLE_LEVEL` / `JARVIS_LOG_REMOTE_LEVEL` | Logging |
