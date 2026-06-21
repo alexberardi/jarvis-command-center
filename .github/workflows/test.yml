@@ -31,7 +31,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install pytest pytest-cov pytest-asyncio
         # Install core dependencies (excluding local packages like jarvis_auth_client)
-        pip install fastapi uvicorn sqlalchemy alembic pydantic httpx python-dotenv rapidfuzz pgvector
+        pip install fastapi uvicorn sqlalchemy alembic pydantic httpx python-dotenv rapidfuzz pgvector pytz
         pip install git+https://github.com/alexberardi/jarvis-settings-client.git@main
 
     - name: Run settings tests
@@ -47,3 +47,9 @@ jobs:
     - name: Run date resolution tests
       run: |
         python -m pytest tests/test_date_resolution.py -v --tb=short || echo "Some tests may fail without full deps"
+
+    - name: Run message-bypass regression pin
+      run: |
+        # Gates the documented "message-bearing command bypasses the LLM" fix.
+        # No `|| echo` swallowing — this pin must actually fail the build on regression.
+        python -m pytest tests/test_continue_message_field_bypasses_llm.py -v --tb=short
