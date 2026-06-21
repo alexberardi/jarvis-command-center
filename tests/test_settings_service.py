@@ -96,7 +96,13 @@ class TestSettingModel:
         assert setting.node_id is None
 
     def test_unique_constraint_prevents_duplicates(self, test_db):
-        """Test that same key+household+node cannot be duplicated."""
+        """Test that same key+household+node+user cannot be duplicated.
+
+        The uq_setting_scope constraint is 4-column (key, household_id, node_id,
+        user_id). Both rows set a non-NULL user_id so they collide — with
+        user_id=NULL, Postgres' NULLS DISTINCT semantics would treat them as
+        distinct and no IntegrityError would be raised.
+        """
         setting1 = Setting(
             key="tts_url",
             value="http://first:7707",
@@ -104,6 +110,7 @@ class TestSettingModel:
             category="tts",
             household_id="h123",
             node_id="node1",
+            user_id=1,
         )
         test_db.add(setting1)
         test_db.commit()
@@ -115,6 +122,7 @@ class TestSettingModel:
             category="tts",
             household_id="h123",
             node_id="node1",
+            user_id=1,
         )
         test_db.add(setting2)
         with pytest.raises(Exception):  # IntegrityError

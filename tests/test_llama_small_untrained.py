@@ -138,8 +138,10 @@ class TestLlamaSmallUntrainedPrompt:
             sample_node_context, "America/New_York", sample_tools
         )
         assert "room=kitchen" in prompt
-        assert "You are speaking with alex" in prompt
         assert "style=brief" in prompt
+        # Speaker name moved out of the cached system prompt into the per-turn
+        # speaker block (build_speaker_context); see commit 17c9fd2.
+        assert "You are speaking with" not in prompt
 
     def test_prompt_includes_json_format(
         self,
