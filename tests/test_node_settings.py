@@ -16,6 +16,35 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models import Base, Node, SettingsRequest, SettingsSnapshot
+from app.deps import AuthenticatedUser, get_db, verify_user_jwt
+
+
+@pytest.fixture
+def jwt_client(test_db):
+    """Test client for the mobile-app-facing (user-JWT) settings endpoints.
+
+    The create-request and get-result endpoints were migrated from an admin
+    api-key to user-JWT auth (commit 8fb81a6). This overrides verify_user_jwt
+    and stubs verify_household_role (an HTTP call to jarvis-auth) so the
+    household-role check is a no-op in tests.
+    """
+    def override_get_db():
+        try:
+            yield test_db
+        finally:
+            pass
+
+    def override_user_jwt():
+        return AuthenticatedUser(user_id=1, email="test@example.com")
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_user_jwt] = override_user_jwt
+    with patch("app.node_settings.verify_household_role", lambda *a, **k: None):
+        try:
+            with TestClient(app) as c:
+                yield c
+        finally:
+            app.dependency_overrides.clear()
 
 
 # =============================================================================
@@ -164,11 +193,10 @@ class TestSettingsSnapshotModel:
 class TestCreateSettingsRequest:
     """Tests for POST /api/v0/nodes/{node_id}/settings/requests"""
 
-    def test_create_request_success(self, client_with_test_db, test_node):
+    def test_create_request_success(self, jwt_client, test_node):
         """Test successful request creation."""
-        response = client_with_test_db.post(
+        response = jwt_client.post(
             f"/api/v0/nodes/{test_node.node_id}/settings/requests",
-            headers={"x-api-key": "test-admin-key"},
         )
         assert response.status_code == 201
         data = response.json()
@@ -177,11 +205,10 @@ class TestCreateSettingsRequest:
         assert "request_id" in data
         assert "expires_at" in data
 
-    def test_create_request_node_not_found(self, client_with_test_db):
+    def test_create_request_node_not_found(self, jwt_client):
         """Test request creation for nonexistent node."""
-        response = client_with_test_db.post(
+        response = jwt_client.post(
             "/api/v0/nodes/nonexistent-node/settings/requests",
-            headers={"x-api-key": "test-admin-key"},
         )
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
@@ -191,8 +218,9 @@ class TestCreateSettingsRequest:
         response = client_with_test_db.post(
             f"/api/v0/nodes/{test_node.node_id}/settings/requests",
         )
-        # FastAPI returns 400 for missing required header (via validation exception handler)
-        assert response.status_code == 400
+        # Endpoint now requires a user JWT (commit 8fb81a6); a missing
+        # Authorization header makes verify_user_jwt raise 401.
+        assert response.status_code == 401
 
     def test_create_request_invalid_admin_key(self, client_with_test_db, test_node):
         """Test request creation with invalid admin key."""
@@ -203,11 +231,10 @@ class TestCreateSettingsRequest:
         assert response.status_code == 401
 
     @patch("app.node_settings.mqtt_client")
-    def test_create_request_publishes_mqtt(self, mock_mqtt, client_with_test_db, test_node):
+    def test_create_request_publishes_mqtt(self, mock_mqtt, jwt_client, test_node):
         """Test that request creation publishes MQTT message."""
-        response = client_with_test_db.post(
+        response = jwt_client.post(
             f"/api/v0/nodes/{test_node.node_id}/settings/requests",
-            headers={"x-api-key": "test-admin-key"},
         )
         assert response.status_code == 201
 
@@ -415,7 +442,7 @@ class TestUploadSettingsSnapshot:
 class TestGetSettingsSnapshot:
     """Tests for GET /api/v0/nodes/{node_id}/settings/requests/{request_id}/result"""
 
-    def test_get_result_pending(self, client_with_test_db, test_node, test_db):
+    def test_get_result_pending(self, jwt_client, test_node, test_db):
         """Test polling when request is still pending."""
         request = SettingsRequest(
             request_id=str(uuid.uuid4()),
@@ -425,16 +452,15 @@ class TestGetSettingsSnapshot:
         test_db.add(request)
         test_db.commit()
 
-        response = client_with_test_db.get(
+        response = jwt_client.get(
             f"/api/v0/nodes/{test_node.node_id}/settings/requests/{request.request_id}/result",
-            headers={"x-api-key": "test-admin-key"},
         )
         # 202 Accepted - still processing
         assert response.status_code == 202
         data = response.json()
         assert data["status"] == "pending"
 
-    def test_get_result_fulfilled(self, client_with_test_db, test_node, test_db):
+    def test_get_result_fulfilled(self, jwt_client, test_node, test_db):
         """Test polling when snapshot is ready."""
         request = SettingsRequest(
             request_id=str(uuid.uuid4()),
@@ -460,9 +486,8 @@ class TestGetSettingsSnapshot:
         test_db.add(snapshot)
         test_db.commit()
 
-        response = client_with_test_db.get(
+        response = jwt_client.get(
             f"/api/v0/nodes/{test_node.node_id}/settings/requests/{request.request_id}/result",
-            headers={"x-api-key": "test-admin-key"},
         )
         assert response.status_code == 200
         data = response.json()
@@ -473,7 +498,7 @@ class TestGetSettingsSnapshot:
         assert data["snapshot"]["aad"]["node_id"] == test_node.node_id
         assert data["snapshot"]["aad"]["schema_version"] == 1
 
-    def test_get_result_expired(self, client_with_test_db, test_node, test_db):
+    def test_get_result_expired(self, jwt_client, test_node, test_db):
         """Test polling for expired request."""
         request = SettingsRequest(
             request_id=str(uuid.uuid4()),
@@ -484,9 +509,8 @@ class TestGetSettingsSnapshot:
         test_db.add(request)
         test_db.commit()
 
-        response = client_with_test_db.get(
+        response = jwt_client.get(
             f"/api/v0/nodes/{test_node.node_id}/settings/requests/{request.request_id}/result",
-            headers={"x-api-key": "test-admin-key"},
         )
         assert response.status_code == 410  # Gone
 
@@ -499,11 +523,10 @@ class TestMQTTPublishing:
     """Tests for MQTT message publishing."""
 
     @patch("app.node_settings.mqtt_client")
-    def test_mqtt_message_format(self, mock_mqtt, client_with_test_db, test_node):
+    def test_mqtt_message_format(self, mock_mqtt, jwt_client, test_node):
         """Test that MQTT messages have correct format."""
-        response = client_with_test_db.post(
+        response = jwt_client.post(
             f"/api/v0/nodes/{test_node.node_id}/settings/requests",
-            headers={"x-api-key": "test-admin-key"},
         )
         assert response.status_code == 201
         request_id = response.json()["request_id"]
@@ -522,13 +545,12 @@ class TestMQTTPublishing:
         assert payload["node_id"] == test_node.node_id
 
     @patch("app.node_settings.mqtt_client")
-    def test_mqtt_failure_does_not_fail_request(self, mock_mqtt, client_with_test_db, test_node):
+    def test_mqtt_failure_does_not_fail_request(self, mock_mqtt, jwt_client, test_node):
         """Test that MQTT failure doesn't prevent request creation."""
         mock_mqtt.publish.side_effect = Exception("MQTT connection failed")
 
-        response = client_with_test_db.post(
+        response = jwt_client.post(
             f"/api/v0/nodes/{test_node.node_id}/settings/requests",
-            headers={"x-api-key": "test-admin-key"},
         )
         # Request should still be created
         assert response.status_code == 201

@@ -120,12 +120,16 @@ class TestPromptProviderFactoryDualRoot:
             fake_walk_packages,
         )
         monkeypatch.setattr(
-            "app.core.prompt_provider_factory.importlib.import_module",
-            fake_import_module,
-        )
-        monkeypatch.setattr(
             "app.core.prompt_provider_factory.os.path.exists",
             lambda _: True,
+        )
+        # Patch importlib.import_module LAST: it mutates the shared importlib
+        # module's attribute (the factory calls importlib.import_module), which
+        # under pytest>=9.1 would otherwise break monkeypatch.setattr's own
+        # string-target resolution for any setattr that follows it.
+        monkeypatch.setattr(
+            "app.core.prompt_provider_factory.importlib.import_module",
+            fake_import_module,
         )
 
         def register(root: str, module_name: str, provider_class: type) -> None:

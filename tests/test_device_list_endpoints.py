@@ -170,7 +170,9 @@ class TestRequestDeviceList:
         assert db_req is not None
         assert db_req.node_id == node.node_id
         assert db_req.status == "pending"
-        assert db_req.manager_name == "jarvis_direct"
+        # Device-list requests now send manager_name="all" so nodes aggregate
+        # all managers (commit af23641); no longer read from settings.
+        assert db_req.manager_name == "all"
 
     @patch("app.api.smart_home._publish_device_list_mqtt")
     @patch("app.services.settings_service.get_settings_service")
@@ -193,7 +195,8 @@ class TestRequestDeviceList:
         call_args = mock_mqtt.call_args
         assert call_args[0][0] == node.node_id
         assert call_args[0][1] == resp.json()["id"]
-        assert call_args[0][2] == "home_assistant"
+        # manager_name is hardcoded to "all" now (commit af23641), regardless of settings.
+        assert call_args[0][2] == "all"
 
     @patch("app.api.smart_home._publish_device_list_mqtt")
     @patch("app.services.settings_service.get_settings_service")
