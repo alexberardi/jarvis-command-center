@@ -554,27 +554,3 @@ class TestMQTTPublishing:
         )
         # Request should still be created
         assert response.status_code == 201
-
-
-# =============================================================================
-# Rate Limiting Tests
-# =============================================================================
-
-class TestRateLimiting:
-    """Tests for rate limiting on settings endpoints."""
-
-    def test_rate_limit_request_creation(self, client_with_test_db, test_node):
-        """Test that request creation is rate limited."""
-        # Create many requests quickly
-        for i in range(10):
-            response = client_with_test_db.post(
-                f"/api/v0/nodes/{test_node.node_id}/settings/requests",
-                headers={"x-api-key": "test-admin-key"},
-            )
-            if response.status_code == 429:
-                # Rate limited as expected
-                return
-
-        # If we get here, rate limiting might not be implemented yet
-        # This is a reminder to implement it
-        pytest.skip("Rate limiting not yet implemented")

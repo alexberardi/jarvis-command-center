@@ -58,5 +58,11 @@ jobs:
         # transaction-rollback isolation per test. The `llm` tests are excluded
         # by default via pytest.ini (-k "not llm"; they need external services).
         DATABASE_URL: postgresql://jarvis_user:jarvis_password@localhost:5433/jarvis_command_center
+        # Auth is mocked in tests (dependency overrides), but full-app routes
+        # resolve the auth URL and verify_user_jwt needs a secret to *cleanly*
+        # 401 an invalid token (it 500s if the secret is unset). Placeholders —
+        # never actually called against a real auth service.
+        JARVIS_AUTH_BASE_URL: http://localhost:7701
+        JARVIS_AUTH_SECRET_KEY: test-secret-key-not-used-against-real-auth
       run: |
         pytest tests/ --tb=short
