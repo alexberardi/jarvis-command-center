@@ -1,0 +1,82 @@
+name: Cross-repo Integration Trigger
+
+# T10 — when this PR is part of a COORDINATED multi-repo feature, fire the
+# cross-repo lane in jarvis-integration-tests so the whole feature is tested as
+# ONE unit (all the linked PRs' source built together), instead of each repo
+# seeing only its own units.
+#
+# Declare the sibling PRs in THIS PR's body, one per line (repeatable):
+#
+#     Linked-PR: <repo-slug>@<branch-or-sha>
+#     e.g.  Linked-PR: jarvis-llm-proxy-api@feat/streaming
+#           Linked-PR: jarvis-llm-proxy-api@a1b2c3d   (a SHA is reproducible;
+#                                                       a branch resolves at clone time)
+#
+# No `Linked-PR:` marker -> this job no-ops, so a single-repo PR is unaffected
+# (the existing integration-trigger.yml still runs). Symmetric by design: every
+# participating PR can carry markers; both compute the SAME sorted feature_key,
+# and the receiver's concurrency group dedups them to one run per feature.
+#
+# Receiver: jarvis-integration-tests/.github/workflows/cross-repo-services.yml
+# (event type `cross-repo-integration`).
+#
+# Green-idle until the dispatch token is configured:
+#   INTEGRATION_DISPATCH_TOKEN — fine-grained PAT scoped to `repository_dispatch`
+#     (write) on alexberardi/jarvis-integration-tests ONLY. Until it's set, this
+#     job warns and passes (never fails a PR). This is the SAME token the existing
+#     integration-trigger uses.
+
+on:
+  pull_request:
+    # `edited` so adding a Linked-PR: marker after opening re-fires the lane.
+    types: [opened, synchronize, reopened, edited]
+    branches: [main]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Parse Linked-PR markers and dispatch
+        env:
+          GH_TOKEN: ${{ secrets.INTEGRATION_DISPATCH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ORIGINATING_REPO: ${{ github.repository }}
+          # Read the (untrusted) PR body via env, never inline ${{ }} into bash.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning title=Cross-repo trigger idle::INTEGRATION_DISPATCH_TOKEN is not set; skipping the cross-repo dispatch. Add a repository_dispatch-scoped PAT for alexberardi/jarvis-integration-tests to enable it."
+            exit 0
+          fi
+          SERVICE="${ORIGINATING_REPO##*/}"   # owner/name -> name (the repo slug)
+          printf '%s' "${PR_BODY:-}" > /tmp/pr_body.txt
+          # Extract `Linked-PR: <slug>@<ref>` markers (repeatable) into a
+          # {slug: ref} JSON map; drop a self-reference (THIS PR is the head_sha).
+          # Body + slug come via env, never inlined, so a crafted body can't
+          # inject. `(\S+)` ends the ref at whitespace, so no `$` regex anchor is
+          # needed (keeps the one-liner free of bash `$` quoting headaches).
+          LINKED_JSON=$(BODY_FILE=/tmp/pr_body.txt SVC="$SERVICE" python3 -c "import json,os,re; b=open(os.environ['BODY_FILE']).read(); d={m.group(1).strip():m.group(2).strip() for m in re.finditer(r'(?im)^\s*Linked-PR:\s*([\w.-]+)@(\S+)', b)}; d.pop(os.environ['SVC'], None); print(json.dumps(d))")
+          if [ "$LINKED_JSON" = "{}" ] || [ -z "$LINKED_JSON" ]; then
+            echo "No Linked-PR: markers in the PR body — single-repo PR, the existing trigger handles it. No cross-repo dispatch."
+            exit 0
+          fi
+          # feature_key = sorted union (this repo + linked slugs). Symmetric: both
+          # PRs of one feature compute the same key -> the receiver dedups to one run.
+          FEATURE_KEY=$(LINKED="$LINKED_JSON" SVC="$SERVICE" python3 -c "import json,os; d=json.loads(os.environ['LINKED']); print('+'.join(sorted({os.environ['SVC'], *d})))")
+          echo "Cross-repo feature detected: $FEATURE_KEY"
+          echo "linked_prs=$LINKED_JSON"
+          # linked_prs MUST be a JSON STRING: gh keeps -f values as strings, and
+          # the receiver json.loads it (a nested object via -f is not possible).
+          gh api --method POST \
+            /repos/alexberardi/jarvis-integration-tests/dispatches \
+            -f "event_type=cross-repo-integration" \
+            -f "client_payload[service]=$SERVICE" \
+            -f "client_payload[pr_number]=$PR_NUMBER" \
+            -f "client_payload[head_sha]=$HEAD_SHA" \
+            -f "client_payload[source_ref]=$HEAD_SHA" \
+            -f "client_payload[originating_repo]=$ORIGINATING_REPO" \
+            -f "client_payload[feature_key]=$FEATURE_KEY" \
+            -f "client_payload[linked_prs]=$LINKED_JSON"
