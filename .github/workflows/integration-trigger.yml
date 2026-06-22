@@ -1,14 +1,19 @@
 name: Integration Trigger
 
-# Fires a repository_dispatch at jarvis-node-setup when a PR opens or is
-# updated here. The receiver workflow (jarvis-node-setup/.github/workflows/
-# integration-runner.yml) runs the cross-service integration suite against
-# the PR's HEAD SHA and posts results back as a PR comment + check-run.
+# Fires a repository_dispatch at jarvis-integration-tests when a PR opens or is
+# updated here. The receiver workflow (jarvis-integration-tests/.github/workflows/
+# integration-runner.yml) runs the cross-service fast lane (CASE-001..215) against
+# the PR's HEAD SHA and posts results back as a PR comment + commit status.
+#
+# T6a cutover (2026-06-22): retargeted from jarvis-node-setup -> jarvis-integration-
+# tests. The harness was migrated there (T6a) and the dispatch token re-scoped to
+# it (T9 token work); node-setup's runner is retired. For coordinated MULTI-repo
+# features, see the separate cross-repo-trigger.yml (Linked-PR: markers).
 #
 # Required secret:
 #   INTEGRATION_DISPATCH_TOKEN — fine-grained PAT scoped to
-#                                  `repository_dispatch:write` on
-#                                  alexberardi/jarvis-node-setup only.
+#                                  `repository_dispatch` (write) on
+#                                  alexberardi/jarvis-integration-tests only.
 
 on:
   pull_request:
@@ -29,16 +34,14 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           ORIGINATING_REPO: ${{ github.repository }}
         run: |
-          # linked_prs is a JSON-encoded map of cross-service PR dependencies,
-          # e.g. {"jarvis-llm-proxy-api": "coding-agent/issue-12-streaming"}.
-          # Empty {} default → the runner uses ghcr.io :dev images for the rest
-          # of the stack. The trigger plumbs this through but doesn't set it
-          # itself; multi-repo coding-agent runs can pass it explicitly via
-          # the workflow_dispatch path or by forking this trigger and adding
-          # logic to read it from the PR body / issue.
+          # This is the SINGLE-repo fast lane: linked_prs stays {} so the runner
+          # uses ghcr.io :dev images for the rest of the stack. Coordinated
+          # MULTI-repo features are handled by the separate cross-repo-trigger.yml,
+          # which parses `Linked-PR:` markers from the PR body and dispatches the
+          # cross-repo lane (cross-repo-services.yml) instead.
           gh api \
             --method POST \
-            /repos/alexberardi/jarvis-node-setup/dispatches \
+            /repos/alexberardi/jarvis-integration-tests/dispatches \
             -f "event_type=pr-integration" \
             -f "client_payload[service]=jarvis-command-center" \
             -f "client_payload[pr_number]=$PR_NUMBER" \
