@@ -140,6 +140,16 @@ async def _mqtt_request(
             detail=f"Node {node_id} did not respond within {MQTT_TIMEOUT_SECONDS}s",
         )
 
+    # The node answered over MQTT — proof-of-life on a channel the HTTP
+    # heartbeat never sees. Refresh last_seen so an active node isn't marked
+    # offline just because its heartbeat POSTs are failing. Best-effort.
+    try:
+        from app.services.node_liveness import record_node_seen
+
+        await asyncio.to_thread(record_node_seen, node_id)
+    except Exception:  # pragma: no cover - liveness must never break the round-trip
+        pass
+
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
