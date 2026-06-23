@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.context_providers.node_context_provider import NodeContextProvider
 from app.db import get_session_local
 from app.models import Node
+from app.services.node_liveness import touch_node_last_seen
 from app.core.model_service import ModelService
 from dotenv import load_dotenv
 
@@ -121,6 +122,10 @@ def verify_api_key(x_api_key: str = Header(...), db: Session = Depends(get_db)):
         # Get node from local DB for additional context
         node = db.query(Node).filter(Node.node_id == cached.get("node_id")).first()
         if node:
+            # Any authenticated node request is proof-of-life — refresh
+            # last_seen so "online" reflects activity on any channel, not just
+            # the dedicated HTTP heartbeat. Best-effort, debounced, never raises.
+            touch_node_last_seen(db, node)
             return NodeContextProvider(
                 node,
                 household_id=cached.get("household_id"),
@@ -137,6 +142,7 @@ def verify_api_key(x_api_key: str = Header(...), db: Session = Depends(get_db)):
             # Get node from local DB for additional context (room, voice_mode, etc.)
             node = db.query(Node).filter(Node.node_id == node_id).first()
             if node:
+                touch_node_last_seen(db, node)
                 return NodeContextProvider(
                     node,
                     household_id=result.get("household_id"),
@@ -155,6 +161,7 @@ def verify_api_key(x_api_key: str = Header(...), db: Session = Depends(get_db)):
     if not node:
         logger.warning("Unauthorized attempt with API key: %s", x_api_key[:8] + "...")
         raise HTTPException(status_code=401, detail="Invalid API Key")
+    touch_node_last_seen(db, node)
     return NodeContextProvider(node)
 
 def verify_admin_key(x_api_key: str = Header(...)):
