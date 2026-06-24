@@ -1,0 +1,33 @@
+name: Trigger install-e2e
+
+# On push to main, ask the umbrella jarvis repo to run the full install-e2e
+# (compose-export bring-up + migrations-ran + node/K2) against this service's
+# freshly-built :dev image — so a service change that breaks the INSTALL is
+# caught immediately, not just at the nightly run.
+#
+# Required secret: INSTALL_E2E_DISPATCH_TOKEN — a fine-grained PAT with
+#   Contents:read + repository_dispatch:write on alexberardi/jarvis ONLY.
+# Without it the step warns and skips, so this is non-breaking until the token
+# is provisioned.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch install-e2e on the umbrella repo
+        env:
+          GH_TOKEN: ${{ secrets.INSTALL_E2E_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::INSTALL_E2E_DISPATCH_TOKEN not set — skipping install-e2e dispatch"
+            exit 0
+          fi
+          gh api --method POST /repos/alexberardi/jarvis/dispatches \
+            -f "event_type=service-commit" \
+            -f "client_payload[service]=${{ github.repository }}" \
+            -f "client_payload[sha]=${{ github.sha }}"
