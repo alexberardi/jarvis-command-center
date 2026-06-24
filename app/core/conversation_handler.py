@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from app.core.conversation_cache import conversation_cache
 from app.core.direction_hint import build_direction_hint
+from app.core.errors import ConversationPreconditionError
 from app.core.not_for_me import contains_sentinel
 from app.core.prompt_providers.shared.core_rules import (
     NOT_FOR_ME_INSTRUCTION,
@@ -515,7 +516,9 @@ class ConversationHandler:
         advanced_thinking = self._sync_advanced_thinking(conversation_id)
 
         if not messages:
-            raise ValueError(f"Conversation {conversation_id} not found or expired")
+            raise ConversationPreconditionError(
+                f"Conversation {conversation_id} not found or expired"
+            )
 
         # Get server tool names for filtering
         server_tool_names = get_server_tool_names(tools)
@@ -1674,7 +1677,9 @@ class ConversationHandler:
         tools = conversation_cache.get_tools(conversation_id)
 
         if not messages:
-            raise ValueError(f"Conversation {conversation_id} not found or expired")
+            raise ConversationPreconditionError(
+                f"Conversation {conversation_id} not found or expired"
+            )
 
         # Remember any items a tool surfaced this turn so the next turn can
         # re-inject them ("mark those as read" / "send me #3").
