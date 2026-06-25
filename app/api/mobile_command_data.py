@@ -320,6 +320,13 @@ class _PatchBody(BaseModel):
     patch: dict[str, Any] = Field(default_factory=dict)
 
 
+class _CreateBody(BaseModel):
+    """Create body for a new record. `data` holds field values keyed by
+    FieldSpec name. No owner/user_id/key — the node stamps ownership from the
+    authenticated caller and mints the storage key."""
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
 @router.get("/command-data/nodes")
 async def list_nodes(
     user: AuthenticatedUser = Depends(verify_user_jwt),
@@ -382,7 +389,11 @@ async def get_schema(
             status_code=404,
             detail=response.get("error", {}).get("message", "command not found"),
         )
-    out = {"mode": response["mode"], "fields": response["fields"]}
+    out = {
+        "mode": response["mode"],
+        "supports_create": response.get("supports_create", False),
+        "fields": response["fields"],
+    }
     _schema_cache.put(node_id, command_name, out)
     return out
 
@@ -424,7 +435,11 @@ async def list_records(
     if schema is None:
         schema_resp = await _mqtt_request(node_id, "schema", {"command_name": command_name})
         if schema_resp.get("ok"):
-            schema = {"mode": schema_resp["mode"], "fields": schema_resp["fields"]}
+            schema = {
+                "mode": schema_resp["mode"],
+                "supports_create": schema_resp.get("supports_create", False),
+                "fields": schema_resp["fields"],
+            }
             _schema_cache.put(node_id, command_name, schema)
 
     records = response.get("records", [])
@@ -465,11 +480,60 @@ async def get_record(
     _schema_cache.put(
         node_id,
         command_name,
-        {"mode": schema.get("mode", "enabled"), "fields": schema.get("fields", [])},
+        {
+            "mode": schema.get("mode", "enabled"),
+            "supports_create": schema.get("supports_create", False),
+            "fields": schema.get("fields", []),
+        },
     )
     record = response["record"]
     record = await _enrich_single_record(record, schema.get("fields", []))
     return {"record": record, "schema": schema}
+
+
+@router.post(
+    "/command-data/nodes/{node_id}/commands/{command_name}/records"
+)
+async def create_record(
+    node_id: str,
+    command_name: str,
+    body: _CreateBody = Body(...),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Create a new record for a command on a node.
+
+    The client sends only field values in `data`. The node mints the storage
+    key and stamps the owner from `requesting_user_id` (the JWT-resolved
+    caller) — ownership is never client-asserted. Returns the created record
+    and its key.
+    """
+    _resolve_node_in_household(db, node_id, user)
+    response = await _mqtt_request(node_id, "create", {
+        "command_name": command_name,
+        "data": body.data,
+        "requesting_user_id": user.user_id,
+    })
+    if not response.get("ok"):
+        message = response.get("error", {}).get("message", "create failed")
+        lowered = message.lower()
+        if "read-only" in lowered:
+            raise HTTPException(status_code=403, detail=message)
+        if (
+            "not found" in lowered
+            or "missing" in lowered
+            or "does not support" in lowered
+        ):
+            raise HTTPException(status_code=404, detail=message)
+        # Validation failures (e.g. "at least one dose time is required") are
+        # fixable input — surface as 400 so mobile can show the message.
+        raise HTTPException(status_code=400, detail=message)
+
+    record = response.get("record")
+    schema = _schema_cache.get(node_id, command_name)
+    if record is not None and schema is not None:
+        record = await _enrich_single_record(record, schema["fields"])
+    return {"record": record, "key": response.get("key")}
 
 
 @router.patch(
