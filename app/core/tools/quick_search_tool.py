@@ -20,6 +20,41 @@ from app.core.interfaces.iserver_tool import IServerTool
 
 logger = logging.getLogger("uvicorn")
 
+
+def _web_search_enabled(conversation_id: str | None) -> bool:
+    """Fail-closed check of the household ``web_search.enabled`` setting.
+
+    Defense-in-depth re-check at execution time — the keyword pre-exec
+    (``_maybe_quick_search``) and the warmup tool whitelist are the primary
+    gates. Resolves the household from the conversation cache via the
+    ``conversation_id`` the tool executor threads in. Any error, or no
+    resolvable household/conversation → disabled (no outbound egress).
+    """
+    if not conversation_id:
+        return False
+    try:
+        from app.core.conversation_cache import conversation_cache
+        from app.services.settings_service import get_settings_service
+
+        node_ctx = conversation_cache.get_node_context(conversation_id)
+        household_id = node_ctx.get("household_id") if node_ctx else None
+        if not household_id:
+            return False
+        val = get_settings_service().get(
+            "web_search.enabled", household_id=str(household_id)
+        )
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.lower() in ("true", "1", "yes")
+        return bool(val)
+    except Exception as e:
+        logger.warning(
+            "quick_search web_search gate check failed, defaulting to DISABLED: %s", e
+        )
+        return False
+
+
 _NUM_RESULTS = 2
 _MAX_CHARS_PER_PAGE = 4000
 _SCRAPE_TIMEOUT = 8
@@ -162,6 +197,15 @@ class QuickSearchTool(IServerTool):
         query: str = kwargs.get("query", "")
         if not query:
             return {"error": "missing_query", "message": "A search query is required"}
+
+        # Defense-in-depth: never egress for a household that opted out, even
+        # if this tool was somehow invoked without being in the prompt.
+        if not _web_search_enabled(kwargs.get("conversation_id")):
+            logger.info("🚫 quick_search blocked — web_search disabled")
+            return {
+                "error": "web_search_disabled",
+                "message": "Web search is disabled for this household.",
+            }
 
         start_time = time.monotonic()
 
