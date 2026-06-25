@@ -229,3 +229,70 @@ class TestMqttRequest:
             with pytest.raises(HTTPException) as excinfo:
                 await _mqtt_request("node-1", "list", {})
         assert excinfo.value.status_code == 502
+
+
+# ── create_record route ─────────────────────────────────────────────────────
+
+
+class TestCreateRecord:
+    """Unit tests for the create_record route: it forwards op='create' with the
+    JWT-derived owner and maps node errors to HTTP status codes."""
+
+    pytestmark = pytest.mark.asyncio
+
+    def _user(self, user_id=42):
+        user = MagicMock()
+        user.user_id = user_id
+        return user
+
+    async def _call(self, data, node_response, user=None):
+        from app.api.mobile_command_data import create_record, _CreateBody
+
+        user = user or self._user()
+        # Make sure no cached schema triggers enrichment.
+        mobile_command_data._schema_cache.clear()
+        with patch.object(mobile_command_data, "_resolve_node_in_household", MagicMock()), \
+             patch.object(
+                 mobile_command_data, "_mqtt_request",
+                 AsyncMock(return_value=node_response),
+             ) as mq:
+            result = await create_record(
+                "node-1", "medication", _CreateBody(data=data), user, MagicMock()
+            )
+        return result, mq
+
+    async def test_forwards_create_op_with_jwt_owner(self):
+        node_response = {"ok": True, "record": {"id": "med-1", "user_id": 42}, "key": "med-1"}
+        result, mq = await self._call(
+            {"name": "Vitamin D", "scope": "personal"}, node_response
+        )
+        assert result == {"record": {"id": "med-1", "user_id": 42}, "key": "med-1"}
+        op = mq.call_args.args[1]
+        payload = mq.call_args.args[2]
+        assert op == "create"
+        assert payload["command_name"] == "medication"
+        assert payload["data"] == {"name": "Vitamin D", "scope": "personal"}
+        # owner comes from the JWT user, never the request body
+        assert payload["requesting_user_id"] == 42
+
+    async def test_validation_error_is_400(self):
+        from fastapi import HTTPException
+        node_response = {"ok": False, "error": {"message": "at least one dose time is required"}}
+        with pytest.raises(HTTPException) as exc:
+            await self._call({"name": "X"}, node_response)
+        assert exc.value.status_code == 400
+        assert "dose time" in exc.value.detail
+
+    async def test_readonly_is_403(self):
+        from fastapi import HTTPException
+        node_response = {"ok": False, "error": {"message": "command is read-only"}}
+        with pytest.raises(HTTPException) as exc:
+            await self._call({}, node_response)
+        assert exc.value.status_code == 403
+
+    async def test_unsupported_command_is_404(self):
+        from fastapi import HTTPException
+        node_response = {"ok": False, "error": {"message": "command does not support adding records"}}
+        with pytest.raises(HTTPException) as exc:
+            await self._call({}, node_response)
+        assert exc.value.status_code == 404
