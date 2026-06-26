@@ -588,15 +588,6 @@ class ConversationHandler:
                 "content": f"Router hint: likely tool is '{hint_tool}'. Use it if it matches intent; otherwise choose the best tool."
             })
 
-        # Pre-execute quick_search for search-intent utterances so the LLM
-        # gets web results in context without needing to call the tool itself.
-        # Smaller models (e.g. Qwen 14B) don't reliably call tools on their own.
-        search_results = await self._maybe_quick_search(voice_command, conversation_id)
-        if search_results:
-            messages.append({
-                "role": "system",
-                "content": search_results,
-            })
 
         # Inject agent-supplied context (calendar, news, weather, etc.)
         # relevant to the user's utterance via vector similarity search.
@@ -827,11 +818,6 @@ class ConversationHandler:
 
         # Sync advanced thinking setting so suffix adapts
         self._sync_advanced_thinking(conversation_id)
-
-        # Pre-execute quick_search if applicable
-        search_results = await self._maybe_quick_search(voice_command, conversation_id)
-        if search_results:
-            messages.append({"role": "system", "content": search_results})
 
         # Add user message
         suffix: str = (
@@ -2423,78 +2409,6 @@ class ConversationHandler:
                 )
 
         return pruned_tools
-
-    # Keyword patterns that indicate the user wants real-time web info.
-    _SEARCH_PATTERNS: list[re.Pattern[str]] = [
-        re.compile(r"\b(search|look up|google|find out|search for)\b", re.I),
-        re.compile(r"\b(latest|current|recent|today'?s|right now|happening)\b", re.I),
-        re.compile(r"\bwho is the (current|new|present)\b", re.I),
-        re.compile(r"\bwho (is|are|was) (president|ceo|prime minister|leader|king|queen|governor|mayor)\b", re.I),
-        re.compile(r"\b(stock price|share price|market cap)\b", re.I),
-        re.compile(r"\bhow much (is|does|are|do)\b.*\b(cost|worth)\b", re.I),
-        re.compile(r"\bwhat('?s| is) (new|happening|going on)\b", re.I),
-        re.compile(r"\b(did .+ win|who won|final score)\b", re.I),
-    ]
-
-    async def _maybe_quick_search(
-        self, utterance: str, conversation_id: str
-    ) -> str | None:
-        """Run quick_search if the utterance matches search-intent keywords.
-
-        Returns formatted search results as a system message string, or None
-        if no search was triggered.
-
-        This is a SEPARATE outbound-web reach path from the tool whitelist: it
-        executes quick_search directly on a keyword match, bypassing the LLM's
-        tool-call decision (small models don't reliably self-call). It must be
-        gated independently on the per-household web_search setting, or a
-        disabled household would still egress on any search-shaped utterance.
-        """
-        if not self._get_web_search_enabled(
-            conversation_cache.get_node_context(conversation_id)
-        ):
-            return None
-
-        if not any(p.search(utterance) for p in self._SEARCH_PATTERNS):
-            return None
-
-        tool = tool_registry.get_tool("quick_search")
-        if not tool:
-            return None
-
-        logger.info("[web_search] keyword-path TRIGGERED for: %r", utterance)
-        result = tool.execute(query=utterance, conversation_id=conversation_id)
-
-        if "error" in result:
-            logger.warning(
-                "[web_search] keyword-path failed: %s", result.get("message")
-            )
-            return None
-
-        sources = result.get("sources", [])
-        if not sources:
-            return None
-
-        parts = [f"[Web search results for: {utterance}]"]
-        for i, src in enumerate(sources, 1):
-            title = src.get("title", f"Source {i}")
-            url = src.get("url", "")
-            content = src.get("content", "")[:3000]
-            parts.append(f"\n## Source {i}: {title}\nURL: {url}\n{content}")
-        parts.append(
-            "\nA web search has ALREADY been run for this query and the results "
-            "are above. Answer the user directly from these results — do NOT call "
-            "quick_search (or any search tool) again. Cite sources when relevant."
-        )
-
-        elapsed = result.get("elapsed_seconds", "?")
-        logger.info(
-            "[web_search] keyword-path GROUNDED answer with %d sources (%ss) — "
-            "this turn used the web, not training data",
-            len(sources), elapsed,
-        )
-
-        return "\n".join(parts)
 
     def _sync_advanced_thinking(self, conversation_id: str) -> bool:
         """Read model.advanced_thinking setting and propagate to the provider.

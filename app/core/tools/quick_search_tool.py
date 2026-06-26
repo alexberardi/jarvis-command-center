@@ -24,9 +24,9 @@ logger = logging.getLogger("uvicorn")
 def _web_search_enabled(conversation_id: str | None) -> bool:
     """Fail-closed check of the household ``web_search.enabled`` setting.
 
-    Defense-in-depth re-check at execution time — the keyword pre-exec
-    (``_maybe_quick_search``) and the warmup tool whitelist are the primary
-    gates. Resolves the household from the conversation cache via the
+    Defense-in-depth re-check at execution time — the warmup tool whitelist
+    (which decides whether quick_search is offered to the model at all) is the
+    primary gate. Resolves the household from the conversation cache via the
     ``conversation_id`` the tool executor threads in. Any error, or no
     resolvable household/conversation → disabled (no outbound egress).
     """
