@@ -232,6 +232,12 @@ class ConversationHandler:
         _memory_enabled, _recall_enabled = self._get_memory_settings(node_context)
         # Web search (outbound-web tools) gate — default OFF, fail-closed.
         _web_search_enabled = self._get_web_search_enabled(node_context)
+        logger.info(
+            "[web_search] gate household=%s enabled=%s (quick_search/deep_research %s)",
+            (node_context or {}).get("household_id"),
+            _web_search_enabled,
+            "OFFERED" if _web_search_enabled else "WITHHELD",
+        )
 
         # Get server tools from registry
         # Text-based providers should only see client/command tools in the prompt.
@@ -2456,11 +2462,13 @@ class ConversationHandler:
         if not tool:
             return None
 
-        logger.info("🔍 Keyword-triggered quick_search for: %r", utterance)
+        logger.info("[web_search] keyword-path TRIGGERED for: %r", utterance)
         result = tool.execute(query=utterance, conversation_id=conversation_id)
 
         if "error" in result:
-            logger.warning("Quick search failed: %s", result.get("message"))
+            logger.warning(
+                "[web_search] keyword-path failed: %s", result.get("message")
+            )
             return None
 
         sources = result.get("sources", [])
@@ -2479,7 +2487,11 @@ class ConversationHandler:
         )
 
         elapsed = result.get("elapsed_seconds", "?")
-        logger.info("Quick search completed in %ss, %d sources", elapsed, len(sources))
+        logger.info(
+            "[web_search] keyword-path GROUNDED answer with %d sources (%ss) — "
+            "this turn used the web, not training data",
+            len(sources), elapsed,
+        )
 
         return "\n".join(parts)
 

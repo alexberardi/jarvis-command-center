@@ -82,6 +82,27 @@ class ToolCallParser:
                     if formatted_call:
                         formatted_calls.append(formatted_call)
 
+            # Fallback: the model emitted a BARE tool-call object with no
+            # envelope, e.g. {"name": "quick_search", "arguments": {...}}.
+            # Smaller / quantized models (e.g. Qwen3-8B-Q4) frequently skip the
+            # {"tool_calls": [...]} wrapper, so without this they were parsed as
+            # a plain answer (tool_calls=0) and the call was silently dropped.
+            # Only fires when no envelope key is present, and _format_tool_call
+            # returns None for non-tool objects (no "name"/"function"), so a
+            # normal {"message": ...} response is unaffected.
+            if (
+                not formatted_calls
+                and "tool_calls" not in parsed
+                and "tool_call" not in parsed
+            ):
+                formatted_call = ToolCallParser._format_tool_call(parsed)
+                if formatted_call:
+                    logger.info(
+                        "🩹 Recovered a bare (un-enveloped) tool call: %s",
+                        formatted_call.get("name") or formatted_call.get("function", {}).get("name"),
+                    )
+                    formatted_calls.append(formatted_call)
+
             if formatted_calls:
                 logger.info(f"✅ Parsed {len(formatted_calls)} tool call(s) from LLM response")
                 return "tool_calls", formatted_calls, message
