@@ -201,7 +201,7 @@ class QuickSearchTool(IServerTool):
         # Defense-in-depth: never egress for a household that opted out, even
         # if this tool was somehow invoked without being in the prompt.
         if not _web_search_enabled(kwargs.get("conversation_id")):
-            logger.info("🚫 quick_search blocked — web_search disabled")
+            logger.info("[web_search] BLOCKED — web_search disabled for household")
             return {
                 "error": "web_search_disabled",
                 "message": "Web search is disabled for this household.",
@@ -213,6 +213,7 @@ class QuickSearchTool(IServerTool):
             # Step 1: Search (sync — ddgs uses requests internally)
             search_results = _search_web(query)
             if not search_results:
+                logger.info("[web_search] NO RESULTS for query=%r", query)
                 return {
                     "error": "no_results",
                     "message": f"No search results found for: {query}",
@@ -224,7 +225,14 @@ class QuickSearchTool(IServerTool):
             sources = _scrape_results(search_results)
 
             elapsed = time.monotonic() - start_time
-            logger.info("Quick search: completed in %.1fs for %r", elapsed, query)
+            # Decisive, greppable proof the answer is web-grounded (not the
+            # model's training data): the real URLs that were fetched. If you
+            # do NOT see a "[web_search] EXECUTED" line for a turn, that turn
+            # was answered from intrinsic knowledge — no web was hit.
+            logger.info(
+                "[web_search] EXECUTED query=%r sources=%d (%.1fs) urls=%s",
+                query, len(sources), elapsed, [s.get("url") for s in sources],
+            )
 
             return {
                 "query": query,
