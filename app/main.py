@@ -597,6 +597,10 @@ app.include_router(routines.router, prefix="/api/v0", tags=["routines"])
 from app.api import mobile_command_data
 app.include_router(mobile_command_data.router, prefix="/api/v0/mobile", tags=["mobile-command-data"])
 
+# Include mobile household-settings router (household-admin auth, e.g. web search toggle)
+from app.api import mobile_household_settings
+app.include_router(mobile_household_settings.router, prefix="/api/v0/mobile", tags=["mobile-household-settings"])
+
 # Settings router is included in startup_event after service_config is initialized
 
 
