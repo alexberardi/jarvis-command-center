@@ -8,12 +8,10 @@ request is asserted closed when the setting is disabled — and, critically, the
 gate FAILS CLOSED on any settings error (the opposite of the memory gate).
 
 Reach paths covered:
-  1. ConversationHandler._get_web_search_enabled — the fail-closed primitive.
-  2. ConversationHandler._maybe_quick_search — the keyword pre-exec path that
-     runs the tool DIRECTLY, bypassing the LLM tool-call decision. The most
-     dangerous path; gating only the prompt whitelist would leave it open.
-  3. quick_search_tool.execute — defense-in-depth re-check at execution time.
-  4. deep_research_tool.execute — same, for the background research tool.
+  1. ConversationHandler._get_web_search_enabled — the fail-closed primitive
+     (gates the warmup tool whitelist + the fast-stream eligibility check).
+  2. quick_search_tool.execute — defense-in-depth re-check at execution time.
+  3. deep_research_tool.execute — same, for the background research tool.
 
 Hermetic: no network, no DB. Settings + cache + registry are all stubbed.
 """
@@ -72,81 +70,6 @@ class TestWebSearchEnabledHelper:
         svc.get.return_value = False
         with patch(SETTINGS, MagicMock(return_value=svc)):
             assert _handler()._get_web_search_enabled(None) is False
-
-
-class TestMaybeQuickSearchGate:
-    """The keyword pre-exec path — the make-or-break reach path.
-
-    It executes quick_search directly on a regex match, bypassing the prompt
-    whitelist entirely. If this isn't gated, a disabled household still fires a
-    live search + page scrape on any current-events-shaped utterance.
-    """
-
-    SEARCH_UTTERANCE = "who is the current president"
-
-    @pytest.mark.asyncio
-    async def test_disabled_does_not_search(self):
-        tool = MagicMock()
-        with patch("app.core.conversation_handler.conversation_cache") as cache, \
-             patch("app.core.conversation_handler.tool_registry") as registry, \
-             patch(SETTINGS, _settings_returning(False)):
-            cache.get_node_context.return_value = {"household_id": "hh-1"}
-            registry.get_tool.return_value = tool
-
-            result = await _handler()._maybe_quick_search(self.SEARCH_UTTERANCE, "conv-1")
-
-            assert result is None
-            # Gated BEFORE fetching/executing the tool — no egress.
-            registry.get_tool.assert_not_called()
-            tool.execute.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_disabled_fails_closed_on_settings_error(self):
-        with patch("app.core.conversation_handler.conversation_cache") as cache, \
-             patch("app.core.conversation_handler.tool_registry") as registry, \
-             patch(SETTINGS, _settings_raising()):
-            cache.get_node_context.return_value = {"household_id": "hh-1"}
-
-            result = await _handler()._maybe_quick_search("who won last night", "conv-1")
-
-            assert result is None
-            registry.get_tool.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_enabled_searches_and_threads_conversation_id(self):
-        tool = MagicMock()
-        tool.execute.return_value = {
-            "sources": [{"title": "T", "url": "https://x", "content": "c"}],
-            "elapsed_seconds": 1,
-        }
-        with patch("app.core.conversation_handler.conversation_cache") as cache, \
-             patch("app.core.conversation_handler.tool_registry") as registry, \
-             patch(SETTINGS, _settings_returning(True)):
-            cache.get_node_context.return_value = {"household_id": "hh-1"}
-            registry.get_tool.return_value = tool
-
-            result = await _handler()._maybe_quick_search("what's the latest news", "conv-1")
-
-            assert result is not None
-            # conversation_id MUST be threaded through so the execute-time
-            # defense-in-depth re-check can resolve the household.
-            tool.execute.assert_called_once_with(
-                query="what's the latest news", conversation_id="conv-1"
-            )
-
-    @pytest.mark.asyncio
-    async def test_enabled_non_search_utterance_does_not_search(self):
-        tool = MagicMock()
-        with patch("app.core.conversation_handler.conversation_cache") as cache, \
-             patch("app.core.conversation_handler.tool_registry") as registry, \
-             patch(SETTINGS, _settings_returning(True)):
-            cache.get_node_context.return_value = {"household_id": "hh-1"}
-            registry.get_tool.return_value = tool
-
-            result = await _handler()._maybe_quick_search("turn off the kitchen light", "conv-1")
-
-            assert result is None
-            tool.execute.assert_not_called()
 
 
 class TestQuickSearchExecuteGuard:
