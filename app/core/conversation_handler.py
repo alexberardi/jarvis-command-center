@@ -2482,8 +2482,9 @@ class ConversationHandler:
             content = src.get("content", "")[:3000]
             parts.append(f"\n## Source {i}: {title}\nURL: {url}\n{content}")
         parts.append(
-            "\nUse these web sources to answer the user's question. "
-            "Cite sources when relevant."
+            "\nA web search has ALREADY been run for this query and the results "
+            "are above. Answer the user directly from these results — do NOT call "
+            "quick_search (or any search tool) again. Cite sources when relevant."
         )
 
         elapsed = result.get("elapsed_seconds", "?")
