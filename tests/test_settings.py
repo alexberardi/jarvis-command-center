@@ -58,7 +58,7 @@ class TestSettingsDefinitions:
         expected_categories = {"llm", "tool_classifier", "tool_router", "transcription",
                               "prompt", "model", "conversation", "admin", "memory",
                               "network", "oauth", "smart_home", "adapter", "voice",
-                              "routines"}
+                              "routines", "web_search"}
         assert categories == expected_categories
 
 

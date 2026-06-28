@@ -230,6 +230,14 @@ class ConversationHandler:
 
         # Check memory settings (used for both tool gating and memory loading)
         _memory_enabled, _recall_enabled = self._get_memory_settings(node_context)
+        # Web search (outbound-web tools) gate — default OFF, fail-closed.
+        _web_search_enabled = self._get_web_search_enabled(node_context)
+        logger.info(
+            "[web_search] gate household=%s enabled=%s (quick_search/deep_research %s)",
+            (node_context or {}).get("household_id"),
+            _web_search_enabled,
+            "OFFERED" if _web_search_enabled else "WITHHELD",
+        )
 
         # Get server tools from registry
         # Text-based providers should only see client/command tools in the prompt.
@@ -245,7 +253,15 @@ class ConversationHandler:
             # Only tools that are simple CRUD / one-shot operations belong
             # here.  Avoid tools that trigger follow-up LLM calls or loops
             # (e.g. get_command_utterance_examples, request_validation).
-            _safe_tool_names: list[str] = ["answer_question", "deep_research", "quick_search"]
+            _safe_tool_names: list[str] = ["answer_question"]
+            # Outbound-web tools (quick_search live lookups, deep_research) are
+            # gated on the per-household web_search.enabled setting (default
+            # OFF). When disabled they never enter the tool list — and because
+            # the prompt builder only pulls included_system_prompt_text from
+            # tools that made the list, their "you MUST search the web" prompt
+            # guidance drops out automatically (absent, not just ignored).
+            if _web_search_enabled:
+                _safe_tool_names.extend(["deep_research", "quick_search"])
             # Only include tools that require speaker identification when
             # a speaker has actually been identified for this conversation.
             _has_speaker = bool(
@@ -572,15 +588,6 @@ class ConversationHandler:
                 "content": f"Router hint: likely tool is '{hint_tool}'. Use it if it matches intent; otherwise choose the best tool."
             })
 
-        # Pre-execute quick_search for search-intent utterances so the LLM
-        # gets web results in context without needing to call the tool itself.
-        # Smaller models (e.g. Qwen 14B) don't reliably call tools on their own.
-        search_results = await self._maybe_quick_search(voice_command)
-        if search_results:
-            messages.append({
-                "role": "system",
-                "content": search_results,
-            })
 
         # Inject agent-supplied context (calendar, news, weather, etc.)
         # relevant to the user's utterance via vector similarity search.
@@ -765,6 +772,19 @@ class ConversationHandler:
             )
             return None
 
+        # quick_search is only streaming-eligible when web search is enabled
+        # for the household. When disabled, fall through to the blocking path
+        # (where the tool is absent from the whitelist and the keyword
+        # pre-exec is gated) so a current-events query never routes into a
+        # search-shaped path that can't actually search.
+        if predicted_tool == "quick_search" and not self._get_web_search_enabled(
+            conversation_cache.get_node_context(conversation_id)
+        ):
+            logger.debug(
+                "quick_search predicted but web_search disabled — blocking path",
+            )
+            return None
+
         if confidence < self._STREAMING_MIN_CONFIDENCE:
             logger.debug(
                 "Router confidence %.2f < %.2f threshold — blocking path",
@@ -798,11 +818,6 @@ class ConversationHandler:
 
         # Sync advanced thinking setting so suffix adapts
         self._sync_advanced_thinking(conversation_id)
-
-        # Pre-execute quick_search if applicable
-        search_results = await self._maybe_quick_search(voice_command)
-        if search_results:
-            messages.append({"role": "system", "content": search_results})
 
         # Add user message
         suffix: str = (
@@ -2395,58 +2410,6 @@ class ConversationHandler:
 
         return pruned_tools
 
-    # Keyword patterns that indicate the user wants real-time web info.
-    _SEARCH_PATTERNS: list[re.Pattern[str]] = [
-        re.compile(r"\b(search|look up|google|find out|search for)\b", re.I),
-        re.compile(r"\b(latest|current|recent|today'?s|right now|happening)\b", re.I),
-        re.compile(r"\bwho is the (current|new|present)\b", re.I),
-        re.compile(r"\bwho (is|are|was) (president|ceo|prime minister|leader|king|queen|governor|mayor)\b", re.I),
-        re.compile(r"\b(stock price|share price|market cap)\b", re.I),
-        re.compile(r"\bhow much (is|does|are|do)\b.*\b(cost|worth)\b", re.I),
-        re.compile(r"\bwhat('?s| is) (new|happening|going on)\b", re.I),
-        re.compile(r"\b(did .+ win|who won|final score)\b", re.I),
-    ]
-
-    async def _maybe_quick_search(self, utterance: str) -> str | None:
-        """Run quick_search if the utterance matches search-intent keywords.
-
-        Returns formatted search results as a system message string, or None
-        if no search was triggered.
-        """
-        if not any(p.search(utterance) for p in self._SEARCH_PATTERNS):
-            return None
-
-        tool = tool_registry.get_tool("quick_search")
-        if not tool:
-            return None
-
-        logger.info("🔍 Keyword-triggered quick_search for: %r", utterance)
-        result = tool.execute(query=utterance)
-
-        if "error" in result:
-            logger.warning("Quick search failed: %s", result.get("message"))
-            return None
-
-        sources = result.get("sources", [])
-        if not sources:
-            return None
-
-        parts = [f"[Web search results for: {utterance}]"]
-        for i, src in enumerate(sources, 1):
-            title = src.get("title", f"Source {i}")
-            url = src.get("url", "")
-            content = src.get("content", "")[:3000]
-            parts.append(f"\n## Source {i}: {title}\nURL: {url}\n{content}")
-        parts.append(
-            "\nUse these web sources to answer the user's question. "
-            "Cite sources when relevant."
-        )
-
-        elapsed = result.get("elapsed_seconds", "?")
-        logger.info("Quick search completed in %ss, %d sources", elapsed, len(sources))
-
-        return "\n".join(parts)
-
     def _sync_advanced_thinking(self, conversation_id: str) -> bool:
         """Read model.advanced_thinking setting and propagate to the provider.
 
@@ -2655,6 +2618,42 @@ class ConversationHandler:
         except Exception as e:
             logger.warning(f"⚠️ Failed to check memory settings, defaulting to enabled: {e}")
             return True, True
+
+    @staticmethod
+    def _get_web_search_enabled(node_context: Dict[str, Any] | None) -> bool:
+        """Whether web search is enabled for the current household.
+
+        Gates the outbound-web tools (quick_search live lookups and
+        deep_research). Default OFF.
+
+        FAILS CLOSED — deliberately the opposite of ``_get_memory_settings``
+        (which fails open). Web search performs outbound internet requests, so
+        a settings outage, a missing key, or a typo must never silently enable
+        egress for a household that opted out. Any error → disabled.
+        """
+        try:
+            from app.services.settings_service import get_settings_service
+
+            settings = get_settings_service()
+            household_id = node_context.get("household_id") if node_context else None
+
+            kwargs: Dict[str, Any] = {}
+            if household_id:
+                kwargs["household_id"] = str(household_id)
+
+            enabled = settings.get("web_search.enabled", **kwargs)
+
+            # Settings returns the raw value — may be string "true"/"false" or bool
+            if isinstance(enabled, bool):
+                return enabled
+            if isinstance(enabled, str):
+                return enabled.lower() in ("true", "1", "yes")
+            return bool(enabled)
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Failed to check web_search setting, defaulting to DISABLED: {e}"
+            )
+            return False
 
     async def _build_turn_speaker_message(
         self,
