@@ -239,6 +239,8 @@ POST to llm-proxy's `/internal/queue/enqueue` with `job_type`, `request`, `callb
 10. **Background workers swallow exceptions to stay alive.** Every `_periodic_*` loop logs and continues. **One worker failing doesn't kill any others.** If a worker is silently failing, grep its log line. Don't add `raise` to these loops.
 11. **Memory extraction is opt-in.** Default `memory.extraction_enabled` is false-ish (the setting check looks for explicit truthy). The worker still wakes up on its interval but skips the LLM call. This is fine — extraction is privacy-sensitive.
 12. **Provisioning tokens self-expire and are swept hourly.** If you see "expired provisioning tokens" logs, that's normal. Don't shorten the TTL without checking — it's tied to the installer flow.
+13. **Web search is gated per-household and FAIL-CLOSED.** The `web_search.enabled` setting (default **false**) governs the outbound-web server tools `quick_search` (live inline lookups) and `deep_research` (background, push+inbox). The gate is enforced in `conversation_handler.py` at the warmup text-path tool whitelist (`_get_web_search_enabled` → `_safe_tool_names`) and the fast-stream eligibility check, plus an `execute()`-time re-check inside each tool. It is **fail-closed** (any settings error → disabled — deliberately the opposite of the memory gate's fail-open) because it controls outbound internet egress. There is **no keyword pre-exec** — web search flows through a single path: the model self-calling the tool (reliability depends on the tools-first prompt; see gotcha 15). **GOTCHA — double egress:** the gate only governs CC **server** tools. A node's own web-search **client** tool (the legacy `jarvis-cmd-web-search` `search_web` plugin) is merged into the prompt unfiltered in warmup and routed straight to the node — it is NOT governed by `web_search.enabled`. So "toggle off = no egress" only holds if that plugin isn't installed. Don't un-gate `warmup_service.merge_tools` without re-checking this. Households toggle the setting from mobile via `app/api/mobile_household_settings.py` (household-admin auth, not global superuser).
+14. **Web search is VOICE-ONLY today.** The mobile/web chat path (`mobile_chat.py`) routes **every** tool call to the node over MQTT (`_route_tool_call_to_node`) and never executes CC **server** tools in-process. So `quick_search`/`deep_research` (and any server tool) don't work on chat — only on the voice/node path, where `tool_execution_engine` runs server tools server-side. Making web search work in browser/mobile chat requires teaching the chat path to execute server tools (distinguish server vs node tools) — a separate piece of work.
 
 ---
 
@@ -283,6 +285,7 @@ POST to llm-proxy's `/internal/queue/enqueue` with `job_type`, `request`, `callb
 - `node_tools.py` — node-tool inspection
 - `routine_builder.py` — routine CRUD
 - `traces.py:mobile_router` — request trace viewer
+- `mobile_household_settings.py` — household-controllable settings (e.g. the web-search toggle). Authorized by **household role** (`verify_household_role`, admin to write), NOT a global superuser like the shared `/settings/*` router. Allowlist-gated to a fixed set of keys.
 
 ### Shared
 - `app/api/media.py` — proxy to whisper + tts (node auth)
@@ -347,6 +350,7 @@ Key settings (DB-driven, viewable via admin UI):
 - `tracing.retention_days`
 - `adapter.auto_train_*` (dormant)
 - `llm.interface` (which prompt provider to use)
+- `web_search.enabled` (per-household, **default false**, fail-closed) — master toggle for the outbound-web tools `quick_search` + `deep_research`. See Invariants #13–14.
 
 ---
 

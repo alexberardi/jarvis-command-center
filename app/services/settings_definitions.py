@@ -213,6 +213,19 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Minimum cosine similarity for agent context vector search (0-1)",
     ),
 
+    # Web search settings
+    SettingDefinition(
+        key="web_search.enabled",
+        category="web_search",
+        value_type="bool",
+        default=False,
+        description=(
+            "Master toggle for web search. Gates the live quick_search lookups "
+            "and deep_research tools, which make outbound requests to the "
+            "internet. Default OFF so local-only households never egress."
+        ),
+    ),
+
     # Phase 5 — Auto-deploy LoRA adapter loop
     SettingDefinition(
         key="adapter.auto_train_enabled",
