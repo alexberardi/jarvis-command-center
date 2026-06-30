@@ -32,6 +32,9 @@ dependencies = [
     "jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@9902feb",
     "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@4549b23",
     "ddgs>=7.0.0",
+    # TODO: bump pin to the commit adding FetchConfig.enable_jina_fallback once
+    # jarvis-web-scraper's r.jina.ai opt-in change is merged + tagged. The Jina
+    # gate in deep_research_service.py needs that lib version at runtime.
     "jarvis-web-scraper @ git+https://github.com/alexberardi/jarvis-web-scraper.git@6238830",
     "pyyaml>=6,<7",
     "croniter>=2,<7",

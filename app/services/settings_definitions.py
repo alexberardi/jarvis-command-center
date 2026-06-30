@@ -225,6 +225,18 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
             "internet. Default OFF so local-only households never egress."
         ),
     ),
+    SettingDefinition(
+        key="web_scraping.allow_external",
+        category="web_search",
+        value_type="bool",
+        default=False,
+        description=(
+            "Permit the deep_research scraper to fall back to the third-party "
+            "r.jina.ai reader proxy when a page can't be fetched directly. This "
+            "leaks which pages the household reads to a third party. Default OFF; "
+            "shares the web_search mobile screen."
+        ),
+    ),
 
     # Update check settings
     SettingDefinition(
