@@ -116,7 +116,11 @@ def request_node_update(
         )
 
     requested = (body.target_version if body else None) or "latest"
-    target_version = resolve_target_version(requested)
+    # An explicit "vX.Y.Z" / "X.Y.Z" bypasses the GitHub lookup entirely (no
+    # egress); only "latest"/None hits api.github.com, gated per-household on
+    # updates.allow_check (503 below when disabled/unreachable and no explicit
+    # version was requested).
+    target_version = resolve_target_version(requested, household_id=node.household_id)
     if target_version is None:
         raise HTTPException(
             503,

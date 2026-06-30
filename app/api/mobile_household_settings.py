@@ -30,6 +30,7 @@ router = APIRouter(tags=["mobile-household-settings"])
 # endpoint from becoming a household-admin write to ANY command-center setting.
 HOUSEHOLD_CONTROLLABLE_SETTINGS: dict[str, str] = {
     "web_search.enabled": "bool",
+    "web_scraping.allow_external": "bool",
 }
 
 # Role required to CHANGE a household setting. Reads are open to any member;

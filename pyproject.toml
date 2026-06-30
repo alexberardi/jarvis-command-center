@@ -29,11 +29,12 @@ dependencies = [
     "numpy<2",
     "paho-mqtt>=2,<3",
     "cryptography>=42,<47",
-    "feedparser>=6,<7",
     "jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@9902feb",
     "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@4549b23",
     "ddgs>=7.0.0",
-    "jarvis-web-scraper @ git+https://github.com/alexberardi/jarvis-web-scraper.git@6238830",
+    # Pinned to the commit adding FetchConfig.enable_jina_fallback (r.jina.ai opt-in).
+    # The Jina gate in deep_research_service.py requires this lib version at runtime.
+    "jarvis-web-scraper @ git+https://github.com/alexberardi/jarvis-web-scraper.git@16d912fe9613bb0b3af4e328f4f1eda8ff77fdec",
     "pyyaml>=6,<7",
     "croniter>=2,<7",
 ]
