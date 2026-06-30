@@ -275,7 +275,6 @@ POST to llm-proxy's `/internal/queue/enqueue` with `job_type`, `request`, `callb
 - `app/api/smart_home.py` — rooms, devices, config push
 - `app/api/cameras.py` — go2rtc proxy
 - `app/api/bluetooth.py` — scan, pair, disconnect via MQTT
-- `app/api/agents.py` — utility endpoints (news, calendar) for node-side agents
 - `app/api/oauth.py` — OAuth session management (for integrations needing it)
 
 ### Mobile-facing (`/api/v0/mobile/*`, JWT auth)
@@ -398,7 +397,7 @@ app/
 │   ├── transcript_service.py
 │   ├── settings_service.py / settings_definitions.py
 │   ├── node_command_service.py
-│   ├── agent_service.py / agent_context_service.py
+│   ├── agent_context_service.py
 │   ├── deep_research_service.py
 │   ├── adapter_*.py                     # Dormant subsystem
 │   ├── prompt_provider_installer.py / prompt_variant_builder.py
