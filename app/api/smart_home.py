@@ -762,6 +762,38 @@ def _broadcast_device_cache_invalidate(db: Session, household_id: str) -> None:
         logger.warning("Failed to broadcast device-cache invalidate: %s", e)
 
 
+def _notify_device_removed(db: Session, household_id: str, dev: Device) -> None:
+    """Tell the node that owns this device's protocol to clean up (e.g. HomeKit
+    unpair, releasing the accessory) BEFORE the device record is deleted.
+
+    Best-effort: only for direct-protocol devices; if MQTT/node is unavailable the
+    delete still proceeds (the node just keeps a now-orphaned pairing).
+    """
+    try:
+        if (dev.source or "") != "direct" or not dev.protocol:
+            return
+        node = _pick_node_for_protocol(db, household_id, dev.protocol)
+        if not node:
+            return
+        from app.services.node_command_service import get_node_command_service
+
+        get_node_command_service().publish_command(
+            str(node.node_id),
+            "device_removed",
+            {
+                "entity_id": dev.entity_id,
+                "protocol": dev.protocol,
+                "domain": dev.domain,
+                "cloud_id": dev.cloud_id,
+                "local_ip": dev.local_ip,
+                "mac_address": dev.mac_address,
+                "name": dev.name,
+            },
+        )
+    except Exception as e:
+        logger.warning("Failed to notify device_removed: %s", e)
+
+
 @router.post("/households/{household_id}/devices/import", status_code=201)
 def import_devices(
     household_id: str,
@@ -932,6 +964,10 @@ def delete_device(
     dev = db.query(Device).filter(Device.id == device_id, Device.household_id == household_id).first()
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
+    # Let the owning node release the device (e.g. HomeKit unpair) before we drop
+    # the record — otherwise the node keeps a stale pairing and re-adds silently
+    # stay paired.
+    _notify_device_removed(db, household_id, dev)
     db.delete(dev)
     db.commit()
     _broadcast_device_cache_invalidate(db, household_id)
