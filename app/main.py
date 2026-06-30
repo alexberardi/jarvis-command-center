@@ -560,10 +560,6 @@ app.include_router(oauth.router, prefix="/api/v0", tags=["oauth"])
 from app.api import cameras
 app.include_router(cameras.router, prefix="/api/v0", tags=["cameras"])
 
-# Include agent utility endpoints (news, calendar for node-side agents)
-from app.api import agents
-app.include_router(agents.router, prefix="/api/v0", tags=["agents"])
-
 # Include node update router (mobile triggers update, CC dispatches via heartbeat)
 from app.api import node_updates
 app.include_router(node_updates.router, prefix="/api/v0", tags=["node-updates"])

@@ -29,7 +29,6 @@ dependencies = [
     "numpy<2",
     "paho-mqtt>=2,<3",
     "cryptography>=42,<47",
-    "feedparser>=6,<7",
     "jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@9902feb",
     "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@4549b23",
     "ddgs>=7.0.0",
