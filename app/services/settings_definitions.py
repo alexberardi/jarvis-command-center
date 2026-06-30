@@ -226,6 +226,19 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         ),
     ),
 
+    # Update check settings
+    SettingDefinition(
+        key="updates.allow_check",
+        category="updates",
+        value_type="bool",
+        default=False,
+        description=(
+            "Allow outbound update-version lookups to api.github.com (node "
+            "release checks). Default OFF so local-only households never egress "
+            "to GitHub; an explicit version can still be installed without it."
+        ),
+    ),
+
     # Phase 5 — Auto-deploy LoRA adapter loop
     SettingDefinition(
         key="adapter.auto_train_enabled",
