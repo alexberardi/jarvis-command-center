@@ -54,6 +54,13 @@ class PackageInstallPollResponse(BaseModel):
     details: dict | None = None
 
 
+class PackageInstallVerifyResponse(BaseModel):
+    confirmed: bool
+    command_name: str
+    github_repo_url: str
+    git_tag: str | None = None
+
+
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -131,6 +138,47 @@ def request_package_install(
         id=install_request.id,
         status=install_request.status,
         created_at=install_request.created_at,
+    )
+
+
+@router.get(
+    "/nodes/{node_id}/package-install/{request_id}/verify",
+    response_model=PackageInstallVerifyResponse,
+)
+def verify_package_install(
+    node_id: str,
+    request_id: str,
+    node_context=Depends(verify_api_key),
+    db: Session = Depends(get_db),
+) -> PackageInstallVerifyResponse:
+    """Node calls this to verify a package install request and get the repo URL.
+
+    This is the zero-trust gate (mirrors verify_test_install): a spoofed MQTT
+    nudge with a fake request_id fails here with 404 because no matching row
+    exists for this node. The node installs from the URL returned here — never
+    from the (untrusted) URL in the MQTT payload.
+    """
+    install_request = db.query(PackageInstallRequest).filter(
+        PackageInstallRequest.id == request_id,
+        PackageInstallRequest.node_id == node_id,
+    ).first()
+    if not install_request:
+        raise HTTPException(status_code=404, detail="Package install request not found")
+
+    now = datetime.utcnow()
+    if install_request.expires_at and install_request.expires_at < now:
+        install_request.status = "expired"
+        db.commit()
+        raise HTTPException(status_code=410, detail="Package install request expired")
+
+    if install_request.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Request already {install_request.status}")
+
+    return PackageInstallVerifyResponse(
+        confirmed=True,
+        command_name=install_request.command_name,
+        github_repo_url=install_request.github_repo_url,
+        git_tag=install_request.git_tag,
     )
 
 

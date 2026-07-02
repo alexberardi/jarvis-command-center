@@ -174,6 +174,79 @@ class TestRequestPackageInstall:
 
 
 # =============================================================================
+# Verify Endpoint: GET /nodes/{node_id}/package-install/{request_id}/verify
+# =============================================================================
+
+
+class TestVerifyPackageInstall:
+    """Tests for GET /api/v0/nodes/{node_id}/package-install/{request_id}/verify
+
+    The zero-trust gate: the node fetches the authoritative repo URL here and
+    installs from it, so a spoofed MQTT nudge with a fake request_id 404s and
+    nothing is installed.
+    """
+
+    def test_verify_returns_repo_url_for_pending_request(self, package_client, test_db):
+        node = _create_node(test_db)
+        req = _create_package_request(
+            test_db, node, command_name="weather",
+            github_repo_url="https://github.com/example/weather",
+        )
+        req.git_tag = "v2.0.0"
+        test_db.commit()
+
+        resp = package_client.get(
+            f"/api/v0/nodes/{node.node_id}/package-install/{req.id}/verify"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["confirmed"] is True
+        assert data["command_name"] == "weather"
+        assert data["github_repo_url"] == "https://github.com/example/weather"
+        assert data["git_tag"] == "v2.0.0"
+
+    def test_verify_unknown_request_id_404(self, package_client, test_db):
+        """A forged request_id has no DB row → 404, so the node installs
+        nothing. This is the fix for the unauthenticated-MQTT install path."""
+        node = _create_node(test_db)
+
+        resp = package_client.get(
+            f"/api/v0/nodes/{node.node_id}/package-install/{uuid.uuid4()}/verify"
+        )
+        assert resp.status_code == 404
+
+    def test_verify_request_for_other_node_404(self, package_client, test_db):
+        """A request row belonging to a different node is not verifiable under
+        this node's path."""
+        node_a = _create_node(test_db, household_id="hh-a")
+        node_b = _create_node(test_db, household_id="hh-b")
+        req = _create_package_request(test_db, node_b)
+
+        resp = package_client.get(
+            f"/api/v0/nodes/{node_a.node_id}/package-install/{req.id}/verify"
+        )
+        assert resp.status_code == 404
+
+    def test_verify_expired_request_410(self, package_client, test_db):
+        node = _create_node(test_db)
+        req = _create_package_request(test_db, node, expired=True)
+
+        resp = package_client.get(
+            f"/api/v0/nodes/{node.node_id}/package-install/{req.id}/verify"
+        )
+        assert resp.status_code == 410
+
+    def test_verify_non_pending_request_409(self, package_client, test_db):
+        node = _create_node(test_db)
+        req = _create_package_request(test_db, node, status="completed")
+
+        resp = package_client.get(
+            f"/api/v0/nodes/{node.node_id}/package-install/{req.id}/verify"
+        )
+        assert resp.status_code == 409
+
+
+# =============================================================================
 # Results Endpoint: POST /nodes/{node_id}/package-install/{request_id}/results
 # =============================================================================
 
