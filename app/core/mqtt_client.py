@@ -36,6 +36,20 @@ def get_mqtt_broker_url() -> Optional[str]:
     return os.getenv("JARVIS_MQTT_BROKER_URL", "mqtt://localhost:1883")
 
 
+def get_mqtt_credentials() -> tuple[Optional[str], Optional[str]]:
+    """Shared MQTT broker credentials ``(username, password)`` from env.
+
+    Returns ``(None, None)`` when unset — the transition state, where the broker
+    still allows anonymous connections so nothing breaks before every client has
+    adopted the credential. Once broker auth is enabled, ``MQTT_USERNAME`` /
+    ``MQTT_PASSWORD`` are injected (same values the broker's password file holds),
+    and this same credential is served to nodes via /api/v0/node/mqtt-credentials.
+    """
+    username = os.getenv("MQTT_USERNAME") or None
+    password = os.getenv("MQTT_PASSWORD") or None
+    return username, password
+
+
 def parse_mqtt_url(url: str) -> tuple[str, int, str]:
     """
     Parse MQTT URL into host, port, and transport.
@@ -97,6 +111,13 @@ class MQTTClient:
         if self._use_tls:
             import ssl
             self.client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+
+        # Authenticate to the broker when a shared credential is configured.
+        # Unset → connect anonymously (transition state; the broker still allows it).
+        username, password = get_mqtt_credentials()
+        if username:
+            self.client.username_pw_set(username, password)
+            logger.info("🔐 MQTT client using broker credentials (user=%s)", username)
 
         # Set up callbacks
         self.client.on_connect = self._on_connect
