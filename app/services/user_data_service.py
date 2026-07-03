@@ -13,7 +13,13 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app.models import AuthSession, ConversationTranscript, Setting, UserMemory
+from app.models import (
+    AuthSession,
+    ConversationTranscript,
+    RequestTrace,
+    Setting,
+    UserMemory,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -21,8 +27,9 @@ logger = logging.getLogger("uvicorn")
 def purge_user_data(db: Session, user_id: int) -> dict[str, int]:
     """Delete all command-center rows keyed to ``user_id``.
 
-    Removes the user's memories, conversation transcripts, user-scoped settings,
-    and OAuth auth-sessions (whose ``user_id`` owns the user-scoped tokens). House-
+    Removes the user's memories, conversation transcripts, request traces (which
+    hold the raw spoken utterance in ``user_command``), user-scoped settings, and
+    OAuth auth-sessions (whose ``user_id`` owns the user-scoped tokens). House-
     hold-wide and node-scoped rows (``user_id IS NULL``) are deliberately left
     untouched.
 
@@ -30,7 +37,26 @@ def purge_user_data(db: Session, user_id: int) -> dict[str, int]:
     Returns a per-table count of deleted rows (useful for logging / assertions).
     """
     try:
+        # request_traces has no user_id column — only conversation_id — so map the
+        # user to their conversations via transcripts BEFORE those are deleted, and
+        # purge every trace for those conversations (that's where the raw utterance
+        # lives). A conversation is a single wake session by one speaker, so this
+        # doesn't reach across users.
+        convo_ids = [
+            row[0]
+            for row in db.query(ConversationTranscript.conversation_id)
+            .filter(ConversationTranscript.user_id == user_id)
+            .distinct()
+            .all()
+        ]
         counts = {
+            "request_traces": (
+                db.query(RequestTrace)
+                .filter(RequestTrace.conversation_id.in_(convo_ids))
+                .delete(synchronize_session=False)
+                if convo_ids
+                else 0
+            ),
             "user_memories": (
                 db.query(UserMemory)
                 .filter(UserMemory.user_id == user_id)
