@@ -248,6 +248,22 @@ class WhisperClient:
             response.raise_for_status()
             return response.json()
 
+    async def delete_all_voice_profiles(
+        self,
+        user_id: int,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """Delete a user's voice profiles across ALL households (account deletion).
+
+        Hits the household-agnostic endpoint, so no household_id is sent — the
+        whisper side purges every profile belonging to the user.
+        """
+        url = f"{self.base_url.rstrip('/')}/voice-profiles/user/{user_id}"
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.delete(url, headers=self._build_headers())
+            response.raise_for_status()
+            return response.json()
+
     async def list_voice_profiles(
         self,
         timeout: float = 10.0,
