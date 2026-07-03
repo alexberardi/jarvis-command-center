@@ -42,6 +42,18 @@ GO2RTC_BASE_URL: str = os.getenv("GO2RTC_URL", "http://jarvis-go2rtc:1984")
 
 # Track active streams: device_id → stream_name
 _active_streams: dict[str, str] = {}
+# stream_name -> owning household_id. The HLS proxy authorizes against this,
+# NOT the global _active_streams set (which is not a tenant boundary).
+_stream_households: dict[str, str] = {}
+
+# The HLS proxy forwards {path} to go2rtc; restrict it to media files so it
+# cannot be pivoted to go2rtc control endpoints like /api/config (which would
+# disclose every household's camera/OAuth credentials).
+_ALLOWED_STREAM_SUFFIXES = (".m3u8", ".ts", ".mp4", ".m4s", ".aac", ".vtt", ".key")
+
+
+def _is_allowed_stream_path(path: str) -> bool:
+    return ".." not in path and path.lower().endswith(_ALLOWED_STREAM_SUFFIXES)
 
 # Temp directory for MQTT credential responses (shared with smart_home.py pattern)
 _CREDS_DIR: str = os.path.join(tempfile.gettempdir(), "jarvis-device-control")
@@ -286,6 +298,7 @@ async def start_camera_stream(
         raise HTTPException(status_code=503, detail="Camera streaming service not available")
 
     _active_streams[device_id] = stream_name
+    _stream_households[stream_name] = household_id
 
     # Return proxied HLS URL (relative to CC)
     hls_url: str = f"/api/v0/cameras/stream/{stream_name}/stream.m3u8"
@@ -317,6 +330,7 @@ async def stop_camera_stream(
     stream_name: str | None = _active_streams.pop(device_id, None)
     if not stream_name:
         return {"status": "not_streaming"}
+    _stream_households.pop(stream_name, None)
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -340,6 +354,14 @@ async def proxy_stream(
 ) -> StreamingResponse:
     """Proxy HLS/MP4 streams from go2rtc. JWT-authenticated."""
     if stream_name not in _active_streams.values():
+        raise HTTPException(status_code=404, detail="Stream not found")
+
+    # Only a member of the stream's owning household may proxy it (admin
+    # bypasses). Resolving from _stream_households, never a client field.
+    require_household_access(_stream_households.get(stream_name), auth)
+
+    # Never let the proxied path reach a go2rtc control endpoint (/api/config).
+    if not _is_allowed_stream_path(path):
         raise HTTPException(status_code=404, detail="Stream not found")
 
     query_params: dict[str, str] = dict(request.query_params)
