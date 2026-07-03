@@ -299,8 +299,12 @@ def verify_household_role(
     Raises HTTPException(403) if the user lacks permission.
     """
     if not JARVIS_APP_KEY:
-        logger.warning("JARVIS_APP_KEY not set — skipping household role check")
-        return
+        # Fail CLOSED: with no app credential we cannot verify the caller's role
+        # against jarvis-auth, so we must deny rather than silently grant it.
+        # (Node validation already hard-requires JARVIS_APP_KEY, so an unset key
+        # means the deploy is misconfigured — not a state where access is safe.)
+        logger.error("JARVIS_APP_KEY not set — denying household role check (fail-closed)")
+        raise HTTPException(status_code=503, detail="Household role verification unavailable")
 
     auth_url = _get_auth_base_url().rstrip("/")
     try:
@@ -342,8 +346,11 @@ def resolve_household_role(user_id: int, household_id: str) -> str:
     where MEMBER sees own-only and POWER_USER+ sees own + household-wide).
     """
     if not JARVIS_APP_KEY:
-        logger.warning("JARVIS_APP_KEY not set — defaulting role to 'member'")
-        return "member"
+        # Fail CLOSED: defaulting to 'member' would silently grant member-level
+        # access (e.g. own-memory CRUD) to a caller we can't actually verify.
+        # Deny instead — an unset key means the deploy is misconfigured.
+        logger.error("JARVIS_APP_KEY not set — denying household role lookup (fail-closed)")
+        raise HTTPException(status_code=503, detail="Household role verification unavailable")
 
     auth_url = _get_auth_base_url().rstrip("/")
     try:
