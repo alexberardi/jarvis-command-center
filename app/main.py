@@ -525,6 +525,10 @@ app.include_router(package_install.router, prefix="/api/v0", tags=["package-inst
 from app.api import test_install
 app.include_router(test_install.router, prefix="/api/v0", tags=["test-install"])
 
+# Node MQTT credential handout (node X-API-Key) — broker-auth transition.
+from app.api import node_mqtt
+app.include_router(node_mqtt.router, prefix="/api/v0", tags=["node-mqtt"])
+
 # Include memory CRUD router
 from app.api import memories
 app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
