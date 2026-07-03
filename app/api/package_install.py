@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.db import get_session_local
 from app.deps import get_db, verify_api_key
 from app.models import Node, PackageInstallRequest, PromptProviderInstallRequest
-from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext
+from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext, require_household_access
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
@@ -109,6 +109,10 @@ def request_package_install(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    # A JWT caller may only act on a node in their own household (admin key
+    # bypasses). Household is resolved from the node row, never the caller.
+    require_household_access(node.household_id, auth)
 
     now = datetime.utcnow()
     install_request = PackageInstallRequest(
@@ -253,6 +257,8 @@ def poll_package_install(
     if not install_request:
         raise HTTPException(status_code=404, detail="Install request not found")
 
+    require_household_access(install_request.household_id, auth)
+
     now = datetime.utcnow()
 
     # Check expiration (restarting is non-terminal, treated like pending)
@@ -325,6 +331,10 @@ def request_package_uninstall(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    # A JWT caller may only act on a node in their own household (admin key
+    # bypasses). Household is resolved from the node row, never the caller.
+    require_household_access(node.household_id, auth)
 
     now = datetime.utcnow()
     uninstall_request = PackageInstallRequest(
@@ -422,6 +432,8 @@ def poll_package_uninstall(
     if not request:
         raise HTTPException(status_code=404, detail="Uninstall request not found")
 
+    require_household_access(request.household_id, auth)
+
     now = datetime.utcnow()
     if (
         request.status in ("pending", "restarting")
@@ -500,6 +512,10 @@ def request_package_revert(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    # A JWT caller may only act on a node in their own household (admin key
+    # bypasses). Household is resolved from the node row, never the caller.
+    require_household_access(node.household_id, auth)
 
     now = datetime.utcnow()
     revert_request = PackageInstallRequest(
@@ -596,6 +612,8 @@ def poll_package_revert(
     ).first()
     if not request:
         raise HTTPException(status_code=404, detail="Revert request not found")
+
+    require_household_access(request.household_id, auth)
 
     now = datetime.utcnow()
     if (
