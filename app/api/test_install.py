@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.core.service_config import get_pantry_url
 from app.deps import get_db, verify_api_key
 from app.models import Node, TestInstallRequest
-from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext
+from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext, require_household_access
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
@@ -85,6 +85,8 @@ def request_test_install(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    require_household_access(node.household_id, auth)
 
     share_code = body.share_code.strip().upper()
     if not share_code or len(share_code) != 6:
