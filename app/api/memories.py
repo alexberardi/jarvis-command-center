@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.deps import _get_auth_base_url, get_db, verify_api_key
 from app.models import UserMemory
-from app.provisioning import ProvisioningAuthContext, verify_provisioning_auth
+from app.provisioning import ProvisioningAuthContext, verify_provisioning_auth, require_household_access
 from app.services.memory_service import MemoryService
 
 logger = logging.getLogger("uvicorn")
@@ -77,6 +77,10 @@ def list_memories(
     db: Session = Depends(get_db),
 ) -> list[MemoryResponse]:
     """List active memories for a user in a household."""
+    # A JWT caller may only read memories in a household they belong to
+    # (admin-key bypasses). household_id is caller-supplied, so it is checked
+    # against membership rather than trusted.
+    require_household_access(household_id, auth)
     service = MemoryService(db)
     categories = [category] if category else None
     memories = service.get_active_memories(
@@ -96,6 +100,7 @@ def create_memory(
     db: Session = Depends(get_db),
 ) -> MemoryResponse:
     """Create a new memory (upserts if key matches an existing one)."""
+    require_household_access(household_id, auth)
     service = MemoryService(db)
     memory = service.save_memory(
         user_id=user_id,
@@ -119,6 +124,8 @@ def get_memory(
     memory = db.query(UserMemory).filter(UserMemory.id == memory_id).first()
     if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
+
+    require_household_access(memory.household_id, auth)
     return MemoryResponse.model_validate(memory)
 
 
@@ -133,6 +140,8 @@ def update_memory(
     memory = db.query(UserMemory).filter(UserMemory.id == memory_id).first()
     if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
+
+    require_household_access(memory.household_id, auth)
 
     data = body.model_dump(exclude_unset=True)
     for field, value in data.items():
@@ -154,6 +163,8 @@ def delete_memory(
     memory = db.query(UserMemory).filter(UserMemory.id == memory_id).first()
     if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
+
+    require_household_access(memory.household_id, auth)
 
     memory.is_active = False
     memory.updated_at = datetime.utcnow()
