@@ -8,15 +8,19 @@ This module tests the settings request/snapshot flow:
 4. Node uploads encrypted snapshot
 5. Mobile polls and retrieves snapshot
 """
+import json
+import os
 import pytest
 import uuid
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models import Base, Node, SettingsRequest, SettingsSnapshot
-from app.deps import AuthenticatedUser, get_db, verify_user_jwt
+from app.deps import AuthenticatedUser, get_db, verify_user_jwt, verify_api_key
+from app.node_settings import _K2_PENDING_DIR, _K2_RESULT_DIR
 
 
 @pytest.fixture
@@ -554,3 +558,116 @@ class TestMQTTPublishing:
         )
         # Request should still be created
         assert response.status_code == 201
+
+
+# =============================================================================
+# K2 provisioning — nudge + authenticated pull (zero-trust)
+# =============================================================================
+
+_K2_NODE_ID = "test-k2-node"
+
+
+@pytest.fixture
+def k2_node_client(test_db):
+    """Client authenticated as a node (X-API-Key) for the K2 pull endpoint.
+
+    Overrides verify_api_key to return a context whose node.node_id matches
+    _K2_NODE_ID, so the endpoint's node-identity check passes.
+    """
+    def override_get_db():
+        try:
+            yield test_db
+        finally:
+            pass
+
+    def override_api_key():
+        return SimpleNamespace(node=SimpleNamespace(node_id=_K2_NODE_ID))
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_api_key] = override_api_key
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        app.dependency_overrides.clear()
+
+
+def _write_pending_k2(request_id, node_id=_K2_NODE_ID, k2="dGVzdGtleQ", kid="kid-1"):
+    os.makedirs(_K2_PENDING_DIR, exist_ok=True)
+    path = os.path.join(_K2_PENDING_DIR, f"{request_id}.json")
+    with open(path, "w") as f:
+        json.dump({"node_id": node_id, "k2": k2, "kid": kid,
+                   "created_at": "2026-07-02T00:00:00"}, f)
+    return path
+
+
+class TestProvisionK2PublishesNudgeOnly:
+    """The key must NOT be broadcast on the (anonymous) MQTT broker anymore."""
+
+    @patch("app.node_settings.get_mqtt_client")
+    def test_publish_payload_contains_no_key_material(self, mock_get_client, jwt_client, test_node):
+        published = {}
+
+        def fake_publish(topic, payload):
+            data = json.loads(payload)
+            published["topic"] = topic
+            published["payload"] = data
+            # Simulate the node acking so provision_k2 returns immediately.
+            with open(os.path.join(_K2_RESULT_DIR, f"{data['request_id']}.json"), "w") as f:
+                json.dump({"success": True}, f)
+
+        client = MagicMock()
+        client.publish.side_effect = fake_publish
+        mock_get_client.return_value = client
+
+        resp = jwt_client.post(
+            f"/api/v0/nodes/{test_node.node_id}/k2",
+            json={"k2": "dGVzdGtleQ", "kid": "kid-1", "created_at": "2026-07-02T00:00:00"},
+        )
+
+        assert resp.status_code == 200
+        # The broadcast nudge carries ONLY request_id — no key, no kid.
+        assert set(published["payload"].keys()) == {"request_id"}
+
+
+class TestFetchK2Provision:
+    """GET /nodes/{node_id}/k2/provision/{request_id} — the authenticated pull."""
+
+    def test_returns_key_and_is_one_time(self, k2_node_client):
+        rid = str(uuid.uuid4())
+        path = _write_pending_k2(rid)
+
+        resp = k2_node_client.get(f"/api/v0/nodes/{_K2_NODE_ID}/k2/provision/{rid}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["k2"] == "dGVzdGtleQ"
+        assert data["kid"] == "kid-1"
+        # one-time read: the pending file is deleted
+        assert not os.path.exists(path)
+        # a second pull 404s
+        assert k2_node_client.get(
+            f"/api/v0/nodes/{_K2_NODE_ID}/k2/provision/{rid}"
+        ).status_code == 404
+
+    def test_unknown_request_id_404(self, k2_node_client):
+        """A forged/spoofed nudge has no pending key → 404, nothing to inject."""
+        resp = k2_node_client.get(
+            f"/api/v0/nodes/{_K2_NODE_ID}/k2/provision/{uuid.uuid4()}"
+        )
+        assert resp.status_code == 404
+
+    def test_pending_for_other_node_404(self, k2_node_client):
+        rid = str(uuid.uuid4())
+        path = _write_pending_k2(rid, node_id="some-other-node")
+
+        resp = k2_node_client.get(f"/api/v0/nodes/{_K2_NODE_ID}/k2/provision/{rid}")
+        assert resp.status_code == 404
+        # still consumed so it can't be pulled later
+        assert not os.path.exists(path)
+
+    def test_node_identity_mismatch_403(self, k2_node_client):
+        rid = str(uuid.uuid4())
+        _write_pending_k2(rid)
+        # authenticated as _K2_NODE_ID but requesting another node's path
+        resp = k2_node_client.get(f"/api/v0/nodes/other-node/k2/provision/{rid}")
+        assert resp.status_code == 403
