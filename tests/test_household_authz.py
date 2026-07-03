@@ -243,3 +243,26 @@ class TestTestInstallHouseholdAuth:
         )
 
         assert resp.status_code == 403
+
+
+class TestHouseholdRoleFailsClosedWithoutAppKey:
+    """Without JARVIS_APP_KEY the CC cannot verify a caller's household role
+    against jarvis-auth. It must DENY (fail-closed), not silently grant — node
+    validation already hard-requires the key, so an unset key is a misconfigured
+    deploy, never a safe-to-allow state."""
+
+    def test_verify_household_role_denies_when_app_key_unset(self):
+        from app.deps import verify_household_role
+
+        with patch("app.deps.JARVIS_APP_KEY", ""):
+            with pytest.raises(HTTPException) as exc:
+                verify_household_role(user_id=1, household_id="hh-owner")
+        assert exc.value.status_code == 503
+
+    def test_resolve_household_role_denies_when_app_key_unset(self):
+        from app.deps import resolve_household_role
+
+        with patch("app.deps.JARVIS_APP_KEY", ""):
+            with pytest.raises(HTTPException) as exc:
+                resolve_household_role(user_id=1, household_id="hh-owner")
+        assert exc.value.status_code == 503
