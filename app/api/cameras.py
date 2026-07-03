@@ -19,7 +19,7 @@ import os
 import tempfile
 import time
 from urllib.parse import urlencode
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -27,7 +27,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.context_providers.node_context_provider import NodeContextProvider
+from app.deps import get_db, verify_api_key
 from app.models import Device, Node
 from app.provisioning import (
     ProvisioningAuthContext,
@@ -311,8 +312,20 @@ async def start_camera_stream(
 def post_camera_credentials_result(
     request_id: str,
     body: dict,
+    _node: NodeContextProvider = Depends(verify_api_key),
 ) -> dict:
-    """Node POSTs camera credentials back to CC (MQTT callback)."""
+    """Node POSTs camera credentials back to CC (MQTT callback).
+
+    Node-authenticated (X-API-Key): an unauthenticated caller must not be able to
+    poison the credentials a node fetch is waiting on. `request_id` must be the
+    UUID CC issued — validating it also stops a crafted id from path-traversing
+    the creds filename into an arbitrary-file write.
+    """
+    try:
+        UUID(str(request_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid request_id")
+
     result_file: str = os.path.join(_CREDS_DIR, f"creds-{request_id}.json")
     with open(result_file, "w") as f:
         json.dump(body, f)
