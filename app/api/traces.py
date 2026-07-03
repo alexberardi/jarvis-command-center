@@ -12,12 +12,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, verify_user_jwt, AuthenticatedUser
+from app.deps import get_db, verify_admin_key, verify_user_jwt, AuthenticatedUser
 from app.models import RequestTrace
 
 logger = logging.getLogger("uvicorn")
 
-admin_router = APIRouter()
+# Admin trace endpoints expose every household's raw conversation text, so the
+# whole router requires the admin token (the X-Api-Key the admin dashboard
+# already sends). Without this the router was unauthenticated.
+admin_router = APIRouter(dependencies=[Depends(verify_admin_key)])
 mobile_router = APIRouter()
 
 
