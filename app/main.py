@@ -720,8 +720,16 @@ async def start_conversation(
             if "recently_shown_items" in request.node_context:
                 node_context["recently_shown_items"] = request.node_context["recently_shown_items"]
 
-            # Extract speaker identity from voice recognition
-            speaker_user_id = request.node_context.get("speaker_user_id")
+            # Extract speaker identity from voice recognition. The node asserts
+            # this from on-device voice ID; only honor a speaker who is a member
+            # of THIS node's validated household so a node can't scope memories /
+            # transcripts to an arbitrary user (intra-household IDOR).
+            from app.core.utils.speaker_membership import validated_speaker_user_id
+            speaker_user_id = validated_speaker_user_id(
+                request.node_context.get("speaker_user_id"),
+                node_context_provider.household_member_ids,
+                node_context_provider.node.node_id,
+            )
             speaker_confidence = request.node_context.get("speaker_confidence")
             node_id_for_stickiness = node_context_provider.node.node_id
 
@@ -1040,6 +1048,15 @@ async def handle_voice_stream(
             detail="Conversation not initialized for tool-based flow",
         )
 
+    # The per-utterance speaker id is client-asserted; only honor a member of
+    # this node's validated household (see conversation/start for rationale).
+    from app.core.utils.speaker_membership import validated_speaker_user_id
+    speaker_user_id = validated_speaker_user_id(
+        request.speaker_user_id,
+        node_context_provider.household_member_ids,
+        node_context_provider.node.node_id,
+    )
+
     try:
         from app.core.clients.tts_client import TTSClient
 
@@ -1056,7 +1073,7 @@ async def handle_voice_stream(
             conversation_id=request.conversation_id,
             voice_command=request.voice_command,
             tts_client=tts_client,
-            speaker_user_id=request.speaker_user_id,
+            speaker_user_id=speaker_user_id,
             pre_wake_speech_seconds=request.pre_wake_speech_seconds,
         )
         if streaming_audio is not None:
@@ -1091,7 +1108,7 @@ async def handle_voice_stream(
             conversation_id=request.conversation_id,
             voice_command=request.voice_command,
             tts_client=tts_client,
-            speaker_user_id=request.speaker_user_id,
+            speaker_user_id=speaker_user_id,
             pre_wake_speech_seconds=request.pre_wake_speech_seconds,
         )
         if streaming_audio is not None:
@@ -1121,7 +1138,7 @@ async def handle_voice_stream(
             result = await model_service.process_voice_command_with_tools(
                 voice_command=request.voice_command,
                 conversation_id=request.conversation_id,
-                speaker_user_id=request.speaker_user_id,
+                speaker_user_id=speaker_user_id,
                 pre_wake_speech_seconds=request.pre_wake_speech_seconds,
             )
 
