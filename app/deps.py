@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import secrets
 import time
 from dataclasses import dataclass
 
@@ -165,7 +166,10 @@ def verify_api_key(x_api_key: str = Header(...), db: Session = Depends(get_db)):
     return NodeContextProvider(node)
 
 def verify_admin_key(x_api_key: str = Header(...)):
-    if x_api_key != ADMIN_API_KEY:
+    # Constant-time compare so the admin token isn't leakable byte-by-byte via
+    # response timing. An unset ADMIN_API_KEY stays fail-closed (rejects all).
+    expected = ADMIN_API_KEY or ""
+    if not expected or not secrets.compare_digest(x_api_key, expected):
         logger.warning("Unauthorized admin access attempt with API key: %s", x_api_key[:8] + "...")
         raise HTTPException(status_code=401, detail="Invalid Admin API Key")
 
