@@ -16,7 +16,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
-from ..deps import get_db, verify_admin_key, verify_user_jwt
+from ..deps import (
+    AuthenticatedUser,
+    get_db,
+    verify_admin_key,
+    verify_household_role,
+    verify_user_jwt,
+)
 from ..models import Node, NodeTask
 from ..services.github_releases import latest_release, resolve_target_version
 
@@ -51,6 +57,15 @@ class LatestReleaseResponse(BaseModel):
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
+
+def _require_node_household(db: Session, node_id: str, user: AuthenticatedUser) -> None:
+    """A JWT user may only touch a node/task in their own household."""
+    node = db.query(Node).filter(Node.node_id == node_id).first()
+    if not node:
+        raise HTTPException(404, "Node not found")
+    if node.household_id:
+        verify_household_role(user.user_id, node.household_id, required_role="member")
+
 
 def _dependent_task(db: Session, node_id: str) -> NodeTask | None:
     """Return an open update task for this node, if any.
@@ -98,11 +113,14 @@ def request_node_update(
     node_id: str,
     body: UpdateNodeRequest | None = None,
     db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
 ):
     """Queue an update for a node. Node picks it up on its next heartbeat."""
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(404, "Node not found")
+    if node.household_id:
+        verify_household_role(user.user_id, node.household_id, required_role="member")
 
     existing = _dependent_task(db, node_id)
     if existing is not None:
@@ -145,10 +163,15 @@ def request_node_update(
     response_model=NodeTaskResponse,
     dependencies=[Depends(verify_user_jwt)],
 )
-def get_task(task_id: str, db: Session = Depends(get_db)):
+def get_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+):
     task = db.query(NodeTask).filter(NodeTask.id == task_id).first()
     if not task:
         raise HTTPException(404, "Task not found")
+    _require_node_household(db, task.node_id, user)
     return task
 
 
@@ -161,6 +184,7 @@ def cancel_node_task(
     node_id: str,
     task_id: str,
     db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
 ):
     """Manually cancel an open node task.
 
@@ -176,6 +200,7 @@ def cancel_node_task(
     )
     if not task:
         raise HTTPException(404, "Task not found")
+    _require_node_household(db, node_id, user)
     if task.state in ("success", "failed"):
         raise HTTPException(409, f"Task is already {task.state}")
     task.state = "failed"
@@ -196,11 +221,14 @@ def list_node_tasks(
     node_id: str,
     limit: int = 20,
     db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
 ):
     """Most recent tasks for a node. Used by the mobile Update History view."""
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(404, "Node not found")
+    if node.household_id:
+        verify_household_role(user.user_id, node.household_id, required_role="member")
 
     limit = max(1, min(limit, 100))
     rows = (

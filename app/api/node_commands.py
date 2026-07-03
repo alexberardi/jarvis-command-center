@@ -12,12 +12,34 @@ import tempfile
 import time
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from app.context_providers.node_context_provider import NodeContextProvider
-from app.deps import AuthenticatedUser, verify_admin_key, verify_api_key, verify_user_jwt
+from app.deps import (
+    AuthenticatedUser,
+    get_db,
+    verify_admin_key,
+    verify_api_key,
+    verify_household_role,
+    verify_user_jwt,
+)
+from app.models import Node
 from app.services.node_command_service import get_node_command_service
+
+
+def _require_node_household(db: Session, node_id: str, user: AuthenticatedUser) -> None:
+    """A JWT user may only command a node in their own household.
+
+    Resolves the household from the node row (never a client field) and defers
+    to jarvis-auth. Raises 404 for an unknown node, 403 for a non-member.
+    """
+    node = db.query(Node).filter(Node.node_id == node_id).first()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+    if node.household_id:
+        verify_household_role(user.user_id, node.household_id, required_role="member")
 
 logger = logging.getLogger("uvicorn")
 
@@ -62,6 +84,7 @@ def send_node_action(
     node_id: str,
     body: ActionRequest,
     user: AuthenticatedUser = Depends(verify_user_jwt),
+    db: Session = Depends(get_db),
 ) -> ActionResponse:
     """Forward a user action (e.g. Send/Cancel button tap) to a node via MQTT.
 
@@ -72,6 +95,8 @@ def send_node_action(
     Waits up to 10s for the node to POST its result back, then returns
     success/failure to the caller.
     """
+    _require_node_household(db, node_id, user)
+
     service = get_node_command_service()
     request_id = service.publish_command(node_id, "action", {
         "command_name": body.command_name,
@@ -136,6 +161,7 @@ def update_node_config(
     node_id: str,
     body: NodeConfigUpdateRequest,
     user: AuthenticatedUser = Depends(verify_user_jwt),
+    db: Session = Depends(get_db),
 ) -> SendCommandResponse:
     """Update a node's config.json from the mobile app (JWT auth).
 
@@ -143,6 +169,8 @@ def update_node_config(
     into its config.json. If restart=True (default), the node restarts
     its service after applying so module-level settings take effect.
     """
+    _require_node_household(db, node_id, user)
+
     service = get_node_command_service()
     request_id = service.publish_command(
         node_id,
@@ -166,6 +194,7 @@ def preview_led_pattern(
     node_id: str,
     body: LedPreviewRequest,
     user: AuthenticatedUser = Depends(verify_user_jwt),
+    db: Session = Depends(get_db),
 ) -> SendCommandResponse:
     """Preview an LED pattern on the node, then auto-revert (JWT auth).
 
@@ -179,6 +208,8 @@ def preview_led_pattern(
     tapping any LED-state chip even though brightness/toggle worked
     (those went through the existing update_node_config route).
     """
+    _require_node_household(db, node_id, user)
+
     service = get_node_command_service()
     request_id = service.publish_command(
         node_id,
