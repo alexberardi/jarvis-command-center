@@ -195,14 +195,29 @@ def report_task_status(
     ):
         # One 404 for all three: don't leak other nodes' task IDs.
         raise HTTPException(404, "Task not found")
-    if task.state in ("success", "failed"):
-        raise HTTPException(409, f"Task is already {task.state}")
-    task.state = "failed"
-    task.error_message = (body.error_message or "Failed (reported by node)")[:1000]
-    task.finished_at = datetime.utcnow()
-    task.updated_at = datetime.utcnow()
+    # Conditional UPDATE, not check-then-write: this can race the 2-min
+    # sweeper and the user-cancel endpoint, and a terminal state must never
+    # be clobbered ("Cancelled by user" beats a late refusal report).
+    updated = (
+        db.query(NodeTask)
+        .filter(
+            NodeTask.id == task_id,
+            NodeTask.state.notin_(("success", "failed")),
+        )
+        .update(
+            {
+                "state": "failed",
+                "error_message": (body.error_message or "Failed (reported by node)")[:1000],
+                "finished_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+    )
     db.commit()
     db.refresh(task)
+    if updated == 0:
+        raise HTTPException(409, f"Task is already {task.state}")
     return task
 
 
