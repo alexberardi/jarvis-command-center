@@ -10,16 +10,18 @@ reports its new version.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
+from ..context_providers.node_context_provider import NodeContextProvider
 from ..deps import (
     AuthenticatedUser,
     get_db,
     verify_admin_key,
+    verify_api_key,
     verify_household_role,
     verify_user_jwt,
 )
@@ -54,6 +56,14 @@ class LatestReleaseResponse(BaseModel):
     tag: str
     version: str
     published_at: str | None
+
+
+class NodeTaskStatusRequest(BaseModel):
+    # Nodes may only report terminal FAILURE (e.g. the allow_updates consent
+    # gate refused the task). Success stays inferred from the post-upgrade
+    # heartbeat version — a node must not be able to fake a completed update.
+    state: Literal["failed"]
+    error_message: str | None = None
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -153,6 +163,44 @@ def request_node_update(
         state="pending",
     )
     db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+@router.post(
+    "/nodes/tasks/{task_id}/status",
+    response_model=NodeTaskResponse,
+)
+def report_task_status(
+    task_id: str,
+    body: NodeTaskStatusRequest,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+    db: Session = Depends(get_db),
+):
+    """Node-reported terminal task status.
+
+    Lets a node surface WHY a task ended — e.g. the ``allow_updates``
+    consent gate refused it — instead of leaving the task to die as a
+    sweeper timeout with a misleading "Timeout: no heartbeat" message
+    (Jul-2026 prod). A node may only fail its OWN update tasks, and
+    terminal tasks are immutable (a late refusal must not overwrite
+    "Cancelled by user").
+    """
+    task = db.query(NodeTask).filter(NodeTask.id == task_id).first()
+    if (
+        not task
+        or task.node_id != node_context.node.node_id
+        or task.kind != "update"
+    ):
+        # One 404 for all three: don't leak other nodes' task IDs.
+        raise HTTPException(404, "Task not found")
+    if task.state in ("success", "failed"):
+        raise HTTPException(409, f"Task is already {task.state}")
+    task.state = "failed"
+    task.error_message = (body.error_message or "Failed (reported by node)")[:1000]
+    task.finished_at = datetime.utcnow()
+    task.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(task)
     return task
