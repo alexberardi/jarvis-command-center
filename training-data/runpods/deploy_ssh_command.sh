@@ -2,7 +2,7 @@
 
 # RunPods Deployment Script that accepts full SSH command
 # Usage: ./deploy_ssh_command.sh "ssh root@host -p port -i keypath"
-# Example: ./deploy_ssh_command.sh "ssh root@194.68.245.27 -p 22129 -i ~/.ssh/id_ed25519"
+# Example: ./deploy_ssh_command.sh "ssh root@203.0.113.10 -p 22000 -i ~/.ssh/id_ed25519"
 
 set -e
 
@@ -25,11 +25,11 @@ print_usage() {
     echo "Usage: $0 \"ssh user@host -p port -i keypath\""
     echo ""
     echo "Examples:"
-    echo "  $0 \"ssh root@194.68.245.27 -p 22129 -i ~/.ssh/id_ed25519\""
+    echo "  $0 \"ssh root@203.0.113.10 -p 22000 -i ~/.ssh/id_ed25519\""
     echo "  $0 \"ssh ubuntu@1.2.3.4 -p 22 -i ~/.ssh/my_key\""
     echo ""
     echo "Or use the individual arguments version:"
-    echo "  ./deploy_to_runpods.sh 194.68.245.27 22129 ~/.ssh/id_ed25519"
+    echo "  ./deploy_to_runpods.sh 203.0.113.10 22000 ~/.ssh/id_ed25519"
 }
 
 # Check if argument provided
