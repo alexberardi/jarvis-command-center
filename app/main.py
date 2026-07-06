@@ -28,7 +28,7 @@ from app.core.conversation_cache import conversation_cache
 from app.core.utils.latency_logger import latency_logger
 from . import admin, chat, date_context, node_settings, provisioning
 from app.api import ambient_noise, media, node_commands, test_commands
-from app.deps import verify_api_key, get_model_service
+from app.deps import verify_api_key, get_model_service, enforce_secret_security
 from app.core.model_service import ModelService
 from app.core.utils.rest_client import post  # For test mocking compatibility
 
@@ -131,6 +131,9 @@ async def startup_event():
     """Initialize services on app startup."""
     import asyncio
     from app.provisioning import cleanup_expired_tokens
+
+    # Warn (dev) or refuse to boot (production) on placeholder/weak secrets.
+    enforce_secret_security(logger)
 
     # Initialize service discovery first
     _setup_service_config()
