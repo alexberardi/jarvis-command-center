@@ -1,8 +1,8 @@
-./deploy_to_runpods.sh 194.68.245.27 22129 ~/.ssh/id_ed25519#!/bin/bash
+#!/bin/bash
 
 # RunPods Deployment Script with SSH Arguments
 # Usage: ./deploy_to_runpods.sh <host> <port> <key_path> [user]
-# Example: ./deploy_to_runpods.sh 69.30.85.113 22171 ~/.ssh/id_ed25519
+# Example: ./deploy_to_runpods.sh 203.0.113.10 22000 ~/.ssh/id_ed25519
 
 set -e
 
@@ -33,11 +33,11 @@ print_usage() {
     echo "Usage: $0 <host> <port> <key_path> [user]"
     echo ""
     echo "Examples:"
-    echo "  $0 69.30.85.113 22171 ~/.ssh/id_ed25519"
-    echo "  $0 69.30.85.113 22171 ~/.ssh/id_ed25519 root"
+    echo "  $0 203.0.113.10 22000 ~/.ssh/id_ed25519"
+    echo "  $0 203.0.113.10 22000 ~/.ssh/id_ed25519 root"
     echo ""
-    echo "Your SSH command: ssh root@69.30.85.113 -p 22171 -i ~/.ssh/id_ed25519"
-    echo "Becomes: $0 69.30.85.113 22171 ~/.ssh/id_ed25519"
+    echo "Your SSH command: ssh root@203.0.113.10 -p 22000 -i ~/.ssh/id_ed25519"
+    echo "Becomes: $0 203.0.113.10 22000 ~/.ssh/id_ed25519"
 }
 
 # Check arguments
