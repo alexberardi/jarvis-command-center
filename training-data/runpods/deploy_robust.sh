@@ -32,7 +32,7 @@ print_usage() {
     echo "Usage: $0 \"ssh user@host -p port -i keypath\""
     echo ""
     echo "Examples:"
-    echo "  $0 \"ssh root@194.68.245.27 -p 22129 -i ~/.ssh/id_ed25519\""
+    echo "  $0 \"ssh root@203.0.113.10 -p 22000 -i ~/.ssh/id_ed25519\""
     echo ""
     echo "Features:"
     echo "  - Robust file uploads with retry logic"
