@@ -9,6 +9,21 @@ across prompt providers.
 from typing import Any, Dict, List
 
 
+def device_agent_data(agents_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Device context published by whichever device agent is active.
+
+    The Home Assistant Pantry agent publishes under ``home_assistant``; the
+    built-in agent publishes under ``device_agent`` (renamed off ``home_assistant``
+    so a core agent isn't named after a third party). Both can be present at once
+    (different agent names → no override), so the HA integration takes precedence
+    when installed and the built-in is the fallback. HA-present preserves the
+    original ``get("home_assistant", {})`` behavior exactly (including empty).
+    """
+    if "home_assistant" in agents_data:
+        return agents_data.get("home_assistant") or {}
+    return agents_data.get("device_agent") or {}
+
+
 def build_tool_guidance_section(
     tools: List[Dict[str, Any]],
 ) -> str:
@@ -124,7 +139,7 @@ def build_agent_context_summary(node_context: Dict[str, Any]) -> str:
     if not agents_data:
         return ""
 
-    ha_data = agents_data.get("home_assistant", {})
+    ha_data = device_agent_data(agents_data)
     if not ha_data:
         return ""
 
@@ -226,7 +241,7 @@ def build_agent_context_by_room(node_context: Dict[str, Any]) -> str:
     if not agents_data:
         return ""
 
-    ha_data = agents_data.get("home_assistant", {})
+    ha_data = device_agent_data(agents_data)
     if not ha_data:
         return ""
 
@@ -375,7 +390,7 @@ def build_agent_context_section(node_context: Dict[str, Any]) -> str:
     if not agents_data:
         return ""
 
-    ha_data = agents_data.get("home_assistant", {})
+    ha_data = device_agent_data(agents_data)
     if not ha_data:
         return ""
 
