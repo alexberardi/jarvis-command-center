@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.core.models.jarvis_tool_model import JarvisToolModel
-from app.core.prompt_providers.shared.context_builders import build_agent_context_summary
+from app.core.prompt_providers.shared.context_builders import (
+    build_agent_context_summary,
+    device_agent_data,
+)
 from app.core.tool_call_parser import tool_call_parser
 
 logger = logging.getLogger("uvicorn")
@@ -44,7 +47,7 @@ class JarvisAdapterModel(JarvisToolModel):
         if not agents_data:
             return agent_context_section
 
-        ha_data = agents_data.get("home_assistant", {})
+        ha_data = device_agent_data(agents_data)
         if not ha_data:
             return agent_context_section
 

@@ -12,7 +12,10 @@ from typing import Any, Dict, List, Optional
 
 from app.core.interfaces.iserver_tool import IServerTool
 from app.core.conversation_cache import conversation_cache
-from app.core.prompt_providers.shared.context_builders import _format_device_line
+from app.core.prompt_providers.shared.context_builders import (
+    _format_device_line,
+    device_agent_data,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -104,9 +107,7 @@ class GetHAEntitiesTool(IServerTool):
                 "message": "No node context found for this conversation",
             }
 
-        ha_data: Dict[str, Any] = (
-            node_context.get("agents", {}).get("home_assistant", {})
-        )
+        ha_data: Dict[str, Any] = device_agent_data(node_context.get("agents", {}))
         if not ha_data:
             logger.warning("      └─ ⚠️  No HA data in node context")
             return {
