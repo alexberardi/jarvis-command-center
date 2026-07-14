@@ -16,7 +16,7 @@ import os
 import tempfile
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict
@@ -25,6 +25,11 @@ from sqlalchemy.orm import Session
 from .deps import get_db, verify_api_key, verify_user_jwt, verify_household_role, AuthenticatedUser
 from .models import Node, SettingsRequest, SettingsSnapshot
 from .context_providers.node_context_provider import NodeContextProvider
+
+if TYPE_CHECKING:
+    # Imported for annotations only; the runtime import stays inside
+    # get_mqtt_client() so a missing/unreachable broker degrades gracefully.
+    from .core.mqtt_client import MQTTClient
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
