@@ -19,7 +19,9 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: pgvector/pgvector:pg15
+    # pg16 aligns with jarvis-installer (source of truth). Major bump is not
+    # in-place data-compatible; see docs/postgres-pg15-to-pg16-migration.md.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: jarvis_command_center
       POSTGRES_USER: jarvis_user
