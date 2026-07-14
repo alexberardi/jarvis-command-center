@@ -16,6 +16,7 @@ import os
 import tempfile
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -25,6 +26,9 @@ from sqlalchemy.orm import Session
 from .deps import get_db, verify_api_key, verify_user_jwt, verify_household_role, AuthenticatedUser
 from .models import Node, SettingsRequest, SettingsSnapshot
 from .context_providers.node_context_provider import NodeContextProvider
+
+if TYPE_CHECKING:
+    from app.core.mqtt_client import MQTTClient
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
