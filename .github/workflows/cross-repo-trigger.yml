@@ -34,6 +34,11 @@ on:
 
 jobs:
   dispatch:
+    # Dependabot PRs run with a SEPARATE secrets store, so the cross-repo PAT
+    # resolves to an empty string and `gh` exits 4 ("set the GH_TOKEN env
+    # variable"). The dependency bump itself is fine — the `test` job passes —
+    # so don't fail the PR on a dispatch that cannot work by design.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
