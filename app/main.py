@@ -25,6 +25,7 @@ from app.response_models.voice_command_response import VoiceCommandResponse, Voi
 from app.debug_setup import setup_debugger
 from app.core.malformed_json_extractor import MalformedJsonExtractorService
 from app.core.conversation_cache import conversation_cache
+from app.core.errors import ConversationPreconditionError
 from app.core.utils.latency_logger import latency_logger
 from . import admin, chat, date_context, node_settings, provisioning
 from app.api import ambient_noise, media, node_commands, test_commands
@@ -886,7 +887,7 @@ async def handle_voice(
         with timing.measure("cache_get_tools"):
             tools = conversation_cache.get_tools(request.conversation_id)
         if tools is None:
-            raise HTTPException(status_code=400, detail="Conversation not initialized for tool-based flow")
+            raise HTTPException(status_code=422, detail="Conversation not initialized for tool-based flow")
 
         logger.info(f"🔧 Processing as tool-based conversation")
         with timing.measure("process_voice_command_with_tools"):
@@ -969,6 +970,16 @@ async def handle_voice(
 
         return response
 
+    except HTTPException:
+        # Whole-request rejection (e.g. precondition not met) — surface the
+        # status to the client; do NOT swallow it into a 200 + errors body.
+        latency_logger.end_request(request.conversation_id)
+        raise
+    except ConversationPreconditionError as e:
+        # Un-started / expired conversation: the whole request was rejected,
+        # no command executed. Surface as 422, not 200.
+        latency_logger.end_request(request.conversation_id)
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         latency_logger.end_request(request.conversation_id)
         duration = time.time() - start_time
@@ -1789,7 +1800,13 @@ async def continue_voice_command(
         duration = time.time() - start_time
         logger.info(f"✅ Continuation processed in {duration:.2f}s, stop_reason={response.stop_reason}")
         return response
-        
+
+    except HTTPException:
+        # Whole-request rejection — surface the status, don't swallow to 200.
+        raise
+    except ConversationPreconditionError as e:
+        # Unknown / expired conversation_id: reject the whole request as 422.
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         duration = time.time() - start_time
         logger.error(f"❌ Continuation failed after {duration:.2f}s: {e}")
