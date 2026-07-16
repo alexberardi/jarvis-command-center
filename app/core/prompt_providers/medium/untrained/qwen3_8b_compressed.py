@@ -115,9 +115,18 @@ class Qwen3_8B_Compressed(Qwen25_7B_Compressed):
                 "If the user omits a date, pass [\"today\"].\n"
             )
 
+        # NOTE: tools block is placed FIRST (right after the preamble),
+        # mirroring Qwen3_14B_Compressed. Showing the available functions
+        # before the call-format spec / rules materially improves tool
+        # selection + format adherence on these Qwen3 models — burying
+        # <tools> at the end (the old 8B layout) left the model deciding
+        # what to call before it had seen what was available.
         system_prompt: str = f"""{identity}
 
 You are a function calling AI model. You may call one or more functions to assist with the user query. Always include all required parameters — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
+
+You are provided with function signatures within <tools></tools> XML tags:
+{tools_block}
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
@@ -127,8 +136,6 @@ For each function call, return a json object with function name and arguments wi
 {rules}
 {dt_keys_line}{tool_guidance_section}{direct_answer_section}
 {agent_context_section}
-You are provided with function signatures within <tools></tools> XML tags:
-{tools_block}
 """
 
         logger.info(

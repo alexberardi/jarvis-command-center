@@ -16,6 +16,7 @@ import os
 import tempfile
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -25,6 +26,9 @@ from sqlalchemy.orm import Session
 from .deps import get_db, verify_api_key, verify_user_jwt, verify_household_role, AuthenticatedUser
 from .models import Node, SettingsRequest, SettingsSnapshot
 from .context_providers.node_context_provider import NodeContextProvider
+
+if TYPE_CHECKING:
+    from app.core.mqtt_client import MQTTClient
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
@@ -436,6 +440,13 @@ class K2ProvisionRequest(BaseModel):
 _K2_RESULT_DIR = os.path.join(tempfile.gettempdir(), "jarvis-k2-provision")
 os.makedirs(_K2_RESULT_DIR, exist_ok=True)
 
+# Short-lived store for K2 key material awaiting an authenticated node pull.
+# The key lives here only for the duration of a provision_k2 call (one-time
+# read by the node, else cleaned up in the finally). It is never persisted to
+# the DB — the node pulls it over its X-API-Key channel, not via the broker.
+_K2_PENDING_DIR = os.path.join(tempfile.gettempdir(), "jarvis-k2-pending")
+os.makedirs(_K2_PENDING_DIR, exist_ok=True)
+
 
 @router.post("/nodes/{node_id}/k2")
 def provision_k2(
@@ -464,40 +475,95 @@ def provision_k2(
         raise HTTPException(status_code=503, detail="MQTT not available")
 
     request_id = str(uuid.uuid4())
-    topic = f"jarvis/nodes/{node_id}/k2/provision"
-    payload = json.dumps({
-        "k2": body.k2,
-        "kid": body.kid,
-        "created_at": body.created_at,
-        "request_id": request_id,
-    })
-    client.publish(topic, payload)
-    logger.info("K2 provision sent to node %s (kid=%s, request_id=%s)", node_id, body.kid, request_id[:8])
 
-    # Poll for ack from node
+    # Zero-trust delivery: stash the key material in a short-lived pending file
+    # and publish only a NUDGE (request_id, no key) over the anonymous MQTT
+    # broker. The node fetches the key from GET /nodes/{id}/k2/provision/{rid}
+    # over its authenticated (X-API-Key) channel, which one-time-reads and
+    # deletes the pending file. A spoofed broker nudge finds nothing to pull.
+    pending_file = os.path.join(_K2_PENDING_DIR, f"{request_id}.json")
+    with open(pending_file, "w") as f:
+        json.dump({
+            "node_id": node_id,
+            "k2": body.k2,
+            "kid": body.kid,
+            "created_at": body.created_at,
+        }, f)
+
     result_file = os.path.join(_K2_RESULT_DIR, f"{request_id}.json")
-    deadline = _time.time() + 15.0
-    while _time.time() < deadline:
-        if os.path.exists(result_file):
-            try:
-                with open(result_file) as f:
-                    result = json.load(f)
-                os.unlink(result_file)
-                if result.get("success"):
-                    logger.info("K2 provision acknowledged by node %s", node_id)
-                    return {"ok": True, "node_id": node_id, "kid": body.kid}
-                else:
-                    raise HTTPException(status_code=502, detail=result.get("error", "Node failed to store K2"))
-            except (json.JSONDecodeError, OSError):
-                pass
-        _time.sleep(0.3)
-
-    # Timeout — node didn't ack
     try:
-        os.unlink(result_file)
-    except OSError:
-        pass
-    raise HTTPException(status_code=504, detail="Node did not acknowledge K2 — it may not be online yet. Try again in a few seconds.")
+        topic = f"jarvis/nodes/{node_id}/k2/provision"
+        client.publish(topic, json.dumps({"request_id": request_id}))
+        logger.info("K2 provision nudge sent to node %s (kid=%s, request_id=%s)", node_id, body.kid, request_id[:8])
+
+        # Poll for ack from node
+        deadline = _time.time() + 15.0
+        while _time.time() < deadline:
+            if os.path.exists(result_file):
+                try:
+                    with open(result_file) as f:
+                        result = json.load(f)
+                    os.unlink(result_file)
+                    if result.get("success"):
+                        logger.info("K2 provision acknowledged by node %s", node_id)
+                        return {"ok": True, "node_id": node_id, "kid": body.kid}
+                    else:
+                        raise HTTPException(status_code=502, detail=result.get("error", "Node failed to store K2"))
+                except (json.JSONDecodeError, OSError):
+                    pass
+            _time.sleep(0.3)
+
+        # Timeout — node didn't ack
+        try:
+            os.unlink(result_file)
+        except OSError:
+            pass
+        raise HTTPException(status_code=504, detail="Node did not acknowledge K2 — it may not be online yet. Try again in a few seconds.")
+    finally:
+        # Never let key material outlive the provisioning call (the node's
+        # authenticated pull normally deletes it first).
+        try:
+            os.unlink(pending_file)
+        except OSError:
+            pass
+
+
+@router.get("/nodes/{node_id}/k2/provision/{request_id}")
+def fetch_k2_provision(
+    node_id: str,
+    request_id: str,
+    node_context=Depends(verify_api_key),
+):
+    """Node pulls the authoritative K2 key over its authenticated channel.
+
+    Zero-trust gate for K2: the MQTT k2/provision message is only a nudge; the
+    key material is delivered here — one-time, to the authenticated node it was
+    provisioned for. A spoofed nudge (no matching pending file) 404s, so an
+    attacker who can publish to the anonymous broker cannot inject a K2 key.
+    """
+    if getattr(node_context, "node", None) is None or node_context.node.node_id != node_id:
+        raise HTTPException(status_code=403, detail="Node mismatch")
+
+    pending_file = os.path.join(_K2_PENDING_DIR, f"{request_id}.json")
+    if not os.path.exists(pending_file):
+        raise HTTPException(status_code=404, detail="No pending K2 for this request")
+
+    try:
+        with open(pending_file) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        data = None
+    finally:
+        # One-time read — remove regardless so the key can't be pulled twice.
+        try:
+            os.unlink(pending_file)
+        except OSError:
+            pass
+
+    if not data or data.get("node_id") != node_id:
+        raise HTTPException(status_code=404, detail="No pending K2 for this request")
+
+    return {"k2": data["k2"], "kid": data["kid"], "created_at": data.get("created_at", "")}
 
 
 @router.post("/nodes/{node_id}/k2/ack/{request_id}")

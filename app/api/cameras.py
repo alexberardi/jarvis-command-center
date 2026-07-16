@@ -18,8 +18,7 @@ import logging
 import os
 import tempfile
 import time
-from urllib.parse import urlencode
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -27,7 +26,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.context_providers.node_context_provider import NodeContextProvider
+from app.deps import get_db, verify_api_key
 from app.models import Device, Node
 from app.provisioning import (
     ProvisioningAuthContext,
@@ -42,6 +42,18 @@ GO2RTC_BASE_URL: str = os.getenv("GO2RTC_URL", "http://jarvis-go2rtc:1984")
 
 # Track active streams: device_id → stream_name
 _active_streams: dict[str, str] = {}
+# stream_name -> owning household_id. The HLS proxy authorizes against this,
+# NOT the global _active_streams set (which is not a tenant boundary).
+_stream_households: dict[str, str] = {}
+
+# The HLS proxy forwards {path} to go2rtc; restrict it to media files so it
+# cannot be pivoted to go2rtc control endpoints like /api/config (which would
+# disclose every household's camera/OAuth credentials).
+_ALLOWED_STREAM_SUFFIXES = (".m3u8", ".ts", ".mp4", ".m4s", ".aac", ".vtt", ".key")
+
+
+def _is_allowed_stream_path(path: str) -> bool:
+    return ".." not in path and path.lower().endswith(_ALLOWED_STREAM_SUFFIXES)
 
 # Temp directory for MQTT credential responses (shared with smart_home.py pattern)
 _CREDS_DIR: str = os.path.join(tempfile.gettempdir(), "jarvis-device-control")
@@ -66,12 +78,7 @@ class CameraResponse(BaseModel):
 
 
 class StartStreamRequest(BaseModel):
-    # Legacy fields (optional for backward compat with old mobile versions)
-    refresh_token: str | None = None
-    client_id: str | None = None
-    client_secret: str | None = None
-    project_id: str | None = None
-    protocols: str = "RTSP"
+    """Empty body: the node builds the go2rtc source; CC needs no client input."""
 
 
 class StartStreamResponse(BaseModel):
@@ -85,9 +92,14 @@ class StartStreamResponse(BaseModel):
 
 
 async def _fetch_credentials_from_node(
-    household_id: str, protocol: str, db: Session,
+    household_id: str, device: Device, db: Session,
 ) -> dict[str, str]:
-    """Request camera credentials from the node via MQTT and wait for response."""
+    """Ask the node (over MQTT) to build a go2rtc stream source and wait for it.
+
+    The node's device-protocol plugin owns the source format and the choice of
+    streaming transport; CC just relays the device identity and registers
+    whatever ``stream_source`` string comes back.
+    """
     from app.services.settings_service import get_settings_service
 
     settings = get_settings_service()
@@ -117,17 +129,21 @@ async def _fetch_credentials_from_node(
     request_id: str = str(uuid4())
     result_file: str = os.path.join(_CREDS_DIR, f"creds-{request_id}.json")
 
-    # Publish MQTT request to node
+    # Publish MQTT request to node. The node needs the device identity (protocol
+    # + full unstripped cloud_id) so its plugin can build the go2rtc source.
     topic: str = f"jarvis/nodes/{node.node_id}/camera-credentials"
     payload: str = json.dumps({
         "request_id": request_id,
-        "protocol": protocol,
+        "protocol": device.protocol or "nest",
+        "cloud_id": device.cloud_id,
+        "entity_id": device.entity_id,
+        "domain": device.domain,
     })
     mqtt.publish(topic, payload)
 
     logger.info(
-        "Camera credentials requested from node: request=%s node=%s protocol=%s",
-        request_id[:8], node.node_id[:8], protocol,
+        "Camera stream source requested from node: request=%s node=%s protocol=%s",
+        request_id[:8], node.node_id[:8], device.protocol or "nest",
     )
 
     # Poll for result file (node writes it via POST callback)
@@ -215,8 +231,8 @@ async def start_camera_stream(
 ) -> StartStreamResponse:
     """Register a camera stream in go2rtc.
 
-    Credentials are fetched from the node via MQTT. Legacy mobile versions
-    may still send credentials in the body — those are used directly.
+    The node's device-protocol plugin builds the go2rtc source string (owning the
+    protocol/transport choice); CC fetches it via MQTT and registers it verbatim.
     """
     require_household_access(household_id, auth)
     device = (
@@ -231,39 +247,14 @@ async def start_camera_stream(
     if not device:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    # Extract Nest device ID from cloud_id (full SDM path → just the ID suffix)
-    nest_device_id: str = device.cloud_id or ""
-    if "/" in nest_device_id:
-        nest_device_id = nest_device_id.rsplit("/", 1)[-1]
-    if not nest_device_id:
-        raise HTTPException(status_code=400, detail="Device has no cloud_id")
+    # Ask the node's device-protocol plugin to build the go2rtc source. CC owns
+    # no protocol specifics — it registers whatever source string comes back.
+    result = await _fetch_credentials_from_node(household_id, device, db)
+    stream_url: str = result.get("stream_source", "")
+    if not stream_url:
+        raise HTTPException(status_code=400, detail="No stream source returned by node")
 
-    # Resolve credentials: use legacy body fields or fetch from node via MQTT
-    has_legacy_creds: bool = all([
-        body.refresh_token, body.client_id, body.client_secret, body.project_id,
-    ])
-    if has_legacy_creds:
-        creds = {
-            "refresh_token": body.refresh_token,
-            "client_id": body.client_id,
-            "client_secret": body.client_secret,
-            "project_id": body.project_id,
-        }
-    else:
-        protocol: str = device.protocol or "nest"
-        creds = await _fetch_credentials_from_node(household_id, protocol, db)
-
-    # Build go2rtc nest stream URL
     stream_name: str = f"cam_{device.entity_id}"
-    nest_params: dict[str, str] = {
-        "client_id": creds["client_id"],
-        "client_secret": creds["client_secret"],
-        "refresh_token": creds["refresh_token"],
-        "project_id": creds["project_id"],
-        "device_id": nest_device_id,
-        "protocols": body.protocols,
-    }
-    stream_url: str = f"nest:?{urlencode(nest_params)}"
 
     # Register stream in go2rtc via its REST API.
     # go2rtc may return 400 from config file persistence even when the stream
@@ -286,6 +277,7 @@ async def start_camera_stream(
         raise HTTPException(status_code=503, detail="Camera streaming service not available")
 
     _active_streams[device_id] = stream_name
+    _stream_households[stream_name] = household_id
 
     # Return proxied HLS URL (relative to CC)
     hls_url: str = f"/api/v0/cameras/stream/{stream_name}/stream.m3u8"
@@ -298,8 +290,20 @@ async def start_camera_stream(
 def post_camera_credentials_result(
     request_id: str,
     body: dict,
+    _node: NodeContextProvider = Depends(verify_api_key),
 ) -> dict:
-    """Node POSTs camera credentials back to CC (MQTT callback)."""
+    """Node POSTs camera credentials back to CC (MQTT callback).
+
+    Node-authenticated (X-API-Key): an unauthenticated caller must not be able to
+    poison the credentials a node fetch is waiting on. `request_id` must be the
+    UUID CC issued — validating it also stops a crafted id from path-traversing
+    the creds filename into an arbitrary-file write.
+    """
+    try:
+        UUID(str(request_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid request_id")
+
     result_file: str = os.path.join(_CREDS_DIR, f"creds-{request_id}.json")
     with open(result_file, "w") as f:
         json.dump(body, f)
@@ -317,6 +321,7 @@ async def stop_camera_stream(
     stream_name: str | None = _active_streams.pop(device_id, None)
     if not stream_name:
         return {"status": "not_streaming"}
+    _stream_households.pop(stream_name, None)
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -340,6 +345,14 @@ async def proxy_stream(
 ) -> StreamingResponse:
     """Proxy HLS/MP4 streams from go2rtc. JWT-authenticated."""
     if stream_name not in _active_streams.values():
+        raise HTTPException(status_code=404, detail="Stream not found")
+
+    # Only a member of the stream's owning household may proxy it (admin
+    # bypasses). Resolving from _stream_households, never a client field.
+    require_household_access(_stream_households.get(stream_name), auth)
+
+    # Never let the proxied path reach a go2rtc control endpoint (/api/config).
+    if not _is_allowed_stream_path(path):
         raise HTTPException(status_code=404, detail="Stream not found")
 
     query_params: dict[str, str] = dict(request.query_params)

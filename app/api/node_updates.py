@@ -10,13 +10,21 @@ reports its new version.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
-from ..deps import get_db, verify_admin_key, verify_user_jwt
+from ..context_providers.node_context_provider import NodeContextProvider
+from ..deps import (
+    AuthenticatedUser,
+    get_db,
+    verify_admin_key,
+    verify_api_key,
+    verify_household_role,
+    verify_user_jwt,
+)
 from ..models import Node, NodeTask
 from ..services.github_releases import latest_release, resolve_target_version
 
@@ -50,7 +58,24 @@ class LatestReleaseResponse(BaseModel):
     published_at: str | None
 
 
+class NodeTaskStatusRequest(BaseModel):
+    # Nodes may only report terminal FAILURE (e.g. the allow_updates consent
+    # gate refused the task). Success stays inferred from the post-upgrade
+    # heartbeat version — a node must not be able to fake a completed update.
+    state: Literal["failed"]
+    error_message: str | None = None
+
+
 # ── Helpers ─────────────────────────────────────────────────────────────
+
+def _require_node_household(db: Session, node_id: str, user: AuthenticatedUser) -> None:
+    """A JWT user may only touch a node/task in their own household."""
+    node = db.query(Node).filter(Node.node_id == node_id).first()
+    if not node:
+        raise HTTPException(404, "Node not found")
+    if node.household_id:
+        verify_household_role(user.user_id, node.household_id, required_role="member")
+
 
 def _dependent_task(db: Session, node_id: str) -> NodeTask | None:
     """Return an open update task for this node, if any.
@@ -98,11 +123,14 @@ def request_node_update(
     node_id: str,
     body: UpdateNodeRequest | None = None,
     db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
 ):
     """Queue an update for a node. Node picks it up on its next heartbeat."""
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(404, "Node not found")
+    if node.household_id:
+        verify_household_role(user.user_id, node.household_id, required_role="member")
 
     existing = _dependent_task(db, node_id)
     if existing is not None:
@@ -116,7 +144,11 @@ def request_node_update(
         )
 
     requested = (body.target_version if body else None) or "latest"
-    target_version = resolve_target_version(requested)
+    # An explicit "vX.Y.Z" / "X.Y.Z" bypasses the GitHub lookup entirely (no
+    # egress); only "latest"/None hits api.github.com, gated per-household on
+    # updates.allow_check (503 below when disabled/unreachable and no explicit
+    # version was requested).
+    target_version = resolve_target_version(requested, household_id=node.household_id)
     if target_version is None:
         raise HTTPException(
             503,
@@ -136,15 +168,73 @@ def request_node_update(
     return task
 
 
+@router.post(
+    "/nodes/tasks/{task_id}/status",
+    response_model=NodeTaskResponse,
+)
+def report_task_status(
+    task_id: str,
+    body: NodeTaskStatusRequest,
+    node_context: NodeContextProvider = Depends(verify_api_key),
+    db: Session = Depends(get_db),
+):
+    """Node-reported terminal task status.
+
+    Lets a node surface WHY a task ended — e.g. the ``allow_updates``
+    consent gate refused it — instead of leaving the task to die as a
+    sweeper timeout with a misleading "Timeout: no heartbeat" message
+    (Jul-2026 prod). A node may only fail its OWN update tasks, and
+    terminal tasks are immutable (a late refusal must not overwrite
+    "Cancelled by user").
+    """
+    task = db.query(NodeTask).filter(NodeTask.id == task_id).first()
+    if (
+        not task
+        or task.node_id != node_context.node.node_id
+        or task.kind != "update"
+    ):
+        # One 404 for all three: don't leak other nodes' task IDs.
+        raise HTTPException(404, "Task not found")
+    # Conditional UPDATE, not check-then-write: this can race the 2-min
+    # sweeper and the user-cancel endpoint, and a terminal state must never
+    # be clobbered ("Cancelled by user" beats a late refusal report).
+    updated = (
+        db.query(NodeTask)
+        .filter(
+            NodeTask.id == task_id,
+            NodeTask.state.notin_(("success", "failed")),
+        )
+        .update(
+            {
+                "state": "failed",
+                "error_message": (body.error_message or "Failed (reported by node)")[:1000],
+                "finished_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+    db.refresh(task)
+    if updated == 0:
+        raise HTTPException(409, f"Task is already {task.state}")
+    return task
+
+
 @router.get(
     "/tasks/{task_id}",
     response_model=NodeTaskResponse,
     dependencies=[Depends(verify_user_jwt)],
 )
-def get_task(task_id: str, db: Session = Depends(get_db)):
+def get_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+):
     task = db.query(NodeTask).filter(NodeTask.id == task_id).first()
     if not task:
         raise HTTPException(404, "Task not found")
+    _require_node_household(db, task.node_id, user)
     return task
 
 
@@ -157,6 +247,7 @@ def cancel_node_task(
     node_id: str,
     task_id: str,
     db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
 ):
     """Manually cancel an open node task.
 
@@ -172,6 +263,7 @@ def cancel_node_task(
     )
     if not task:
         raise HTTPException(404, "Task not found")
+    _require_node_household(db, node_id, user)
     if task.state in ("success", "failed"):
         raise HTTPException(409, f"Task is already {task.state}")
     task.state = "failed"
@@ -192,11 +284,14 @@ def list_node_tasks(
     node_id: str,
     limit: int = 20,
     db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
 ):
     """Most recent tasks for a node. Used by the mobile Update History view."""
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(404, "Node not found")
+    if node.household_id:
+        verify_household_role(user.user_id, node.household_id, required_role="member")
 
     limit = max(1, min(limit, 100))
     rows = (

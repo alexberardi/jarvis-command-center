@@ -213,6 +213,44 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Minimum cosine similarity for agent context vector search (0-1)",
     ),
 
+    # Web search settings
+    SettingDefinition(
+        key="web_search.enabled",
+        category="web_search",
+        value_type="bool",
+        default=False,
+        description=(
+            "Master toggle for web search. Gates the live quick_search lookups "
+            "and deep_research tools, which make outbound requests to the "
+            "internet. Default OFF so local-only households never egress."
+        ),
+    ),
+    SettingDefinition(
+        key="web_scraping.allow_external",
+        category="web_search",
+        value_type="bool",
+        default=False,
+        description=(
+            "Permit the deep_research scraper to fall back to the third-party "
+            "r.jina.ai reader proxy when a page can't be fetched directly. This "
+            "leaks which pages the household reads to a third party. Default OFF; "
+            "shares the web_search mobile screen."
+        ),
+    ),
+
+    # Update check settings
+    SettingDefinition(
+        key="updates.allow_check",
+        category="updates",
+        value_type="bool",
+        default=False,
+        description=(
+            "Allow outbound update-version lookups to api.github.com (node "
+            "release checks). Default OFF so local-only households never egress "
+            "to GitHub; an explicit version can still be installed without it."
+        ),
+    ),
+
     # Phase 5 — Auto-deploy LoRA adapter loop
     SettingDefinition(
         key="adapter.auto_train_enabled",

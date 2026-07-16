@@ -29,7 +29,7 @@ from app.core.errors import ConversationPreconditionError
 from app.core.utils.latency_logger import latency_logger
 from . import admin, chat, date_context, node_settings, provisioning
 from app.api import ambient_noise, media, node_commands, test_commands
-from app.deps import verify_api_key, get_model_service
+from app.deps import verify_api_key, get_model_service, enforce_secret_security
 from app.core.model_service import ModelService
 from app.core.utils.rest_client import post  # For test mocking compatibility
 
@@ -132,6 +132,9 @@ async def startup_event():
     """Initialize services on app startup."""
     import asyncio
     from app.provisioning import cleanup_expired_tokens
+
+    # Warn (dev) or refuse to boot (production) on placeholder/weak secrets.
+    enforce_secret_security(logger)
 
     # Initialize service discovery first
     _setup_service_config()
@@ -526,6 +529,10 @@ app.include_router(package_install.router, prefix="/api/v0", tags=["package-inst
 from app.api import test_install
 app.include_router(test_install.router, prefix="/api/v0", tags=["test-install"])
 
+# Node MQTT credential handout (node X-API-Key) — broker-auth transition.
+from app.api import node_mqtt
+app.include_router(node_mqtt.router, prefix="/api/v0", tags=["node-mqtt"])
+
 # Include memory CRUD router
 from app.api import memories
 app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
@@ -561,10 +568,6 @@ app.include_router(oauth.router, prefix="/api/v0", tags=["oauth"])
 from app.api import cameras
 app.include_router(cameras.router, prefix="/api/v0", tags=["cameras"])
 
-# Include agent utility endpoints (news, calendar for node-side agents)
-from app.api import agents
-app.include_router(agents.router, prefix="/api/v0", tags=["agents"])
-
 # Include node update router (mobile triggers update, CC dispatches via heartbeat)
 from app.api import node_updates
 app.include_router(node_updates.router, prefix="/api/v0", tags=["node-updates"])
@@ -597,6 +600,10 @@ app.include_router(routines.router, prefix="/api/v0", tags=["routines"])
 # Include mobile command-data browser router (JWT auth, MQTT round-trip)
 from app.api import mobile_command_data
 app.include_router(mobile_command_data.router, prefix="/api/v0/mobile", tags=["mobile-command-data"])
+
+# Include mobile household-settings router (household-admin auth, e.g. web search toggle)
+from app.api import mobile_household_settings
+app.include_router(mobile_household_settings.router, prefix="/api/v0/mobile", tags=["mobile-household-settings"])
 
 # Settings router is included in startup_event after service_config is initialized
 
@@ -721,8 +728,16 @@ async def start_conversation(
             if "recently_shown_items" in request.node_context:
                 node_context["recently_shown_items"] = request.node_context["recently_shown_items"]
 
-            # Extract speaker identity from voice recognition
-            speaker_user_id = request.node_context.get("speaker_user_id")
+            # Extract speaker identity from voice recognition. The node asserts
+            # this from on-device voice ID; only honor a speaker who is a member
+            # of THIS node's validated household so a node can't scope memories /
+            # transcripts to an arbitrary user (intra-household IDOR).
+            from app.core.utils.speaker_membership import validated_speaker_user_id
+            speaker_user_id = validated_speaker_user_id(
+                request.node_context.get("speaker_user_id"),
+                node_context_provider.household_member_ids,
+                node_context_provider.node.node_id,
+            )
             speaker_confidence = request.node_context.get("speaker_confidence")
             node_id_for_stickiness = node_context_provider.node.node_id
 
@@ -1051,6 +1066,15 @@ async def handle_voice_stream(
             detail="Conversation not initialized for tool-based flow",
         )
 
+    # The per-utterance speaker id is client-asserted; only honor a member of
+    # this node's validated household (see conversation/start for rationale).
+    from app.core.utils.speaker_membership import validated_speaker_user_id
+    speaker_user_id = validated_speaker_user_id(
+        request.speaker_user_id,
+        node_context_provider.household_member_ids,
+        node_context_provider.node.node_id,
+    )
+
     try:
         from app.core.clients.tts_client import TTSClient
 
@@ -1067,7 +1091,7 @@ async def handle_voice_stream(
             conversation_id=request.conversation_id,
             voice_command=request.voice_command,
             tts_client=tts_client,
-            speaker_user_id=request.speaker_user_id,
+            speaker_user_id=speaker_user_id,
             pre_wake_speech_seconds=request.pre_wake_speech_seconds,
         )
         if streaming_audio is not None:
@@ -1102,7 +1126,7 @@ async def handle_voice_stream(
             conversation_id=request.conversation_id,
             voice_command=request.voice_command,
             tts_client=tts_client,
-            speaker_user_id=request.speaker_user_id,
+            speaker_user_id=speaker_user_id,
             pre_wake_speech_seconds=request.pre_wake_speech_seconds,
         )
         if streaming_audio is not None:
@@ -1132,7 +1156,7 @@ async def handle_voice_stream(
             result = await model_service.process_voice_command_with_tools(
                 voice_command=request.voice_command,
                 conversation_id=request.conversation_id,
-                speaker_user_id=request.speaker_user_id,
+                speaker_user_id=speaker_user_id,
                 pre_wake_speech_seconds=request.pre_wake_speech_seconds,
             )
 

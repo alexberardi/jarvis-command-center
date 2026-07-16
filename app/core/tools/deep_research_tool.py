@@ -13,6 +13,32 @@ from app.core.interfaces.iserver_tool import IServerTool
 logger = logging.getLogger("uvicorn")
 
 
+def _web_search_enabled(household_id: str) -> bool:
+    """Fail-closed check of the household ``web_search.enabled`` setting.
+
+    Defense-in-depth: the warmup tool whitelist already excludes deep_research
+    when web search is disabled, but this re-check at execution time closes the
+    gap where a model hallucinates the call for a tool it was never offered.
+    Any error → disabled (no outbound egress).
+    """
+    try:
+        from app.services.settings_service import get_settings_service
+
+        val = get_settings_service().get(
+            "web_search.enabled", household_id=str(household_id)
+        )
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.lower() in ("true", "1", "yes")
+        return bool(val)
+    except Exception as e:
+        logger.warning(
+            "deep_research web_search gate check failed, defaulting to DISABLED: %s", e
+        )
+        return False
+
+
 class DeepResearchTool(IServerTool):
     """Tool for performing deep web research on a topic."""
 
@@ -70,6 +96,18 @@ class DeepResearchTool(IServerTool):
         household_id = node_context.get("household_id")
         if not household_id:
             return {"error": "no_household", "message": "No household context available"}
+
+        # Defense-in-depth: never egress for a household that opted out, even
+        # if this tool was somehow invoked without being in the prompt.
+        if not _web_search_enabled(household_id):
+            logger.info(
+                "🚫 deep_research blocked — web_search disabled for household %s",
+                household_id,
+            )
+            return {
+                "error": "web_search_disabled",
+                "message": "Web search is disabled for this household.",
+            }
 
         speaker_user_id = node_context.get("speaker_user_id")
 

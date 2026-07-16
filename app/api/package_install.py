@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.db import get_session_local
 from app.deps import get_db, verify_api_key
 from app.models import Node, PackageInstallRequest, PromptProviderInstallRequest
-from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext
+from app.provisioning import verify_provisioning_auth, ProvisioningAuthContext, require_household_access
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
@@ -52,6 +52,13 @@ class PackageInstallPollResponse(BaseModel):
     command_name: str
     error_message: str | None = None
     details: dict | None = None
+
+
+class PackageInstallVerifyResponse(BaseModel):
+    confirmed: bool
+    command_name: str
+    github_repo_url: str
+    git_tag: str | None = None
 
 
 # =============================================================================
@@ -103,6 +110,10 @@ def request_package_install(
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
 
+    # A JWT caller may only act on a node in their own household (admin key
+    # bypasses). Household is resolved from the node row, never the caller.
+    require_household_access(node.household_id, auth)
+
     now = datetime.utcnow()
     install_request = PackageInstallRequest(
         id=str(uuid4()),
@@ -131,6 +142,47 @@ def request_package_install(
         id=install_request.id,
         status=install_request.status,
         created_at=install_request.created_at,
+    )
+
+
+@router.get(
+    "/nodes/{node_id}/package-install/{request_id}/verify",
+    response_model=PackageInstallVerifyResponse,
+)
+def verify_package_install(
+    node_id: str,
+    request_id: str,
+    node_context=Depends(verify_api_key),
+    db: Session = Depends(get_db),
+) -> PackageInstallVerifyResponse:
+    """Node calls this to verify a package install request and get the repo URL.
+
+    This is the zero-trust gate (mirrors verify_test_install): a spoofed MQTT
+    nudge with a fake request_id fails here with 404 because no matching row
+    exists for this node. The node installs from the URL returned here — never
+    from the (untrusted) URL in the MQTT payload.
+    """
+    install_request = db.query(PackageInstallRequest).filter(
+        PackageInstallRequest.id == request_id,
+        PackageInstallRequest.node_id == node_id,
+    ).first()
+    if not install_request:
+        raise HTTPException(status_code=404, detail="Package install request not found")
+
+    now = datetime.utcnow()
+    if install_request.expires_at and install_request.expires_at < now:
+        install_request.status = "expired"
+        db.commit()
+        raise HTTPException(status_code=410, detail="Package install request expired")
+
+    if install_request.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Request already {install_request.status}")
+
+    return PackageInstallVerifyResponse(
+        confirmed=True,
+        command_name=install_request.command_name,
+        github_repo_url=install_request.github_repo_url,
+        git_tag=install_request.git_tag,
     )
 
 
@@ -205,6 +257,8 @@ def poll_package_install(
     if not install_request:
         raise HTTPException(status_code=404, detail="Install request not found")
 
+    require_household_access(install_request.household_id, auth)
+
     now = datetime.utcnow()
 
     # Check expiration (restarting is non-terminal, treated like pending)
@@ -277,6 +331,10 @@ def request_package_uninstall(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    # A JWT caller may only act on a node in their own household (admin key
+    # bypasses). Household is resolved from the node row, never the caller.
+    require_household_access(node.household_id, auth)
 
     now = datetime.utcnow()
     uninstall_request = PackageInstallRequest(
@@ -374,6 +432,8 @@ def poll_package_uninstall(
     if not request:
         raise HTTPException(status_code=404, detail="Uninstall request not found")
 
+    require_household_access(request.household_id, auth)
+
     now = datetime.utcnow()
     if (
         request.status in ("pending", "restarting")
@@ -452,6 +512,10 @@ def request_package_revert(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    # A JWT caller may only act on a node in their own household (admin key
+    # bypasses). Household is resolved from the node row, never the caller.
+    require_household_access(node.household_id, auth)
 
     now = datetime.utcnow()
     revert_request = PackageInstallRequest(
@@ -548,6 +612,8 @@ def poll_package_revert(
     ).first()
     if not request:
         raise HTTPException(status_code=404, detail="Revert request not found")
+
+    require_household_access(request.household_id, auth)
 
     now = datetime.utcnow()
     if (

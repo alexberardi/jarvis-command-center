@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_db, verify_api_key
 from app.models import BluetoothPairRequest, BluetoothScanRequest, Node
-from app.provisioning import ProvisioningAuthContext, verify_provisioning_auth
+from app.provisioning import ProvisioningAuthContext, verify_provisioning_auth, require_household_access
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
@@ -113,6 +113,8 @@ def request_bluetooth_scan(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    require_household_access(node.household_id, auth)
 
     now = datetime.utcnow()
     scan_request = BluetoothScanRequest(
@@ -274,6 +276,8 @@ def request_bluetooth_pair(
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
 
+    require_household_access(node.household_id, auth)
+
     now = datetime.utcnow()
     pair_request = BluetoothPairRequest(
         id=str(uuid4()),
@@ -407,6 +411,8 @@ def request_bluetooth_disconnect(
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
 
+    require_household_access(node.household_id, auth)
+
     _publish_bluetooth_mqtt(
         node_id,
         "bluetooth-disconnect",
@@ -427,6 +433,8 @@ def request_bluetooth_discoverable(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    require_household_access(node.household_id, auth)
 
     _publish_bluetooth_mqtt(
         node_id,
@@ -455,6 +463,8 @@ def get_bluetooth_status(
     node = db.query(Node).filter(Node.node_id == node_id).first()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    require_household_access(node.household_id, auth)
 
     # Return most recent completed scan as cached status
     recent_scan = db.query(BluetoothScanRequest).filter(

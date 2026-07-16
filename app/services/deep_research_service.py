@@ -51,7 +51,7 @@ async def run_research(
     logger.info("Found %d search results for %r", len(urls), query)
 
     # Step 2: Scrape
-    scraped_pages = await _scrape_urls(urls)
+    scraped_pages = await _scrape_urls(urls, household_id)
     successful = [p for p in scraped_pages if p.ok]
     if not successful:
         raise ValueError("Could not scrape any of the search results")
@@ -213,11 +213,49 @@ async def _search_web(query: str, num_results: int) -> list[dict[str, str]]:
         return []
 
 
-async def _scrape_urls(urls: list[str]) -> list:
-    """Scrape URLs using jarvis-web-scraper."""
-    from jarvis_web_scraper import WebScraper
+def _external_scraping_allowed(household_id: str | None) -> bool:
+    """Fail-closed check of the ``web_scraping.allow_external`` household setting.
 
-    scraper = WebScraper()
+    Mirrors deep_research_tool._web_search_enabled: gates the third-party
+    r.jina.ai reader-proxy fallback inside jarvis-web-scraper. Any error
+    (settings outage, typo'd key) → disabled, so a private household never
+    leaks page URLs to a third party.
+    """
+    try:
+        from app.services.settings_service import get_settings_service
+
+        val = get_settings_service().get(
+            "web_scraping.allow_external",
+            household_id=str(household_id) if household_id is not None else None,
+        )
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.lower() in ("true", "1", "yes")
+        return bool(val)
+    except Exception as e:
+        logger.warning(
+            "web_scraping.allow_external gate check failed, defaulting to DISABLED: %s", e
+        )
+        return False
+
+
+async def _scrape_urls(urls: list[str], household_id: str | None = None) -> list:
+    """Scrape URLs using jarvis-web-scraper.
+
+    The third-party r.jina.ai reader-proxy fallback is opt-in per household via
+    ``web_scraping.allow_external`` (default OFF — direct fetch only).
+    """
+    from jarvis_web_scraper import FetchConfig, WebScraper
+
+    allow_external = _external_scraping_allowed(household_id)
+    if allow_external:
+        logger.info(
+            "deep_research: external r.jina.ai scraper fallback ENABLED "
+            "(web_scraping.allow_external=true, household=%s)",
+            household_id,
+        )
+    scraper = WebScraper(FetchConfig(enable_jina_fallback=allow_external))
     return await scraper.batch_fetch(urls, max_concurrent=3, max_chars=6000)
 
 

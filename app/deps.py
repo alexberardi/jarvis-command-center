@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import secrets
 import time
 from dataclasses import dataclass
 
@@ -29,6 +30,57 @@ JARVIS_APP_ID = os.getenv("JARVIS_APP_ID", "command-center")
 JARVIS_APP_KEY = os.getenv("JARVIS_APP_KEY")
 JARVIS_AUTH_SECRET_KEY = os.getenv("JARVIS_AUTH_SECRET_KEY", "")
 JARVIS_AUTH_ALGORITHM = os.getenv("JARVIS_AUTH_ALGORITHM", "HS256")
+
+_SECRET_PLACEHOLDERS = {
+    "", "change-me", "changeme", "change_me", "__set_me__",
+    # Verbatim values shipped in .env.example / env.template — a straight copy
+    # of either file must not boot as "configured".
+    "change_me_admin_key", "change_me_must_match_jarvis_auth",
+}
+
+
+def _is_production() -> bool:
+    return os.getenv("JARVIS_ENV", "").strip().lower() in {"production", "prod"}
+
+
+def _insecure_secret(value: str | None) -> bool:
+    v = (value or "").strip()
+    return v.lower() in _SECRET_PLACEHOLDERS or len(v) < 16
+
+
+def insecure_secrets() -> list[str]:
+    """Names of security-critical secrets that are empty, a known placeholder,
+    or shorter than 16 chars. Empty list = all good.
+
+    ``ADMIN_API_KEY`` gates ``verify_admin_key`` below and
+    ``JARVIS_AUTH_SECRET_KEY`` validates user JWTs locally — a placeholder here
+    means anyone can drive admin ops or forge tokens against a publicly-known
+    value.
+    """
+    problems: list[str] = []
+    if _insecure_secret(os.getenv("ADMIN_API_KEY")):
+        problems.append("ADMIN_API_KEY")
+    if _insecure_secret(os.getenv("JARVIS_AUTH_SECRET_KEY")):
+        problems.append("JARVIS_AUTH_SECRET_KEY")
+    return problems
+
+
+def enforce_secret_security(log: logging.Logger) -> None:
+    """Warn on insecure secrets everywhere; abort startup only in production."""
+    problems = insecure_secrets()
+    if not problems:
+        return
+    detail = (
+        ", ".join(problems)
+        + " is empty, a known placeholder, or shorter than 16 chars. Set a strong "
+        "random value (e.g. `openssl rand -hex 32`)."
+    )
+    if _is_production():
+        raise RuntimeError(f"Refusing to start in production — insecure auth config: {detail}")
+    log.warning(
+        "⚠️ Insecure auth config: " + detail
+        + "  (set JARVIS_ENV=production to make this fatal)"
+    )
 
 
 def _get_auth_base_url() -> str:
@@ -165,7 +217,10 @@ def verify_api_key(x_api_key: str = Header(...), db: Session = Depends(get_db)):
     return NodeContextProvider(node)
 
 def verify_admin_key(x_api_key: str = Header(...)):
-    if x_api_key != ADMIN_API_KEY:
+    # Constant-time compare so the admin token isn't leakable byte-by-byte via
+    # response timing. An unset ADMIN_API_KEY stays fail-closed (rejects all).
+    expected = ADMIN_API_KEY or ""
+    if not expected or not secrets.compare_digest(x_api_key, expected):
         logger.warning("Unauthorized admin access attempt with API key: %s", x_api_key[:8] + "...")
         raise HTTPException(status_code=401, detail="Invalid Admin API Key")
 
@@ -295,8 +350,12 @@ def verify_household_role(
     Raises HTTPException(403) if the user lacks permission.
     """
     if not JARVIS_APP_KEY:
-        logger.warning("JARVIS_APP_KEY not set — skipping household role check")
-        return
+        # Fail CLOSED: with no app credential we cannot verify the caller's role
+        # against jarvis-auth, so we must deny rather than silently grant it.
+        # (Node validation already hard-requires JARVIS_APP_KEY, so an unset key
+        # means the deploy is misconfigured — not a state where access is safe.)
+        logger.error("JARVIS_APP_KEY not set — denying household role check (fail-closed)")
+        raise HTTPException(status_code=503, detail="Household role verification unavailable")
 
     auth_url = _get_auth_base_url().rstrip("/")
     try:
@@ -338,8 +397,11 @@ def resolve_household_role(user_id: int, household_id: str) -> str:
     where MEMBER sees own-only and POWER_USER+ sees own + household-wide).
     """
     if not JARVIS_APP_KEY:
-        logger.warning("JARVIS_APP_KEY not set — defaulting role to 'member'")
-        return "member"
+        # Fail CLOSED: defaulting to 'member' would silently grant member-level
+        # access (e.g. own-memory CRUD) to a caller we can't actually verify.
+        # Deny instead — an unset key means the deploy is misconfigured.
+        logger.error("JARVIS_APP_KEY not set — denying household role lookup (fail-closed)")
+        raise HTTPException(status_code=503, detail="Household role verification unavailable")
 
     auth_url = _get_auth_base_url().rstrip("/")
     try:
