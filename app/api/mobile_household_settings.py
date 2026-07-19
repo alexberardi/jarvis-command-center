@@ -40,13 +40,31 @@ _READ_ROLE = "member"
 
 
 def _coerce(value: Any, value_type: str) -> Any:
-    """Coerce a raw settings value to its declared type (settings store strings)."""
+    """Coerce a raw settings value to its declared type (settings store strings).
+
+    bool never raises (anything truthy-ish coerces). int raises ValueError on
+    garbage — the write endpoint turns that into a 400; reads fall back to
+    None rather than 500ing the whole settings screen on one bad row.
+    """
     if value_type == "bool":
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
             return value.lower() in ("true", "1", "yes")
         return bool(value)
+    if value_type == "int":
+        # bool is an int subclass — reject it explicitly, "true" is not a count.
+        if isinstance(value, bool):
+            raise ValueError(f"expected an integer, got boolean {value!r}")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if value.is_integer():
+                return int(value)
+            raise ValueError(f"expected an integer, got {value!r}")
+        if isinstance(value, str):
+            return int(value.strip())  # ValueError on garbage
+        raise ValueError(f"expected an integer, got {type(value).__name__}")
     return value
 
 
@@ -67,7 +85,13 @@ async def get_household_settings(
     values: dict[str, Any] = {}
     for key, vtype in HOUSEHOLD_CONTROLLABLE_SETTINGS.items():
         raw = settings.get(key, household_id=str(household_id))
-        values[key] = _coerce(raw, vtype)
+        try:
+            values[key] = _coerce(raw, vtype)
+        except (ValueError, TypeError):
+            logger.warning(
+                "Household %s setting %s has uncoercible value %r", household_id, key, raw
+            )
+            values[key] = None
 
     return {"household_id": household_id, "settings": values}
 
@@ -93,7 +117,13 @@ async def put_household_setting(
 
     verify_household_role(user.user_id, household_id, required_role=_WRITE_ROLE)
 
-    coerced = _coerce(value, vtype)
+    try:
+        coerced = _coerce(value, vtype)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid value for {key}: {e}",
+        )
     settings = get_settings_service()
     ok = settings.set(key, coerced, household_id=str(household_id))
     if not ok:
