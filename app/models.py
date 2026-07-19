@@ -770,3 +770,107 @@ class RoutineExecution(Base):
     error = Column(Text, nullable=True)
     started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     finished_at = Column(DateTime, nullable=True)
+
+
+class AttentionEvent(Base):
+    """One proactive notification request, as received (pre-gating).
+
+    Recorded for every request that reaches an interposed endpoint (or
+    /api/v0/attention/events) while attention.enabled is on for the household.
+    household_id always comes from the validated node row / app auth — never
+    the payload. See prds/attention-broker.md.
+    """
+    __tablename__ = 'attention_events'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    household_id = Column(String(255), nullable=False, index=True)
+    # Phase 1: source == the request's category (category-grade identity).
+    # An SDK-declared, registry-validated source name replaces this later.
+    source = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    title = Column(String(500), nullable=False)
+    summary = Column(Text, nullable=False, default="")
+    dedupe_key = Column(String(255), nullable=True, index=True)
+    target_user_id = Column(Integer, nullable=True)  # NULL = household-wide
+    origin_node_id = Column(String(255), nullable=True)
+    payload_json = Column(Text, nullable=True)  # original request, for replay
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AttentionDelivery(Base):
+    """The gated outcome of one AttentionEvent: which rung, and why.
+
+    gate_trail_json is the ordered record of every gate decision — the
+    substrate for "why did you tell me that?" and the withheld-items journal.
+    request_id is reserved for the future verified in-room rung and is
+    DB-backed deliberately (NodeCommandService's pending store is in-memory,
+    5-minute TTL, per-process — unusable for durable invites).
+    """
+    __tablename__ = 'attention_deliveries'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    event_id = Column(String(36), ForeignKey('attention_events.id', ondelete='CASCADE'), nullable=False, index=True)
+    household_id = Column(String(255), nullable=False, index=True)
+    rung = Column(String(20), nullable=False)  # journal|inbox|push (later: led_invite|speak)
+    gate_trail_json = Column(Text, nullable=False, default="[]")
+    withheld_by = Column(String(50), nullable=True)  # gate name when rung == journal
+    inbox_item_id = Column(String(36), nullable=True)
+    request_id = Column(String(36), nullable=True, index=True)  # future in-room rung
+    outcome = Column(String(30), nullable=True)  # delivered|redeemed|expired|failed|duplicate
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class AttentionSourceTier(Base):
+    """Earned speaking rights per (household, source, category). Phase 2.
+
+    Sources start at T1 (inbox-only probation) and move on decayed feedback
+    scores. state_reason is human-readable, mirroring the node agent
+    auto-disable culture: demotion always says why.
+    """
+    __tablename__ = 'attention_source_tiers'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    household_id = Column(String(255), nullable=False, index=True)
+    source = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    tier = Column(Integer, nullable=False, default=1)  # 0=journal-only .. 3=push; 4/5 reserved
+    score = Column(Float, nullable=False, default=0.0)
+    state_reason = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('household_id', 'source', 'category', name='uq_attention_tier_scope'),
+    )
+
+
+class AttentionConsent(Base):
+    """User-granted ceiling per (household, source, category). Phase 3.
+
+    max_rung is the highest rung the source may occupy. Writes are
+    household-admin gated (mobile_household_settings pattern), never the
+    superuser settings router. Speech is granted here only — never a default.
+    """
+    __tablename__ = 'attention_consents'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    household_id = Column(String(255), nullable=False, index=True)
+    source = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    max_rung = Column(String(20), nullable=False, default="push")  # never|inbox|push|led_invite|speak
+    granted_by_user_id = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('household_id', 'source', 'category', name='uq_attention_consent_scope'),
+    )
+
+
+class AttentionFeedback(Base):
+    """One user reaction to one delivery (button tap or voice verb). Phase 2."""
+    __tablename__ = 'attention_feedback'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    delivery_id = Column(String(36), ForeignKey('attention_deliveries.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True)
+    verb = Column(String(20), nullable=False)  # useful|not_useful|mute|why
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

@@ -422,6 +422,60 @@ async def startup_event():
 
     asyncio.create_task(_periodic_routine_execution_cleanup())
 
+    # Attention broker: daily journal card per active household (cron,
+    # household tz) + event/delivery TTL cleanup. prds/attention-broker.md.
+    async def _periodic_attention_journal() -> None:
+        last_fired: dict[str, object] = {}  # in-memory; a restart may repost a card (cosmetic)
+        while True:
+            await asyncio.sleep(60)
+            try:
+                from datetime import datetime, timezone as _tz
+
+                from app.services.attention_broker import _is_truthy
+                from app.services.attention_journal import households_with_activity, post_journal_card
+                from app.services.routine_scheduler import is_due
+
+                db = SessionLocal()
+                try:
+                    for household_id in households_with_activity(db):
+                        if not _is_truthy(settings_service.get("attention.enabled", household_id=household_id)):
+                            continue
+                        if not _is_truthy(settings_service.get("attention.journal_card_enabled", household_id=household_id)):
+                            continue
+                        cron = settings_service.get("attention.journal_card_cron", household_id=household_id) or "0 21 * * *"
+                        tz = settings_service.get("attention.timezone", household_id=household_id) or "UTC"
+                        schedule = {"type": "cron", "cron": str(cron), "timezone": str(tz), "enabled": True}
+                        if not is_due(schedule, datetime.now(_tz.utc), last_fired.get(household_id)):
+                            continue
+                        last_fired[household_id] = datetime.now(_tz.utc)
+                        inbox_id = await asyncio.to_thread(post_journal_card, db, household_id)
+                        if inbox_id:
+                            logger.info("Attention journal card posted for household %s", household_id)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("Attention journal tick failed: %s", e)
+
+    asyncio.create_task(_periodic_attention_journal())
+
+    async def _periodic_attention_cleanup() -> None:
+        while True:
+            await asyncio.sleep(86400)
+            try:
+                ttl_days = int(settings_service.get("attention.journal_ttl_days") or 30)
+                from app.services.attention_journal import cleanup_expired
+                db = SessionLocal()
+                try:
+                    removed = cleanup_expired(db, ttl_days=ttl_days)
+                    if removed:
+                        logger.info("Attention cleanup removed %d event(s)", removed)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("Attention cleanup failed: %s", e)
+
+    asyncio.create_task(_periodic_attention_cleanup())
+
     # Enrich llm.interface with available prompt providers dynamically
     if "llm.interface" in settings_service.definitions:
         from app.core.prompt_provider_factory import PromptProviderFactory
@@ -514,6 +568,11 @@ app.include_router(media.router, prefix="/api/v0", tags=["media"])
 
 # Include node commands router
 app.include_router(node_commands.router, prefix="/api/v0", tags=["node-commands"])
+
+# Attention broker: event ingest + journal (prds/attention-broker.md)
+from app.api import attention as attention_api
+
+app.include_router(attention_api.router, prefix="/api/v0", tags=["attention"])
 
 # Include ambient-noise calibration router (mobile-triggered, node-fulfilled)
 app.include_router(ambient_noise.router, prefix="/api/v0", tags=["ambient-noise"])
