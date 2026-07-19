@@ -476,7 +476,12 @@ async def _draft_details(*, business: str, goal: str) -> str:
                         "You draft short briefs for an assistant that places "
                         "phone calls to businesses. Reply with 1-3 plain "
                         "sentences stating exactly what to accomplish — no "
-                        "preamble, no payment details ever."
+                        "preamble, no payment details ever. Stay strictly "
+                        "consistent with the goal: never mix pickup and "
+                        "delivery; only include an address when the goal is "
+                        "a delivery; include only facts implied by the goal "
+                        "(no invented items, times, or preferences). "
+                        "/no_think"
                     ),
                 },
                 {
