@@ -72,15 +72,20 @@ def _get_session_or_404(db: Session, session_id: str) -> PhoneCallSession:
     "/internal/phone/sessions/{session_id}",
     dependencies=[Depends(require_app_auth)],
 )
-def get_phone_session(session_id: str, db: Session = Depends(get_db)) -> dict:
+async def get_phone_session(session_id: str, db: Session = Depends(get_db)) -> dict:
     """Session snapshot for the claiming worker — everything the call loop
     needs, nothing more (no transcript echo, no audit fields)."""
     s = _get_session_or_404(db, session_id)
-    from app.services.phone_call_service import _int_setting
+    from app.services.phone_call_service import _int_setting, _resolve_initiator_name
+
+    # The disclosure line speaks this ("calling on behalf of {name}") —
+    # without it the gateway falls back to "a customer" (heard live).
+    initiator_name = await _resolve_initiator_name(s.user_id)
 
     return {
         "id": s.id,
         "state": s.state,
+        "initiator_name": initiator_name,
         "household_id": s.household_id,
         "contact_name": s.contact_name,
         "dialed_number": s.dialed_number,
