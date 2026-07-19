@@ -33,6 +33,7 @@ _ENV_VAR_FALLBACKS: dict[str, str] = {
     "jarvis-tts": "JARVIS_TTS_URL",
     "jarvis-mqtt-broker": "JARVIS_MQTT_BROKER_URL",
     "jarvis-pantry": "JARVIS_PANTRY_URL",
+    "jarvis-phone-gateway": "JARVIS_PHONE_GATEWAY_URL",
 }
 
 _initialized: bool = False
@@ -174,6 +175,11 @@ def get_tts_url() -> str:
 def get_mqtt_broker_url() -> str:
     """Get MQTT broker URL."""
     return _get_url("jarvis-mqtt-broker")
+
+
+def get_phone_gateway_url() -> str:
+    """Get phone-gateway service URL (optional service — may raise)."""
+    return _get_url("jarvis-phone-gateway")
 
 
 def get_pantry_url() -> str:
