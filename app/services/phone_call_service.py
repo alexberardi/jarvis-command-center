@@ -366,7 +366,10 @@ async def create_call_plan(
         if resolved_number and line_type == "unknown":
             line_type = await lookup_line_type(resolved_number)
 
-        details = await _draft_details(business=business, goal=goal)
+        initiator = await _resolve_initiator_name(user_id)
+        details = await _draft_details(
+            business=business, goal=goal, initiator=initiator
+        )
 
         ttl_minutes = _int_setting("phone_calls.plan_ttl_minutes", household_id, 20)
         now = datetime.utcnow()
@@ -462,7 +465,23 @@ async def create_call_plan(
         db.close()
 
 
-async def _draft_details(*, business: str, goal: str) -> str:
+async def _resolve_initiator_name(user_id: int | None) -> str | None:
+    """Display name for the disclosure line + brief; None degrades gracefully."""
+    if user_id is None:
+        return None
+    try:
+        from app.core.utils.speaker_resolver import resolve_speaker_name
+        from app.deps import _get_auth_base_url
+
+        return await resolve_speaker_name(_get_auth_base_url(), user_id)
+    except Exception as e:  # noqa: BLE001 — name is a nicety
+        logger.debug("Initiator name resolution failed: %s", e)
+        return None
+
+
+async def _draft_details(
+    *, business: str, goal: str, initiator: str | None = None
+) -> str:
     """Background-model draft of the details brief. Degrades to the raw goal."""
     try:
         from app.core.llm_proxy_client import LLMProxyClient
@@ -473,20 +492,31 @@ async def _draft_details(*, business: str, goal: str) -> str:
                 {
                     "role": "system",
                     "content": (
-                        "You draft short briefs for an assistant that places "
-                        "phone calls to businesses. Reply with 1-3 plain "
-                        "sentences stating exactly what to accomplish — no "
-                        "preamble, no payment details ever. Stay strictly "
-                        "consistent with the goal: never mix pickup and "
-                        "delivery; only include an address when the goal is "
-                        "a delivery; include only facts implied by the goal "
-                        "(no invented items, times, or preferences). "
-                        "/no_think"
+                        "You draft briefs for an assistant that places phone "
+                        "calls to businesses. The assistant can use ONLY what "
+                        "the brief contains — it cannot look anything up "
+                        "mid-call — so gather everything the business will "
+                        "plausibly need up front. Format: 1-3 plain sentences "
+                        "stating exactly what to accomplish, then short "
+                        "'If asked:' lines anticipating the business's "
+                        "questions (name for the order/booking, quantities, "
+                        "sizes, timing). Use the caller's name when given. "
+                        "For appointments or anything needing scheduling, end "
+                        "with an 'Acceptable times:' line — copy times from "
+                        "the goal if stated, otherwise write exactly "
+                        "'Acceptable times: (fill in your availability "
+                        "before calling)'. Never include payment details. "
+                        "Stay strictly consistent with the goal: never mix "
+                        "pickup and delivery; only include an address for a "
+                        "delivery; invent no facts. /no_think"
                     ),
                 },
                 {
                     "role": "user",
-                    "content": f"Business: {business}\nGoal: {goal}",
+                    "content": (
+                        f"Business: {business}\nGoal: {goal}"
+                        + (f"\nCaller name: {initiator}" if initiator else "")
+                    ),
                 },
             ],
             model="background",
