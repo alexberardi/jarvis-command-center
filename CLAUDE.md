@@ -287,6 +287,7 @@ POST to llm-proxy's `/internal/queue/enqueue` with `job_type`, `request`, `callb
 - `mobile_household_settings.py` — household-controllable settings (e.g. the web-search toggle). Authorized by **household role** (`verify_household_role`, admin to write), NOT a global superuser like the shared `/settings/*` router. Allowlist-gated to a fixed set of keys.
 
 ### Shared
+- `app/api/callbacks.py` — interactive-notification callbacks (mobile tap → executor → result). **Two dispatch planes** since 2026-07: `target_node_id` set → node plane (MQTT → node executes the command's `@callback` method); omitted → **server plane** (CC executes a handler registered in `app/services/server_callback_registry.py` in a background task; body must carry `household_id`; membership enforced the same way). Server tools (phone-call confirm/escalation cards) register `(command_name, callback_name)` handlers at import time. Nodes can never read or complete a server-plane job; result recording (status poll + `new_notification` inbox fan-out) is identical on both planes. `callback_jobs.node_id` is nullable — NULL means server plane.
 - `app/api/media.py` — proxy to whisper + tts (node auth)
 - `app/api/memories.py` — user memory CRUD (admin or JWT)
 - `app/api/transcripts.py` — transcript rating UI (mobile)
