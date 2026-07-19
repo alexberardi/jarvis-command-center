@@ -676,9 +676,11 @@ class RequestTrace(Base):
 
 
 class CallbackJob(Base):
-    """Interactive-notification callback: mobile tap → CC → MQTT → node → CC → mobile.
+    """Interactive-notification callback: mobile tap → CC → executor → CC → mobile.
 
-    Lifecycle:
+    Two dispatch planes, distinguished by ``node_id``:
+
+    **Node plane** (node_id set):
     1. Mobile app POSTs (user-JWT) with {command, callback, data, target_node_id}
        — created from a tap on an interactive element in a rich inbox item.
     2. CC creates the row (status=pending) and publishes
@@ -688,13 +690,22 @@ class CallbackJob(Base):
        payload. MQTT carries only the opaque id — zero-trust delivery.
     4. Node dispatches to the command's @callback-decorated method, then POSTs
        /api/v0/callbacks/{id}/result with success/error/context_data.
-    5. The callback method is responsible for emitting any follow-up inbox
-       item (via the notifications service) — this row just tracks the job.
+
+    **Server plane** (node_id NULL): the element belongs to a CC server tool
+    (deep-research follow-ups, phone-call confirm/escalation cards). CC
+    executes a handler registered in app.services.server_callback_registry
+    in a background task right after creation and records the result through
+    the same path. Nodes can never read or complete a server-plane job.
+
+    Either way, the callback handler is responsible for emitting any
+    follow-up inbox item (via the notifications service) — this row just
+    tracks the job.
     """
     __tablename__ = 'callback_jobs'
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=False)
+    # NULL → server-plane job (executed in-process by CC, no node involved).
+    node_id = Column(String, ForeignKey('nodes.node_id', ondelete='CASCADE'), nullable=True)
     household_id = Column(String(255), nullable=False, index=True)
     user_id = Column(Integer, nullable=True)  # JWT user who originated the tap
     command_name = Column(String(128), nullable=False)

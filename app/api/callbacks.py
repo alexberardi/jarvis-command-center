@@ -1,36 +1,46 @@
 """Interactive-notification callback API.
 
-Three endpoints, three audiences:
+Two dispatch planes, selected by the create body:
 
-  POST /api/v0/callbacks                  (mobile, user JWT)
-    Mobile user taps a tappable element in a rich inbox item. The body carries
-    {command, callback, data, target_node_id}. We create a CallbackJob row,
-    publish [{"command": "callback", "details": {"request_id": id}}] to the
-    node's commands topic via NodeCommandService, and return the job id.
+**Node plane** (``target_node_id`` set — the original flow): the tapped
+element belongs to a command that lives on a node. We create a CallbackJob
+row, publish [{"command": "callback", "details": {"request_id": id}}] to the
+node's commands topic via NodeCommandService; the node GETs the payload here
+(X-API-Key), dispatches the command's @callback method, and POSTs the result
+back. MQTT carries only the opaque id — every sensitive piece of state flows
+over authenticated HTTPS.
 
-  GET /api/v0/callbacks/{job_id}          (node, X-API-Key)
-    Node received an opaque request_id over MQTT. It fetches the full payload
-    here. We verify the authenticating node owns the job and return
-    {command_name, callback_name, data, user_id, ...}.
+**Server plane** (``target_node_id`` omitted): the element belongs to a CC
+server tool (deep-research follow-ups, phone-call confirm/escalation cards)
+— there is no node. The create body must carry ``household_id`` instead
+(membership verified the same way), the handler must be pre-registered in
+``app.services.server_callback_registry``, and CC executes it in a
+background task immediately after the 201. The handler's result is recorded
+through the same machinery as a node-posted result, so the mobile status
+poll and the navigation_type=new_notification inbox fan-out behave
+identically on both planes. Nodes can never read or complete a server-plane
+job (the ownership check treats node_id=NULL as "no node matches").
 
-  POST /api/v0/callbacks/{job_id}/result  (node, X-API-Key)
-    Node has dispatched the callback and posts the result back. Body is
-    {success, error, context_data}. We mark the job completed/failed.
+Endpoints:
 
-The MQTT layer carries only the opaque id — every sensitive piece of state
-flows over authenticated HTTPS. Follow-up inbox creation (e.g., a new card
-with an actor's filmography after expand_actor) is the callback method's
-responsibility via the existing notifications service — this route only
-records that the dispatch happened.
+  POST /api/v0/callbacks                  (mobile, user JWT) — both planes
+  GET  /api/v0/callbacks/{job_id}         (node, X-API-Key) — node plane only
+  POST /api/v0/callbacks/{job_id}/result  (node, X-API-Key) — node plane only
+  GET  /api/v0/callbacks/{job_id}/status  (mobile, user JWT) — both planes
+
+Follow-up inbox creation (e.g., a new card with an actor's filmography after
+expand_actor) is the callback handler's responsibility via the existing
+notifications service — this route only records that the dispatch happened.
 """
 
+import inspect
 import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -46,6 +56,11 @@ from app.deps import (
 )
 from app.models import CallbackJob, Node
 from app.services.node_command_service import get_node_command_service
+from app.services.server_callback_registry import (
+    ServerCallbackContext,
+    ServerCallbackResult,
+    get_server_callback,
+)
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn")
@@ -63,7 +78,11 @@ class CallbackCreateBody(BaseModel):
     command_name: str = Field(..., min_length=1, max_length=128)
     callback_name: str = Field(..., min_length=1, max_length=128)
     data: dict[str, Any] = Field(default_factory=dict)
-    target_node_id: str = Field(..., min_length=1)
+    # Node plane: the node that owns the command executes the callback.
+    # Omitted → server plane: CC executes a registered handler in-process,
+    # and household_id becomes required (no node row to derive it from).
+    target_node_id: str | None = Field(default=None, min_length=1)
+    household_id: str | None = Field(default=None, min_length=1)
     # Mobile renderer hint — see `CallbackJob.navigation_type`. Mobile is
     # the source of truth; CC persists the choice so the result endpoint
     # knows whether to also create an inbox item server-side.
@@ -122,6 +141,34 @@ class CallbackStatusResponse(BaseModel):
 # =============================================================================
 
 
+def _create_job_row(
+    db: Session,
+    body: CallbackCreateBody,
+    *,
+    node_id: str | None,
+    household_id: str,
+    user_id: int,
+) -> CallbackJob:
+    now = datetime.utcnow()
+    job = CallbackJob(
+        id=str(uuid4()),
+        node_id=node_id,
+        household_id=household_id,
+        user_id=user_id,
+        command_name=body.command_name,
+        callback_name=body.callback_name,
+        data_json=json.dumps(body.data),
+        navigation_type=body.navigation_type,
+        status="pending",
+        created_at=now,
+        expires_at=now + CALLBACK_TTL,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
 @router.post(
     "/callbacks",
     response_model=CallbackCreateResponse,
@@ -129,10 +176,19 @@ class CallbackStatusResponse(BaseModel):
 )
 def create_callback(
     body: CallbackCreateBody,
+    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(verify_user_jwt),
     db: Session = Depends(get_db),
 ) -> CallbackCreateResponse:
-    """Mobile-app entry point: register a callback job and signal the node."""
+    """Mobile-app entry point: register a callback job and dispatch it.
+
+    target_node_id set → node plane (MQTT signal, node executes).
+    target_node_id omitted → server plane (CC executes a registered handler
+    in a background task; household_id required in the body).
+    """
+    if body.target_node_id is None:
+        return _create_server_callback(body, background_tasks, user, db)
+
     node = db.query(Node).filter(Node.node_id == body.target_node_id).first()
     if node is None:
         raise HTTPException(status_code=404, detail="Target node not found")
@@ -145,23 +201,10 @@ def create_callback(
     # Membership check: the user must belong to the node's household.
     verify_household_role(user.user_id, household_id, required_role="member")
 
-    now = datetime.utcnow()
-    job = CallbackJob(
-        id=str(uuid4()),
-        node_id=body.target_node_id,
-        household_id=household_id,
-        user_id=user.user_id,
-        command_name=body.command_name,
-        callback_name=body.callback_name,
-        data_json=json.dumps(body.data),
-        navigation_type=body.navigation_type,
-        status="pending",
-        created_at=now,
-        expires_at=now + CALLBACK_TTL,
+    job = _create_job_row(
+        db, body, node_id=body.target_node_id,
+        household_id=household_id, user_id=user.user_id,
     )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
 
     # Publish [{"command": "callback", "details": {"request_id": job.id}}] —
     # zero payload beyond the opaque id. Node will GET the full body.
@@ -184,6 +227,132 @@ def create_callback(
         navigation_type=job.navigation_type,
         created_at=job.created_at,
     )
+
+
+def _create_server_callback(
+    body: CallbackCreateBody,
+    background_tasks: BackgroundTasks,
+    user: AuthenticatedUser,
+    db: Session,
+) -> CallbackCreateResponse:
+    """Server-plane branch: CC executes a registered handler itself.
+
+    Handler existence is checked BEFORE the row is created — an unroutable
+    tap should fail loudly at the tap, not sit pending until TTL.
+    """
+    if get_server_callback(body.command_name, body.callback_name) is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No server-side handler registered for "
+                f"{body.command_name}.{body.callback_name}"
+            ),
+        )
+
+    if not body.household_id:
+        raise HTTPException(
+            status_code=400,
+            detail="household_id is required when target_node_id is omitted",
+        )
+
+    # Same membership bar as the node plane.
+    verify_household_role(user.user_id, body.household_id, required_role="member")
+
+    job = _create_job_row(
+        db, body, node_id=None,
+        household_id=body.household_id, user_id=user.user_id,
+    )
+
+    background_tasks.add_task(_run_server_callback_job, job.id)
+
+    logger.info(
+        "Server callback job created job_id=%s command=%s callback=%s nav=%s user=%s",
+        job.id[:8], body.command_name, body.callback_name,
+        body.navigation_type, user.user_id,
+    )
+
+    return CallbackCreateResponse(
+        id=job.id,
+        status=job.status,
+        navigation_type=job.navigation_type,
+        created_at=job.created_at,
+    )
+
+
+def _server_callback_session_factory() -> Session:
+    """Fresh session for the background task (module-level so tests patch it)."""
+    from app.db import get_session_local
+
+    return get_session_local()()
+
+
+async def _run_server_callback_job(job_id: str) -> None:
+    """Background task: execute the registered handler and record the result.
+
+    Never raises — any failure lands on the job row as status=failed so the
+    mobile status poll always terminates (the anti-vanishing rule).
+    """
+    db = _server_callback_session_factory()
+    try:
+        job = db.query(CallbackJob).filter(CallbackJob.id == job_id).first()
+        if job is None:
+            logger.error("Server callback job %s vanished before execution", job_id[:8])
+            return
+
+        handler = get_server_callback(job.command_name, job.callback_name)
+        if handler is None:
+            # Registration disappeared between create and execution (module
+            # reload) — record the failure rather than leaving it pending.
+            _record_callback_result(
+                db, job, success=False,
+                error="Server-side handler no longer registered",
+                context_data=None, source_node_id=None,
+            )
+            return
+
+        try:
+            data: dict[str, Any] = json.loads(job.data_json) if job.data_json else {}
+        except json.JSONDecodeError:
+            logger.error("Server callback job %s has malformed data_json", job_id[:8])
+            data = {}
+
+        try:
+            outcome = handler(
+                ServerCallbackContext(
+                    job_id=job.id,
+                    household_id=job.household_id,
+                    user_id=job.user_id,
+                    data=data,
+                    navigation_type=job.navigation_type,
+                )
+            )
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
+            if not isinstance(outcome, ServerCallbackResult):
+                raise TypeError(
+                    f"handler returned {type(outcome).__name__}, "
+                    "expected ServerCallbackResult"
+                )
+        except Exception as e:  # noqa: BLE001 — handler failures land on the row
+            logger.exception(
+                "Server callback %s.%s failed (job %s)",
+                job.command_name, job.callback_name, job_id[:8],
+            )
+            _record_callback_result(
+                db, job, success=False, error=str(e),
+                context_data=None, source_node_id=None,
+            )
+            return
+
+        _record_callback_result(
+            db, job,
+            success=outcome.success,
+            error=outcome.error,
+            context_data=outcome.context_data,
+            source_node_id=None,
+        )
+    finally:
+        db.close()
 
 
 @router.get(
@@ -255,17 +424,45 @@ def post_callback_result(
     if job is None or job.node_id != node_ctx.node.node_id:
         raise HTTPException(status_code=404, detail="Callback job not found")
 
-    now = datetime.utcnow()
-    job.status = "completed" if body.success else "failed"
-    job.error_message = body.error
-    job.completed_at = now
-    if body.context_data is not None:
+    _record_callback_result(
+        db, job,
+        success=body.success,
+        error=body.error,
+        context_data=body.context_data,
+        source_node_id=node_ctx.node.node_id,
+    )
+
+    return CallbackResultResponse(
+        id=job.id,
+        status=job.status,
+        completed_at=job.completed_at,
+    )
+
+
+def _record_callback_result(
+    db: Session,
+    job: CallbackJob,
+    *,
+    success: bool,
+    error: str | None,
+    context_data: dict[str, Any] | None,
+    source_node_id: str | None,
+) -> None:
+    """Shared result recorder for both planes: mark the row, then fan out.
+
+    ``source_node_id`` is the executing node for node-plane results (stamped
+    into inbox metadata); None for server-plane results.
+    """
+    job.status = "completed" if success else "failed"
+    job.error_message = error
+    job.completed_at = datetime.utcnow()
+    if context_data is not None:
         try:
-            job.result_context_data_json = json.dumps(body.context_data)
+            job.result_context_data_json = json.dumps(context_data)
         except (TypeError, ValueError):
             logger.warning(
                 "Callback job %s result context_data not JSON-serializable, dropping",
-                job_id[:8],
+                job.id[:8],
             )
             job.result_context_data_json = None
 
@@ -278,15 +475,16 @@ def post_callback_result(
     # surfaces; the mobile screen polls this job and renders directly.
     if (
         job.navigation_type == "new_notification"
-        and body.success
-        and isinstance(body.context_data, dict)
+        and success
+        and isinstance(context_data, dict)
     ):
-        inbox = body.context_data.get("inbox")
+        inbox = context_data.get("inbox")
         if isinstance(inbox, dict) and isinstance(inbox.get("title"), str) and inbox["title"]:
             try:
                 from app.services.inbox_notification_service import post_inbox_item_sync
                 metadata = dict(inbox.get("metadata") or {})
-                metadata.setdefault("node_id", node_ctx.node.node_id)
+                if source_node_id is not None:
+                    metadata.setdefault("node_id", source_node_id)
                 # Callbacks always have a user_id (the tapping user from
                 # the JWT on the original POST /callbacks). Push them
                 # user-scoped by default so only the user who tapped
@@ -308,18 +506,12 @@ def post_callback_result(
             except Exception as e:
                 # Inbox creation is best-effort — the result still records.
                 logger.warning(
-                    "Callback %s: inbox fan-out failed: %s", job_id[:8], e,
+                    "Callback %s: inbox fan-out failed: %s", job.id[:8], e,
                 )
 
     logger.info(
         "Callback job result job_id=%s status=%s nav=%s error=%r",
-        job_id[:8], job.status, job.navigation_type, body.error,
-    )
-
-    return CallbackResultResponse(
-        id=job.id,
-        status=job.status,
-        completed_at=job.completed_at,
+        job.id[:8], job.status, job.navigation_type, error,
     )
 
 
