@@ -370,6 +370,11 @@ async def create_call_plan(
         details = await _draft_details(
             business=business, goal=goal, initiator=initiator
         )
+        # Plan-time context: real availability from the node's calendar
+        # command, if one is installed and reachable (PRD cross-agent-context).
+        details = await apply_availability_envelope(
+            household_id=household_id, goal=goal, details=details
+        )
 
         ttl_minutes = _int_setting("phone_calls.plan_ttl_minutes", household_id, 20)
         now = datetime.utcnow()
@@ -470,20 +475,106 @@ _SCHEDULING_HINTS = (
 )
 
 
+def is_scheduling_goal(goal: str, details: str = "") -> bool:
+    """Does this call need times negotiated on it?"""
+    lowered = f"{goal} {details}".lower()
+    return any(h in lowered for h in _SCHEDULING_HINTS)
+
+
 def _ensure_times_section(goal: str, details: str) -> str:
     """Deterministic belt over the prompt: scheduling goals ALWAYS carry an
     Acceptable-times section the user can fill on the confirm card — the
     model complying with the drafting prompt is hoped-for, not guaranteed
     (live 2026-07-19: a card shipped without it)."""
-    lowered = f"{goal} {details}".lower()
     if "acceptable times" in details.lower():
         return details
-    if not any(h in lowered for h in _SCHEDULING_HINTS):
+    if not is_scheduling_goal(goal, details):
         return details
     return (
         f"{details.rstrip()}\n"
         "Acceptable times: (fill in your availability before calling)"
     )
+
+
+def _format_availability(data: dict[str, Any]) -> str | None:
+    """Render a calendar answer as the brief's constraint envelope.
+
+    Kept compact and human-editable: the card is still the guardrail
+    boundary, so the user must be able to read and correct this at a
+    glance. Returns None when the answer carries nothing usable.
+    """
+    free = [str(w) for w in (data.get("free") or []) if str(w).strip()]
+    busy = [str(w) for w in (data.get("busy") or []) if str(w).strip()]
+    if not free and not busy:
+        return None
+    parts: list[str] = []
+    if free:
+        parts.append("Acceptable times: " + "; ".join(free[:6]))
+    else:
+        parts.append("Acceptable times: (calendar shows no free windows — edit me)")
+    if busy:
+        parts.append("Do not book: " + "; ".join(busy[:6]))
+    return "\n".join(parts)
+
+
+async def apply_availability_envelope(
+    *, household_id: str, goal: str, details: str
+) -> str:
+    """Bake real calendar availability into the brief at PLAN time.
+
+    Context enters here and only here (phone-calls PRD, cross-agent-context):
+    the callee is untrusted input, so the call loop never gets a live
+    calendar tool — it only ever sees this envelope, which the user reviews
+    and can edit on the confirm card.
+
+    Degrades in every direction: no scheduling goal, no node, no calendar
+    command, node offline, malformed answer — all fall back to the
+    fill-me-in placeholder rather than blocking or inventing times.
+    """
+    if not is_scheduling_goal(goal, details):
+        return details
+    if "acceptable times" in details.lower() and "(fill in" not in details.lower():
+        return details  # the user or the model already supplied real times
+
+    try:
+        from app.services.context_provider_client import query_context
+
+        start = datetime.utcnow().date()
+        answer = await query_context(
+            household_id,
+            "availability",
+            {"start": start.isoformat(), "end": (start + timedelta(days=7)).isoformat()},
+        )
+    except Exception as e:  # noqa: BLE001 — context is an enhancement, never a gate
+        logger.warning("Availability lookup failed: %s", e)
+        return _ensure_times_section(goal, details)
+
+    if not answer.ok:
+        logger.info("Availability unavailable (%s) — using placeholder", answer.error)
+        base = _strip_times_placeholder(details)
+        return (
+            f"{base.rstrip()}\n"
+            "Acceptable times: (calendar unavailable — fill in your availability)"
+        )
+
+    envelope = _format_availability(answer.data)
+    if not envelope:
+        return _ensure_times_section(goal, details)
+
+    return f"{_strip_times_placeholder(details).rstrip()}\n{envelope}"
+
+
+def _strip_times_placeholder(details: str) -> str:
+    """Drop a fill-me-in line so a real envelope can replace it."""
+    kept = [
+        line
+        for line in details.splitlines()
+        if not (
+            line.lower().startswith("acceptable times:")
+            and ("fill in" in line.lower() or "unavailable" in line.lower())
+        )
+    ]
+    return "\n".join(kept)
 
 
 async def _resolve_initiator_name(user_id: int | None) -> str | None:
