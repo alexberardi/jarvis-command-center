@@ -436,3 +436,143 @@ class TestEnsureTimesSection:
 
         details = "Order a large pepperoni pizza for pickup."
         assert _ensure_times_section("order a pizza for pickup", details) == details
+
+
+class TestPlanResolution:
+    """Where the number came from must be visible on the card.
+
+    The user is the last line of defence against a stale or wrong number
+    (PRD stale-search-results mitigation), so the card always says whether
+    they're looking at something they curated, something a search engine
+    turned up, or nothing at all.
+    """
+
+    @staticmethod
+    async def _run_plan(bound_db, *, search_result, business="Tony's Pizzeria"):
+        """Drive create_call_plan with a stubbed search + captured card."""
+        from app.services import phone_call_service as svc
+
+        posted: dict = {}
+
+        async def _draft(**kwargs):
+            return "Order a large pepperoni."
+
+        async def _envelope(**kwargs):
+            return kwargs["details"]
+
+        with patch.object(svc, "_post_card", lambda **kw: posted.update(kw)), patch.object(
+            svc, "find_business_number", return_value=search_result
+        ), patch.object(svc, "_draft_details", _draft), patch.object(
+            svc, "apply_availability_envelope", _envelope
+        ), patch.object(
+            svc, "check_caps", return_value=None
+        ), patch.object(
+            svc, "_resolve_initiator_name", return_value=None
+        ), patch.object(
+            svc, "lookup_line_type", return_value="landline"
+        ):
+            await svc.create_call_plan(
+                business=business,
+                goal="Order a pizza",
+                household_id="hh-plan",
+                user_id=7,
+            )
+        return posted
+
+    @pytest.mark.asyncio
+    async def test_web_found_number_is_attributed_and_prefilled(self, bound_db):
+        from app.services.phone_number_search import NumberSearchResult
+
+        posted = await self._run_plan(
+            bound_db,
+            search_result=NumberSearchResult(
+                number="+17325924183",
+                source_url="https://tonys.example",
+                address="33 National Ave",
+            ),
+        )
+
+        assert "web search" in posted["body"].lower()
+        assert "check it before calling" in posted["body"].lower()
+        assert "https://tonys.example" in posted["body"]
+        assert posted["metadata"]["number_source"] == "web"
+        tel = posted["metadata"]["editable_fields"][0]
+        assert tel["data_key"] == "dialed_number"
+        assert tel["initial"] == "+17325924183"
+
+    @pytest.mark.asyncio
+    async def test_phonebook_number_is_attributed(self, bound_db):
+        from app.services.phone_number_search import NumberSearchResult
+
+        contact = PhoneContact(
+            id=str(uuid.uuid4()),
+            household_id="hh-plan",
+            name="Tony's Pizzeria",
+            normalized_name="tonys pizzeria",
+            number="+19085551234",
+            source="manual",
+            do_not_call=False,
+            created_at=datetime.utcnow(),
+        )
+        bound_db.add(contact)
+        bound_db.commit()
+
+        posted = await self._run_plan(
+            bound_db, search_result=NumberSearchResult(reason="no_results")
+        )
+
+        assert "from your phonebook" in posted["body"].lower()
+        assert posted["metadata"]["number_source"] == "phonebook"
+        assert posted["metadata"]["editable_fields"][0]["initial"] == "+19085551234"
+
+    @pytest.mark.asyncio
+    async def test_gate_off_says_search_is_disabled(self, bound_db):
+        """"Web search is off" and "I couldn't find it" are different facts."""
+        from app.services.phone_number_search import NumberSearchResult
+
+        posted = await self._run_plan(
+            bound_db,
+            search_result=NumberSearchResult(reason="web_search_disabled"),
+        )
+
+        body = posted["body"].lower()
+        assert "web search is off" in body
+        assert posted["metadata"]["number_source"] == "none"
+        assert posted["metadata"]["editable_fields"][0]["initial"] == ""
+
+    @pytest.mark.asyncio
+    async def test_search_miss_admits_it_looked(self, bound_db):
+        from app.services.phone_number_search import NumberSearchResult
+
+        posted = await self._run_plan(
+            bound_db, search_result=NumberSearchResult(reason="no_number_found")
+        )
+
+        assert "couldn't find a number for it online" in posted["body"].lower()
+        assert posted["metadata"]["editable_fields"][0]["initial"] == ""
+
+    @pytest.mark.asyncio
+    async def test_search_failure_is_honest(self, bound_db):
+        from app.services.phone_number_search import NumberSearchResult
+
+        posted = await self._run_plan(
+            bound_db, search_result=NumberSearchResult(reason="search_failed")
+        )
+        assert "lookup failed" in posted["body"].lower()
+
+    @pytest.mark.asyncio
+    async def test_web_address_persisted_for_autosave(self, bound_db):
+        from app.services.phone_number_search import NumberSearchResult
+
+        await self._run_plan(
+            bound_db,
+            search_result=NumberSearchResult(
+                number="+17325924183", address="33 National Ave"
+            ),
+        )
+        row = (
+            bound_db.query(PhoneCallSession)
+            .filter(PhoneCallSession.household_id == "hh-plan")
+            .one()
+        )
+        assert row.contact_address == "33 National Ave"

@@ -34,6 +34,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.models import PhoneCallSession, PhoneContact
+from app.services.phone_number_search import find_business_number
 from app.services.server_callback_registry import (
     ServerCallbackContext,
     ServerCallbackResult,
@@ -186,6 +187,35 @@ def resolve_contact(
     except Exception as e:  # noqa: BLE001 — resolution is best-effort
         logger.warning("Contact fuzzy match failed: %s", e)
         return None
+
+
+def _search_miss_note(reason: str | None) -> str:
+    """Honest, specific reason the card has no number to show.
+
+    "Web search is off" and "I looked and couldn't find it" are very
+    different facts for the user; collapsing them into one message would
+    hide a setting they can change.
+    """
+    if reason == "web_search_disabled":
+        return (
+            "This business isn't in your phonebook, and web search is off "
+            "for your household, so I couldn't look it up — enter the "
+            "number to call."
+        )
+    if reason in ("no_results", "no_number_found"):
+        return (
+            "This business isn't in your phonebook and I couldn't find a "
+            "number for it online — enter the number to call."
+        )
+    if reason == "search_failed":
+        return (
+            "This business isn't in your phonebook and the lookup failed — "
+            "enter the number to call."
+        )
+    return (
+        "I couldn't find this business in the phonebook — "
+        "enter the number to call."
+    )
 
 
 async def lookup_line_type(number: str) -> str:
@@ -351,17 +381,34 @@ async def create_call_plan(
                 resolved_number = None
             line_type = contact.line_type or "unknown"
 
-        # No phonebook hit → the card ships without a number and the user
-        # supplies one in the editable field. (quick_search web fallback is
-        # deliberately conservative in P1: search results are prose, not
-        # structured numbers — the human-eyeballs-the-number card is the
-        # safety mechanism either way. If web search is off, say so.)
+        # Where the number came from drives the card's note: the user must
+        # always know whether they're looking at a number they curated or one
+        # a search engine guessed at (PRD stale-search-results mitigation).
+        number_source = "phonebook" if resolved_number else None
+        search_address: str | None = None
+        search_url: str | None = None
         resolution_note = ""
+
         if contact is None:
-            resolution_note = (
-                "I couldn't find this business in the phonebook — "
-                "enter the number to call."
+            # Phonebook miss → try the web, gated per household. Runs in a
+            # thread: the search + scrape machinery is synchronous.
+            search = await asyncio.to_thread(
+                find_business_number, business, household_id
             )
+            if search.found:
+                resolved_number = search.number
+                number_source = "web"
+                search_address = search.address
+                search_url = search.source_url
+                resolution_note = (
+                    "I found this number via web search — check it before "
+                    "calling."
+                )
+            else:
+                resolution_note = _search_miss_note(search.reason)
+
+        if number_source == "phonebook":
+            resolution_note = "This number is from your phonebook."
 
         if resolved_number and line_type == "unknown":
             line_type = await lookup_line_type(resolved_number)
@@ -388,6 +435,7 @@ async def create_call_plan(
             details=details,
             resolved_number=resolved_number,
             dialed_number=None,
+            contact_address=search_address,
             line_type=line_type,
             state="draft",
             created_at=now,
@@ -400,9 +448,11 @@ async def create_call_plan(
         mobile_note = (
             " Note: this appears to be a mobile number." if line_type == "mobile" else ""
         )
+        source_line = f" Source: {search_url}" if search_url else ""
         metadata = {
             "household_id": household_id,
             "session_id": session_row.id,
+            "number_source": number_source or "none",
             "editor_schema": 2,
             "editable_fields": [
                 {
@@ -451,8 +501,8 @@ async def create_call_plan(
             summary=f"{goal}{mobile_note}",
             body=(
                 f"Review the number and details, then tap **Call now**. "
-                f"{resolution_note} The call will open with an AI + recording "
-                f"disclosure.{mobile_note}"
+                f"{resolution_note}{source_line} The call will open with an "
+                f"AI + recording disclosure.{mobile_note}"
             ),
             metadata=metadata,
         )
@@ -924,6 +974,74 @@ def post_outcome_card(session: PhoneCallSession) -> None:
             ),
         },
     )
+
+
+def upsert_contact_from_call(db: Session, session: PhoneCallSession) -> PhoneContact | None:
+    """Remember a business after a call that actually worked.
+
+    Without this the phonebook can never fill: nothing else writes to it, so
+    every call would keep asking the user for a number they already gave.
+
+    Rules:
+    - Only completed calls. A failed or declined attempt proves nothing about
+      the number.
+    - The **dialed** number wins, not the resolved one. If the user corrected
+      it on the confirm card, that correction is the most trustworthy signal
+      we have about this business.
+    - ``do_not_call`` is never cleared. A household that blocked a business
+      does not un-block it by calling once.
+    - Idempotent: same business, same household → one row, freshly verified.
+    """
+    if session.state != "done":
+        return None
+    number = session.dialed_number or session.resolved_number
+    name = (session.contact_name or "").strip()
+    if not number or not name:
+        return None
+    try:
+        number = normalize_us_number(number)
+    except NumberValidationError:
+        return None
+
+    normalized = _normalize_name(name)
+    existing = (
+        db.query(PhoneContact)
+        .filter(
+            PhoneContact.household_id == session.household_id,
+            PhoneContact.normalized_name == normalized,
+        )
+        .first()
+    )
+    now = datetime.utcnow()
+
+    if existing is not None:
+        existing.number = number          # a user correction supersedes
+        existing.verified_at = now
+        if session.line_type and session.line_type != "unknown":
+            existing.line_type = session.line_type
+        if session.contact_address and not existing.address:
+            existing.address = session.contact_address
+        if existing.source == "web":
+            existing.source = "call"      # a completed call outranks a guess
+        db.commit()
+        return existing
+
+    contact = PhoneContact(
+        id=str(uuid4()),
+        household_id=session.household_id,
+        name=name,
+        normalized_name=normalized,
+        number=number,
+        address=session.contact_address,
+        source="call",
+        line_type=(session.line_type if session.line_type != "unknown" else None),
+        do_not_call=False,
+        verified_at=now,
+        created_at=now,
+    )
+    db.add(contact)
+    db.commit()
+    return contact
 
 
 def post_escalation_card(session: PhoneCallSession, question: str) -> None:

@@ -33,6 +33,7 @@ from app.services.phone_call_service import (
     post_escalation_card,
     post_outcome_card,
     transition,
+    upsert_contact_from_call,
 )
 
 router = APIRouter()
@@ -227,6 +228,13 @@ def post_phone_session_event(
             transition(s, "done")
         s.heartbeat_at = now
         db.commit()
+        # Remember the business so the next call to it needs no lookup.
+        # Best-effort: a phonebook write must never cost us the outcome card.
+        try:
+            upsert_contact_from_call(db, s)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Phonebook auto-save failed for %s: %s", s.id[:8], e)
+            db.rollback()
         post_outcome_card(s)
         return {"status": "ok", "state": s.state}
 
