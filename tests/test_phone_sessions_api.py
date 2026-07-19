@@ -230,6 +230,49 @@ class TestOutcome:
         assert r.json()["state"] == "done"
 
 
+class TestEscalation:
+    def test_escalation_posts_answer_card(self, client, test_db):
+        s = _mk_session(test_db, state="in_call")
+        with patch("app.services.phone_call_service._post_card") as card:
+            r = client.post(
+                _events_url(s.id),
+                json={"type": "escalation", "question": "Only 6:30 is available — OK?"},
+            )
+        assert r.status_code == 200
+        card.assert_called_once()
+        kwargs = card.call_args.kwargs
+        # Security requirement 3: the callee's question is rendered attributed
+        # ("asked:"), never in Jarvis's voice, and never as tappable actions.
+        assert "asked" in kwargs["summary"].lower()
+        assert "Only 6:30 is available" in kwargs["body"]
+        meta = kwargs["metadata"]
+        element_callbacks = {e["callback"] for e in meta["interactive_elements"]}
+        assert element_callbacks == {"escalation_answer", "cancel_call"}
+        for el in meta["interactive_elements"]:
+            assert el["target"] == "server"
+            assert el["data"]["session_id"] == s.id
+        # The answer flows through the multiline editor into data["answer"].
+        assert meta["editable_fields"][0]["data_key"] == "answer"
+        assert meta["editor_schema"] == 2
+
+    def test_escalation_requires_question(self, client, test_db):
+        s = _mk_session(test_db, state="in_call")
+        with patch("app.services.phone_call_service._post_card") as card:
+            r = client.post(_events_url(s.id), json={"type": "escalation"})
+        assert r.status_code == 400
+        card.assert_not_called()
+
+    def test_escalation_rejected_outside_in_call(self, client, test_db):
+        s = _mk_session(test_db, state="wrapup")
+        with patch("app.services.phone_call_service._post_card") as card:
+            r = client.post(
+                _events_url(s.id),
+                json={"type": "escalation", "question": "anything"},
+            )
+        assert r.status_code == 409
+        card.assert_not_called()
+
+
 class TestAuthAndValidation:
     def test_unknown_event_type_400s(self, client, test_db):
         s = _mk_session(test_db)

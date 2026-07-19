@@ -9,6 +9,7 @@ the other half; keep the shapes in lockstep (contract tests pin them):
       {"type": "state", "state", ...extra}    lifecycle transitions
       {"type": "turn", "turn": {...}}         transcript append (+heartbeat)
       {"type": "heartbeat"}                   bare liveness
+      {"type": "escalation", "question"}      mid-call question → answer card + push
       {"type": "outcome", "outcome", "audio_key"}  final facts + audio ref
 
 Security requirement 1: the claim CAS here (confirmed→dialing, single
@@ -29,6 +30,7 @@ from app.models import PhoneCallSession
 from app.services.phone_call_service import (
     ACTIVE_STATES,
     TERMINAL_STATES,
+    post_escalation_card,
     post_outcome_card,
     transition,
 )
@@ -48,6 +50,8 @@ class SessionEventBody(BaseModel):
     duration_seconds: int | None = None
     # turn
     turn: dict[str, Any] | None = None
+    # escalation
+    question: str | None = None
     # outcome
     outcome: dict[str, Any] | None = None
     audio_key: str | None = None
@@ -185,6 +189,21 @@ def post_phone_session_event(
             raise HTTPException(status_code=409, detail=f"Session is {s.state}")
         s.heartbeat_at = now
         db.commit()
+        return {"status": "ok"}
+
+    if body.type == "escalation":
+        # Gateway hit something outside the brief: build the answer card and
+        # push it to the initiating user. The gateway holds its own bounded
+        # window (~25 s) — a late tap gets the graceful "call may have ended"
+        # path via the escalation_answer callback, never a stuck card.
+        question = (body.question or "").strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="question required")
+        if s.state != "in_call":
+            raise HTTPException(status_code=409, detail=f"Session is {s.state}")
+        s.heartbeat_at = now
+        db.commit()
+        post_escalation_card(s, question)
         return {"status": "ok"}
 
     if body.type == "outcome":

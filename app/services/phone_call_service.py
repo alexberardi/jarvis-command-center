@@ -779,6 +779,66 @@ def post_outcome_card(session: PhoneCallSession) -> None:
     )
 
 
+def post_escalation_card(session: PhoneCallSession, question: str) -> None:
+    """Mid-call escalation: push the answer card to the initiating user.
+
+    The callee's question is UNTRUSTED input (security requirement 3): it is
+    rendered attributed — "the business asked" — never in Jarvis's voice, and
+    never as tappable actions; the only actions are our own fixed chips. The
+    gateway's answer window is short (~25 s), so a late tap degrades through
+    the escalation_answer callback's "call may have ended" path.
+    """
+    metadata: dict[str, Any] = {
+        "household_id": session.household_id,
+        "session_id": session.id,
+        "editor_schema": 2,
+        "editable_fields": [
+            {
+                "label": "Your answer",
+                "initial": "",
+                "data_key": "answer",
+                "input_type": "multiline",
+                "required": True,
+            },
+        ],
+        # Bounds stale cards; the real window is the gateway's, not this TTL.
+        "expires_at": (datetime.utcnow() + timedelta(minutes=10)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "interactive_elements": [
+            {
+                "id": "send-answer",
+                "label": "Send answer",
+                "command": "make_phone_call",
+                "callback": "escalation_answer",
+                "target": "server",
+                "data": {"session_id": session.id, "answer": ""},
+            },
+            {
+                "id": "end-call",
+                "label": "End the call",
+                "command": "make_phone_call",
+                "callback": "cancel_call",
+                "target": "server",
+                "data": {"session_id": session.id},
+            },
+        ],
+    }
+    _post_card(
+        household_id=session.household_id,
+        user_id=session.user_id,
+        title="📞 The call needs your input",
+        summary=f'They asked: "{question}"',
+        body=(
+            f'On the call to **{session.contact_name or session.dialed_number}**, '
+            f'the person asked:\n\n> {question}\n\n'
+            "Answer quickly — Jarvis is holding the line and will offer a "
+            "call-back if this window passes."
+        ),
+        metadata=metadata,
+    )
+
+
 def _post_card(
     *,
     household_id: str,
