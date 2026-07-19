@@ -553,4 +553,62 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         default="0 21 * * *",
         description="Cron (household tz) for the daily attention-journal card",
     ),
+
+    # Phone calls (phone-calls PRD) — all fail-closed, household-scoped.
+    SettingDefinition(
+        key="phone_calls.enabled",
+        category="phone_calls",
+        value_type="bool",
+        default=False,
+        description="Master toggle for AI phone calls (default OFF, fail-closed)",
+    ),
+    SettingDefinition(
+        key="phone_calls.plan_ttl_minutes",
+        category="phone_calls",
+        value_type="int",
+        default=20,
+        description="Minutes a call plan (confirm card) stays valid before expiring",
+    ),
+    SettingDefinition(
+        key="phone_calls.audio_retention_days",
+        category="phone_calls",
+        value_type="int",
+        default=30,
+        description="Days to retain call audio AND transcript before reaping",
+    ),
+    SettingDefinition(
+        key="phone_calls.max_call_seconds",
+        category="phone_calls",
+        value_type="int",
+        default=600,
+        description="Hard cap on a single call's duration (reaper enforces)",
+    ),
+    SettingDefinition(
+        key="phone_calls.attempt_cap",
+        category="phone_calls",
+        value_type="int",
+        default=2,
+        description="Max dial attempts per task",
+    ),
+    SettingDefinition(
+        key="phone_calls.calls_per_day",
+        category="phone_calls",
+        value_type="int",
+        default=10,
+        description="Per-household daily call/plan cap (also caps pending plans)",
+    ),
+    SettingDefinition(
+        key="phone_calls.monthly_minutes_cap",
+        category="phone_calls",
+        value_type="int",
+        default=60,
+        description="Per-household monthly call minutes cap (fail-closed when exceeded)",
+    ),
+    SettingDefinition(
+        key="phone_calls.max_concurrent_calls",
+        category="phone_calls",
+        value_type="int",
+        default=1,
+        description="Max simultaneous active calls per household",
+    ),
 ]

@@ -31,6 +31,16 @@ router = APIRouter(tags=["mobile-household-settings"])
 HOUSEHOLD_CONTROLLABLE_SETTINGS: dict[str, str] = {
     "web_search.enabled": "bool",
     "web_scraping.allow_external": "bool",
+    # Phone calls (phone-calls PRD): the gate + user-tunable caps. The
+    # attempt cap stays out — it's a compliance posture knob, not a
+    # household preference.
+    "phone_calls.enabled": "bool",
+    "phone_calls.plan_ttl_minutes": "int",
+    "phone_calls.audio_retention_days": "int",
+    "phone_calls.max_call_seconds": "int",
+    "phone_calls.calls_per_day": "int",
+    "phone_calls.monthly_minutes_cap": "int",
+    "phone_calls.max_concurrent_calls": "int",
 }
 
 # Role required to CHANGE a household setting. Reads are open to any member;
