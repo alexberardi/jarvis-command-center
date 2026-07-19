@@ -409,3 +409,30 @@ class TestReaper:
         assert reaped == 1
         bound_db.refresh(s)
         assert s.state == "expired"
+
+
+class TestEnsureTimesSection:
+    """Deterministic Acceptable-times guarantee (live 2026-07-19: a
+    scheduling card shipped without the section — model non-compliance)."""
+
+    def test_scheduling_goal_gets_placeholder(self):
+        from app.services.phone_call_service import _ensure_times_section
+
+        out = _ensure_times_section(
+            "Book a haircut appointment this week",
+            "Book a haircut appointment this week",
+        )
+        assert "Acceptable times:" in out
+        assert "fill in your availability" in out
+
+    def test_existing_section_untouched(self):
+        from app.services.phone_call_service import _ensure_times_section
+
+        details = "Book a table.\nAcceptable times: Fri 6-8pm"
+        assert _ensure_times_section("book a table", details) == details
+
+    def test_non_scheduling_goal_untouched(self):
+        from app.services.phone_call_service import _ensure_times_section
+
+        details = "Order a large pepperoni pizza for pickup."
+        assert _ensure_times_section("order a pizza for pickup", details) == details
