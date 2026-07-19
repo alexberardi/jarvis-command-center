@@ -465,6 +465,27 @@ async def create_call_plan(
         db.close()
 
 
+_SCHEDULING_HINTS = (
+    "appointment", "book", "schedule", "reservation", "reserve", "visit",
+)
+
+
+def _ensure_times_section(goal: str, details: str) -> str:
+    """Deterministic belt over the prompt: scheduling goals ALWAYS carry an
+    Acceptable-times section the user can fill on the confirm card — the
+    model complying with the drafting prompt is hoped-for, not guaranteed
+    (live 2026-07-19: a card shipped without it)."""
+    lowered = f"{goal} {details}".lower()
+    if "acceptable times" in details.lower():
+        return details
+    if not any(h in lowered for h in _SCHEDULING_HINTS):
+        return details
+    return (
+        f"{details.rstrip()}\n"
+        "Acceptable times: (fill in your availability before calling)"
+    )
+
+
 async def _resolve_initiator_name(user_id: int | None) -> str | None:
     """Display name for the disclosure line + brief; None degrades gracefully."""
     if user_id is None:
@@ -525,10 +546,10 @@ async def _draft_details(
             max_tokens=200,
         )
         content = (result.get("content") or result.get("message") or "").strip()
-        return content or goal
+        return _ensure_times_section(goal, content or goal)
     except Exception as e:  # noqa: BLE001 — draft is a nicety
         logger.warning("Details draft failed, using raw goal: %s", e)
-        return goal
+        return _ensure_times_section(goal, goal)
 
 
 # =============================================================================
