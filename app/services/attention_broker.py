@@ -124,6 +124,7 @@ def record_and_route(
     target_user_id: int | None = None,
     origin_node_id: str | None = None,
     payload: dict | None = None,
+    force: bool = False,
 ) -> BrokerDecision:
     """Record the event and run the gates. Commits the event + delivery rows.
 
@@ -132,6 +133,9 @@ def record_and_route(
     mark_outcome(). The broker never raises for policy reasons; callers wrap
     this in try/except and fall through to legacy delivery on error
     (fail-open — see the PRD's Security section).
+
+    ``force=True`` bypasses every gate including dedup and always delivers at
+    the requested rung — the producer-asserted "never silence this" signal.
     """
     settings = get_settings_service()
     trail: list[dict] = []
@@ -141,7 +145,14 @@ def record_and_route(
     title = (title or "").strip()[:500] or "(untitled)"
     category = (category or "general").strip()[:50] or "general"
     source = (source or category).strip()[:100]
-    key = dedupe_key or fallback_dedupe_key(title)
+    # explicit_key is what the PRODUCER set; the title-hash fallback is only a
+    # convenience for legacy producers. The distinction is safety-critical:
+    # the fallback must NEVER dedup a safety-class alert, or a twice-daily
+    # medication reminder (same title morning + evening) gets suppressed as a
+    # "duplicate" of the earlier dose (this silenced a real Keppra evening
+    # dose on 2026-07-19). Safety alerts dedup ONLY on an explicit key.
+    explicit_key = dedupe_key
+    key = explicit_key or fallback_dedupe_key(title)
 
     event = AttentionEvent(
         household_id=household_id,
@@ -165,25 +176,36 @@ def record_and_route(
     rung = _cap(rung, "push")
     withheld_by: str | None = None
 
-    # Gate 0 — dedup. Applies to safety categories too (exact key only).
-    window_h = _int_setting(settings, "attention.dedupe_window_hours", household_id, 24)
-    window_start = datetime.utcnow() - timedelta(hours=window_h)
-    dup = (
-        db.query(AttentionEvent.id)
-        .filter(
-            AttentionEvent.household_id == household_id,
-            AttentionEvent.source == source,
-            AttentionEvent.dedupe_key == key,
-            AttentionEvent.created_at >= window_start,
-            AttentionEvent.id != event.id,
+    # Gate 0 — dedup. Runs only when it is safe to: NEVER for a forced alert,
+    # and for a safety-class alert only when the producer set an explicit key
+    # (the title-hash fallback must not silence a recurring dose reminder).
+    dedup_applies = (not force) and (explicit_key is not None or not safety)
+    dup = None
+    if dedup_applies:
+        window_h = _int_setting(settings, "attention.dedupe_window_hours", household_id, 24)
+        window_start = datetime.utcnow() - timedelta(hours=window_h)
+        dup = (
+            db.query(AttentionEvent.id)
+            .filter(
+                AttentionEvent.household_id == household_id,
+                AttentionEvent.source == source,
+                AttentionEvent.dedupe_key == key,
+                AttentionEvent.created_at >= window_start,
+                AttentionEvent.id != event.id,
+            )
+            .first()
         )
-        .first()
-    )
-    if dup is not None:
+
+    if force:
+        trail.append({"gate": "force", "result": "bypass", "detail": "forced delivery — all gates skipped"})
+    elif dup is not None:
         trail.append({"gate": "dedupe", "result": "duplicate", "detail": f"of event {dup.id} within {window_h}h"})
         rung, withheld_by = "journal", "dedupe"
     elif safety:
-        trail.append({"gate": "safety_class", "result": "bypass", "detail": f"category '{category}' is safety-class"})
+        detail = f"category '{category}' is safety-class"
+        if explicit_key is None:
+            detail += " — never deduped without an explicit key"
+        trail.append({"gate": "safety_class", "result": "bypass", "detail": detail})
     else:
         # Gate 1 — consent ceiling.
         consent = (
