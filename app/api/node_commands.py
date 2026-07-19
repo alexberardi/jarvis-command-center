@@ -233,6 +233,71 @@ def verify_command(
     return VerifyResponse(valid=valid)
 
 
+# ── Attention broker interposition (prds/attention-broker.md) ─────────
+#
+# With attention.enabled on for the household, the three node notification
+# endpoints below route through the broker (journal, dedup, budgets, quiet
+# hours) before delivering via the same downstream services. Broker errors
+# fail OPEN to legacy delivery: losing a medication push to a broker bug is
+# worse than losing governance for one event.
+
+
+def _attention_gate(
+    *,
+    household_id: str,
+    origin_node_id: str,
+    source: str,
+    category: str,
+    title: str,
+    summary: str,
+    requested_rung: str,
+    dedupe_key: str | None,
+    target_user_id: int | None,
+    payload: dict | None,
+):
+    """Returns a BrokerDecision, or None for legacy (broker off / broker error)."""
+    from app.db import SessionLocal
+    from app.services.attention_broker import attention_enabled, record_and_route
+
+    try:
+        if not attention_enabled(household_id):
+            return None
+        db = SessionLocal()
+        try:
+            return record_and_route(
+                db,
+                household_id=household_id,
+                source=source,
+                category=category,
+                title=title,
+                summary=summary,
+                requested_rung=requested_rung,
+                dedupe_key=dedupe_key,
+                target_user_id=target_user_id,
+                origin_node_id=origin_node_id,
+                payload=payload,
+            )
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Attention broker evaluation failed (fail-open to legacy delivery): %s", e)
+        return None
+
+
+def _attention_outcome(delivery_id: str, *, outcome: str, inbox_item_id: str | None = None) -> None:
+    from app.db import SessionLocal
+    from app.services.attention_broker import mark_outcome
+
+    try:
+        db = SessionLocal()
+        try:
+            mark_outcome(db, delivery_id, outcome=outcome, inbox_item_id=inbox_item_id)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Attention outcome stamp failed for %s: %s", delivery_id, e)
+
+
 # ── Node Push Notification ────────────────────────────────────────────
 
 
@@ -247,11 +312,17 @@ class PushNotificationRequest(BaseModel):
     # commands with a clear owner (reminders, voice-triggered single-user
     # results) should pass "user" explicitly.
     target_type: Literal["user", "household"] = "household"
+    # Stable identity for broker dedup (SDK Alert.dedupe_key). Optional and
+    # additive — legacy callers fall back to a normalized-title hash.
+    dedupe_key: str | None = None
 
 
 class PushNotificationResponse(BaseModel):
     sent: bool
     inbox_item_id: str | None = None
+    # Set when the attention broker withheld or demoted the request
+    # (gate name, e.g. "budget", "dedupe"). None on legacy path.
+    withheld_by: str | None = None
 
 
 @router.post(
@@ -269,11 +340,57 @@ async def node_push_notification(
     ``user_id`` is provided, the notification targets only that user's
     devices; otherwise it broadcasts to the entire household.
     """
-    from app.services.inbox_notification_service import push_confirmation_to_inbox
+    import asyncio
+
+    from app.services.inbox_notification_service import (
+        post_inbox_item_sync,
+        push_confirmation_to_inbox,
+    )
 
     household_id = node_context.node.household_id
     node_id = node_context.node.node_id
 
+    decision = _attention_gate(
+        household_id=household_id,
+        origin_node_id=node_id,
+        source=request.category,
+        category=request.category,
+        title=request.title,
+        summary=request.body,
+        requested_rung="push",
+        dedupe_key=request.dedupe_key,
+        target_user_id=request.user_id,
+        payload=request.model_dump(),
+    )
+    if decision is not None and not decision.deliver:
+        return PushNotificationResponse(sent=False, withheld_by=decision.withheld_by)
+
+    if decision is not None and decision.rung == "inbox":
+        # Demoted: inbox card, no push. post_inbox_item_sync blocks — thread it.
+        inbox_item_id = await asyncio.to_thread(
+            post_inbox_item_sync,
+            household_id=household_id,
+            user_id=request.user_id,
+            title=request.title,
+            summary=request.body,
+            body=request.body,
+            category=request.category,
+            metadata={"node_id": node_id},
+            push=False,
+            target_type=request.target_type,
+        )
+        _attention_outcome(
+            decision.delivery_id,
+            outcome="delivered" if inbox_item_id else "failed",
+            inbox_item_id=inbox_item_id,
+        )
+        return PushNotificationResponse(
+            sent=inbox_item_id is not None,
+            inbox_item_id=inbox_item_id,
+        )
+
+    # Legacy path (broker off/errored) and broker-approved push both land here —
+    # the delivery call is byte-identical to the pre-broker behavior.
     inbox_item_id = await push_confirmation_to_inbox(
         household_id=household_id,
         user_id=request.user_id,
@@ -285,6 +402,13 @@ async def node_push_notification(
         actions=[],  # No actions — informational only
         target_type=request.target_type,
     )
+
+    if decision is not None:
+        _attention_outcome(
+            decision.delivery_id,
+            outcome="delivered" if inbox_item_id else "failed",
+            inbox_item_id=inbox_item_id,
+        )
 
     return PushNotificationResponse(
         sent=inbox_item_id is not None,
@@ -371,6 +495,7 @@ class SendLinkRequest(BaseModel):
 
 class SendLinkResponse(BaseModel):
     sent: bool
+    withheld_by: str | None = None
 
 
 @router.post(
@@ -388,7 +513,12 @@ async def node_send_link(
     server-side during the original voice conversation — the node only
     sees user_ids that CC told it about.
     """
-    from app.services.inbox_notification_service import send_link_push_sync
+    import asyncio
+
+    from app.services.inbox_notification_service import (
+        post_inbox_item_sync,
+        send_link_push_sync,
+    )
 
     url = (request.url or "").strip()
     if not (url.startswith("http://") or url.startswith("https://")):
@@ -398,13 +528,52 @@ async def node_send_link(
     title = (request.title or "Link from Jarvis").strip() or "Link from Jarvis"
     body = (request.body or "Tap to open").strip() or "Tap to open"
 
-    ok = send_link_push_sync(
+    decision = _attention_gate(
+        household_id=household_id,
+        origin_node_id=node_context.node.node_id,
+        source="send_link",
+        category="link",
+        title=title,
+        summary=body,
+        requested_rung="push",
+        dedupe_key=url,
+        target_user_id=request.user_id,
+        payload=request.model_dump(),
+    )
+    if decision is not None and not decision.deliver:
+        return SendLinkResponse(sent=False, withheld_by=decision.withheld_by)
+
+    if decision is not None and decision.rung == "inbox":
+        inbox_item_id = await asyncio.to_thread(
+            post_inbox_item_sync,
+            household_id=household_id,
+            user_id=request.user_id,
+            title=title,
+            summary=body,
+            body=f"{body}\n\n[{title}]({url})",
+            category="link",
+            metadata={"node_id": node_context.node.node_id},
+            push=False,
+            target_type="user",
+        )
+        _attention_outcome(
+            decision.delivery_id,
+            outcome="delivered" if inbox_item_id else "failed",
+            inbox_item_id=inbox_item_id,
+        )
+        return SendLinkResponse(sent=inbox_item_id is not None)
+
+    # send_link_push_sync blocks (httpx.Client) — keep it off the event loop.
+    ok = await asyncio.to_thread(
+        send_link_push_sync,
         household_id=household_id,
         user_id=request.user_id,
         url=url,
         title=title,
         body=body,
     )
+    if decision is not None:
+        _attention_outcome(decision.delivery_id, outcome="delivered" if ok else "failed")
     return SendLinkResponse(sent=ok)
 
 
@@ -437,11 +606,15 @@ class NodeInboxItemRequest(BaseModel):
     user_id: int | None = None
     create_push_notification: bool = False
     target_type: Literal["user", "household"] = "household"
+    # Stable identity for broker dedup (SDK Alert.dedupe_key). Optional and
+    # additive — legacy callers fall back to a normalized-title hash.
+    dedupe_key: str | None = None
 
 
 class NodeInboxItemResponse(BaseModel):
     id: str | None = None
     sent: bool
+    withheld_by: str | None = None
 
 
 @router.post(
@@ -480,6 +653,25 @@ def node_post_inbox_item(
     # doesn't need to know (or fake) its own node id.
     metadata.setdefault("node_id", node_context.node.node_id)
 
+    decision = _attention_gate(
+        household_id=household_id,
+        origin_node_id=node_context.node.node_id,
+        source=request.category or "general",
+        category=request.category or "general",
+        title=title,
+        summary=request.summary or "",
+        requested_rung="push" if request.create_push_notification else "inbox",
+        dedupe_key=request.dedupe_key or metadata.get("dedupe_key"),
+        target_user_id=request.user_id,
+        payload={k: v for k, v in request.model_dump().items() if k != "metadata"},
+    )
+    if decision is not None and not decision.deliver:
+        return NodeInboxItemResponse(sent=False, withheld_by=decision.withheld_by)
+
+    push = request.create_push_notification
+    if decision is not None:
+        push = decision.rung == "push"
+
     inbox_id = post_inbox_item_sync(
         household_id=household_id,
         user_id=request.user_id,
@@ -488,7 +680,13 @@ def node_post_inbox_item(
         body=request.body or "",
         category=request.category or "general",
         metadata=metadata,
-        push=request.create_push_notification,
+        push=push,
         target_type=request.target_type,
     )
+    if decision is not None:
+        _attention_outcome(
+            decision.delivery_id,
+            outcome="delivered" if inbox_id else "failed",
+            inbox_item_id=inbox_id,
+        )
     return NodeInboxItemResponse(id=inbox_id, sent=inbox_id is not None)
