@@ -375,6 +375,26 @@ async def startup_event():
 
     asyncio.create_task(_periodic_adapter_training())
 
+    # Phone-call session reaper (phone-calls PRD call lifecycle): stale
+    # heartbeats and over-limit calls -> failed + honest notify; expired
+    # drafts -> expired. 30s fixed tick — cheap (two indexed queries) and
+    # the 60s heartbeat-staleness window needs a sub-minute cadence.
+    from app.services.phone_call_service import register_phone_callbacks
+
+    register_phone_callbacks()
+
+    async def _periodic_phone_reaper() -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                from app.services.phone_call_service import reap_phone_sessions
+
+                await reap_phone_sessions()
+            except Exception as e:
+                logger.warning("Phone-session reaper tick failed: %s", e)
+
+    asyncio.create_task(_periodic_phone_reaper())
+
     # Routine scheduler — fire cron/interval routines on their target node.
     async def _periodic_routine_scheduler() -> None:
         while True:
@@ -663,6 +683,11 @@ app.include_router(mobile_command_data.router, prefix="/api/v0/mobile", tags=["m
 # Include mobile household-settings router (household-admin auth, e.g. web search toggle)
 from app.api import mobile_household_settings
 app.include_router(mobile_household_settings.router, prefix="/api/v0/mobile", tags=["mobile-household-settings"])
+
+# Phone-call session endpoints for the gateway (app-to-app auth). No /api/v0
+# prefix — the gateway's session_client addresses /internal/phone/... directly.
+from app.api import phone_sessions
+app.include_router(phone_sessions.router, tags=["phone-sessions"])
 
 # Settings router is included in startup_event after service_config is initialized
 

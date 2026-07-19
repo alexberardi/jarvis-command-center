@@ -255,6 +255,12 @@ class ConversationHandler:
             # here.  Avoid tools that trigger follow-up LLM calls or loops
             # (e.g. get_command_utterance_examples, request_validation).
             _safe_tool_names: list[str] = ["answer_question"]
+            # make_phone_call is ALWAYS offered — even when the household
+            # gate is off. Withholding it makes call-shaped utterances
+            # improvise with unrelated tools (observed 2026-07-19:
+            # hallucinated device control for "Call Tony's Pizzeria"); the
+            # tool's execute() speaks an honest refusal when disabled.
+            _safe_tool_names.append("make_phone_call")
             # Outbound-web tools (quick_search live lookups, deep_research) are
             # gated on the per-household web_search.enabled setting (default
             # OFF). When disabled they never enter the tool list — and because

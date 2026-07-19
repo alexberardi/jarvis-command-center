@@ -885,3 +885,79 @@ class AttentionFeedback(Base):
     user_id = Column(Integer, nullable=True)
     verb = Column(String(20), nullable=False)  # useful|not_useful|mute|why
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class PhoneCallSession(Base):
+    """AI phone-call session — NodeTask-style state machine (phone-calls PRD).
+
+    States: draft → confirmed → dialing → in_call → wrapup →
+    done | failed | declined | expired.
+
+    Written BEFORE dialing (the anti-deep-research rule: no session ever
+    vanishes). CC owns this row exclusively; the gateway reports through
+    POST /internal/phone/sessions/{id}/events and never touches the DB.
+
+    Audit trail (security requirement 7): resolved_number is what the
+    resolver produced, dialed_number is what was actually confirmed after
+    the user-editable card — number_edited says they differ; confirmed_by
+    is the JWT user whose tap authorized the dial (may differ from the
+    initiating speaker).
+    """
+    __tablename__ = 'phone_call_sessions'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    household_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True)          # initiating speaker/user
+    confirmed_by = Column(Integer, nullable=True)     # JWT user who tapped confirm
+    contact_id = Column(String(36), ForeignKey('phone_contacts.id', ondelete='SET NULL'), nullable=True)
+    contact_name = Column(String(255), nullable=True)
+    goal = Column(Text, nullable=False)               # what the call should achieve
+    details = Column(Text, nullable=True)             # the confirmed brief (guardrail boundary)
+    constraints = Column(Text, nullable=True)         # constraint envelope (P2)
+    resolved_number = Column(String(32), nullable=True)
+    dialed_number = Column(String(32), nullable=True)
+    number_edited = Column(Boolean, default=False, nullable=False)
+    line_type = Column(String(16), nullable=True)     # mobile|landline|voip|unknown
+    state = Column(String(16), nullable=False, default="draft", index=True)
+    error_message = Column(Text, nullable=True)
+    transcript_json = Column(Text, nullable=True)     # JSON list of turn dicts + timings
+    outcome_json = Column(Text, nullable=True)        # structured facts from wrapup
+    audio_object_key = Column(String(512), nullable=True)  # MinIO key (local mix)
+    worker_url = Column(String(512), nullable=True)   # claiming gateway worker (session affinity)
+    heartbeat_at = Column(DateTime, nullable=True)
+    twilio_call_sid = Column(String(64), nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    confirmed_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)      # draft TTL (plan_ttl_minutes)
+    ended_at = Column(DateTime, nullable=True)
+
+
+class PhoneContact(Base):
+    """Household phonebook entry (phone-calls PRD data model).
+
+    Household-scoped: a business's number is a household fact. Per-user
+    overlays (usual order, preferences) live in overlay_json keyed by
+    user_id. do_not_call is enforced at resolve time — a DNC'd contact is
+    refused before a plan is ever drafted.
+    """
+    __tablename__ = 'phone_contacts'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    household_id = Column(String(255), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    normalized_name = Column(String(255), nullable=False)
+    number = Column(String(32), nullable=False)       # E.164
+    address = Column(Text, nullable=True)
+    source = Column(String(16), nullable=False, default="manual")  # manual|call|web
+    line_type = Column(String(16), nullable=True)
+    do_not_call = Column(Boolean, default=False, nullable=False)
+    notes = Column(Text, nullable=True)
+    overlay_json = Column(Text, nullable=True)        # per-user overlays keyed by user_id
+    verified_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('household_id', 'normalized_name', name='uq_phone_contact_household_name'),
+    )
