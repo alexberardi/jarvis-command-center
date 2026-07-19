@@ -80,3 +80,80 @@ def test_get_requires_membership(client):
     with patch(ROLE, side_effect=deny), patch(SETTINGS, _settings_stub(False)):
         r = client.get(BASE)
     assert r.status_code == 403
+
+
+# =============================================================================
+# int coercion (prereq for the numeric phone_calls.* settings)
+# =============================================================================
+
+
+class TestIntCoercion:
+    """_coerce("int") semantics + endpoint behavior with an int-typed key."""
+
+    INT_ALLOWLIST = {
+        "web_search.enabled": "bool",
+        "phone_calls.plan_ttl_minutes": "int",
+    }
+
+    def test_coerce_int_accepts_int_str_and_whole_float(self):
+        from app.api.mobile_household_settings import _coerce
+
+        assert _coerce(20, "int") == 20
+        assert _coerce("20", "int") == 20
+        assert _coerce(" 45 ", "int") == 45
+        assert _coerce(7.0, "int") == 7
+
+    def test_coerce_int_rejects_garbage(self):
+        from app.api.mobile_household_settings import _coerce
+
+        for bad in ("twenty", "", 7.5, True, False, None, [1]):
+            with pytest.raises((ValueError, TypeError)):
+                _coerce(bad, "int")
+
+    def test_put_int_setting_writes_coerced_value(self, client):
+        stub = _settings_stub("20")
+        with patch(ROLE), patch(SETTINGS, stub), patch(
+            "app.api.mobile_household_settings.HOUSEHOLD_CONTROLLABLE_SETTINGS",
+            self.INT_ALLOWLIST,
+        ):
+            r = client.put(f"{BASE}/phone_calls.plan_ttl_minutes", json={"value": "45"})
+        assert r.status_code == 200
+        assert r.json()["value"] == 45
+        stub.return_value.set.assert_called_once_with(
+            "phone_calls.plan_ttl_minutes", 45, household_id=HH
+        )
+
+    def test_put_int_setting_rejects_garbage_with_400(self, client):
+        stub = _settings_stub("20")
+        with patch(ROLE), patch(SETTINGS, stub), patch(
+            "app.api.mobile_household_settings.HOUSEHOLD_CONTROLLABLE_SETTINGS",
+            self.INT_ALLOWLIST,
+        ):
+            r = client.put(
+                f"{BASE}/phone_calls.plan_ttl_minutes", json={"value": "twenty"}
+            )
+        assert r.status_code == 400
+        stub.return_value.set.assert_not_called()
+
+    def test_put_int_setting_rejects_bool_with_400(self, client):
+        stub = _settings_stub("20")
+        with patch(ROLE), patch(SETTINGS, stub), patch(
+            "app.api.mobile_household_settings.HOUSEHOLD_CONTROLLABLE_SETTINGS",
+            self.INT_ALLOWLIST,
+        ):
+            r = client.put(
+                f"{BASE}/phone_calls.plan_ttl_minutes", json={"value": True}
+            )
+        assert r.status_code == 400
+        stub.return_value.set.assert_not_called()
+
+    def test_get_returns_none_for_uncoercible_stored_value(self, client):
+        # One corrupt row must not 500 the whole settings screen.
+        stub = _settings_stub("garbage")
+        with patch(ROLE), patch(SETTINGS, stub), patch(
+            "app.api.mobile_household_settings.HOUSEHOLD_CONTROLLABLE_SETTINGS",
+            {"phone_calls.plan_ttl_minutes": "int"},
+        ):
+            r = client.get(BASE)
+        assert r.status_code == 200
+        assert r.json()["settings"]["phone_calls.plan_ttl_minutes"] is None
