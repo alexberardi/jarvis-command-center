@@ -684,6 +684,9 @@ app.include_router(mobile_command_data.router, prefix="/api/v0/mobile", tags=["m
 from app.api import mobile_household_settings
 app.include_router(mobile_household_settings.router, prefix="/api/v0/mobile", tags=["mobile-household-settings"])
 
+from app.api import mobile_phone_contacts
+app.include_router(mobile_phone_contacts.router, prefix="/api/v0/mobile", tags=["mobile-phone-contacts"])
+
 # Phone-call session endpoints for the gateway (app-to-app auth). No /api/v0
 # prefix — the gateway's session_client addresses /internal/phone/... directly.
 from app.api import phone_sessions
