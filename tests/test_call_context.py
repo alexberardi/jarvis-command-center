@@ -10,14 +10,19 @@ import json
 import pytest
 
 from app.services.call_context import (
+    CATEGORIES,
     GENERAL,
     IF_ASKED,
     MEDICAL,
     STATE,
+    TIERS,
     build_context_block,
+    catalog,
     parse_call_context,
+    prepare_for_storage,
     restricted_fields,
     select_fields,
+    serialize_fields,
 )
 
 
@@ -202,3 +207,73 @@ class TestBriefAssembly:
         from app.services.phone_call_service import apply_call_context
 
         assert apply_call_context("order a pizza", user_id=None) == "order a pizza"
+
+
+class TestWritePath:
+    """The grid saves rows; storage needs keys and a canonical blob."""
+
+    def test_custom_field_gets_a_key_derived_from_its_label(self):
+        """The grid lets a user type just a label and a value for a custom
+        field. Storage needs a stable key, and deriving it server-side keeps
+        one source of truth."""
+        fields = prepare_for_storage([{"label": "Gate code", "value": "4417"}])
+        assert [(f.key, f.label, f.value) for f in fields] == [
+            ("gate_code", "Gate code", "4417")
+        ]
+
+    def test_a_well_known_key_survives_unchanged(self):
+        fields = prepare_for_storage(
+            [{"key": "insurance_member_id", "value": "XZ-1"}]
+        )
+        assert fields[0].key == "insurance_member_id"
+        assert fields[0].label == "Insurance member ID"
+        assert fields[0].category == MEDICAL
+        assert fields[0].tier == IF_ASKED
+
+    def test_blank_and_keyless_rows_drop_out(self):
+        fields = prepare_for_storage(
+            [
+                {"label": "", "value": ""},           # nothing to key on
+                {"label": "  ", "value": "x"},         # slug empties -> no key
+                {"label": "Real", "value": "keep me"},
+            ]
+        )
+        assert [f.label for f in fields] == ["Real"]
+
+    def test_serialize_round_trips_through_parse(self):
+        fields = prepare_for_storage(
+            [
+                {"key": "full_name", "value": "Alex B"},
+                {"label": "Rewards number", "value": "99887766"},
+            ]
+        )
+        reparsed = parse_call_context(serialize_fields(fields))
+        assert [f.key for f in reparsed] == ["full_name", "rewards_number"]
+        assert [f.value for f in reparsed] == ["Alex B", "99887766"]
+
+    def test_serialize_emits_a_json_string_not_a_dict(self):
+        """The setting is value_type=string, so the client stores the value
+        verbatim — it must already be JSON text or the reader can't parse it."""
+        blob = serialize_fields(prepare_for_storage([{"key": "x", "value": "y"}]))
+        assert isinstance(blob, str)
+        assert json.loads(blob) == {
+            "fields": [
+                {"key": "x", "label": "x", "value": "y",
+                 "category": GENERAL, "tier": IF_ASKED}
+            ]
+        }
+
+
+class TestCatalog:
+    """The static vocabulary served to the grid, so the app can't drift."""
+
+    def test_covers_every_category_and_tier(self):
+        cat = catalog()
+        assert {c["value"] for c in cat["categories"]} == set(CATEGORIES)
+        assert {t["value"] for t in cat["tiers"]} == set(TIERS)
+
+    def test_well_known_fields_carry_their_controls(self):
+        by_key = {f["key"]: f for f in catalog()["well_known"]}
+        assert by_key["insurance_member_id"]["category"] == MEDICAL
+        assert by_key["insurance_member_id"]["tier"] == IF_ASKED
+        assert by_key["full_name"]["tier"] == STATE

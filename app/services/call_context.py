@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -211,6 +212,92 @@ def restricted_fields(fields: list[ContextField]) -> list[ContextField]:
     never has to reach the classifier.
     """
     return [f for f in fields if f.tier == IF_ASKED and f.value]
+
+
+# ---------------------------------------------------------------- write path
+#
+# Reads parse a stored blob whose keys we wrote. Writes take rows straight from
+# the mobile grid, where a custom field is just a label the user typed and a
+# value — no key. The key is derived here so `parse_call_context` can stay
+# strict (a keyless row is genuinely unusable; a keyless row from the grid just
+# needs a key minted first).
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(label: str) -> str:
+    return _SLUG_RE.sub("_", label.strip().lower()).strip("_")
+
+
+def prepare_for_storage(rows: Any) -> list[ContextField]:
+    """Grid rows -> canonical fields, ready to serialize and store.
+
+    A row without a key gets one derived from its label; everything else runs
+    through the same coercion and first-wins dedup as a read, so what a caller
+    gets back from a write is exactly what a later call will see. Returns the
+    fields so the endpoint can both persist and echo the canonical result.
+    """
+    prepared: list[dict] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        row = dict(row)
+        if not str(row.get("key") or "").strip():
+            row["key"] = _slugify(str(row.get("label") or ""))
+        prepared.append(row)
+    return parse_call_context({"fields": prepared})
+
+
+def serialize_fields(fields: list[ContextField]) -> str:
+    """Canonical stored blob for a list of fields."""
+    return json.dumps(
+        {
+            "fields": [
+                {
+                    "key": f.key,
+                    "label": f.label,
+                    "value": f.value,
+                    "category": f.category,
+                    "tier": f.tier,
+                }
+                for f in fields
+            ]
+        }
+    )
+
+
+def field_to_dict(f: ContextField) -> dict[str, str]:
+    """One field as the mobile grid consumes it."""
+    return {
+        "key": f.key,
+        "label": f.label,
+        "value": f.value,
+        "category": f.category,
+        "tier": f.tier,
+    }
+
+
+def catalog() -> dict[str, Any]:
+    """The static vocabulary the grid renders, served rather than duplicated.
+
+    The well-known fields it offers as presets, and the full category and tier
+    option lists. Kept here so the app cannot drift from the brief: a new
+    well-known field, a relabelled category, or a changed default tier reaches
+    the grid without an app release.
+    """
+    return {
+        "well_known": [
+            {"key": f.key, "label": f.label, "category": f.category, "tier": f.tier}
+            for f in WELL_KNOWN_FIELDS
+        ],
+        "categories": [
+            {"value": c, "label": CATEGORY_LABELS[c]} for c in CATEGORIES
+        ],
+        "tiers": [
+            {"value": STATE, "label": "May be said freely"},
+            {"value": IF_ASKED, "label": "Only if they ask"},
+        ],
+    }
 
 
 def build_context_block(fields: list[ContextField]) -> str | None:
