@@ -432,7 +432,7 @@ async def create_call_plan(
         # Plan-time context: real availability from the node's calendar
         # command, if one is installed and reachable (PRD cross-agent-context).
         details = await apply_availability_envelope(
-            household_id=household_id, goal=goal, details=details
+            household_id=household_id, goal=goal, details=details, user_id=user_id
         )
         # A delivery/pickup call gets asked for the address constantly. If we
         # know it, put it IN the brief — the brief is the complete set of
@@ -568,6 +568,43 @@ def _ensure_times_section(goal: str, details: str) -> str:
     )
 
 
+# Lines of the brief that are BOUNDS, not background. Kept as a tuple so the
+# extractor and the formatter can't drift apart.
+_CONSTRAINT_PREFIXES: tuple[str, ...] = ("acceptable times:", "do not book:")
+
+
+def extract_constraint_envelope(details: str | None) -> str | None:
+    """Pull the negotiating bounds back out of the confirmed brief.
+
+    The gateway prompt has a dedicated section — "Acceptable options and
+    constraints (negotiate only within these)" — built from the session's
+    ``constraints`` field. Nothing ever populated it, so that section has
+    never rendered on a single call: the availability envelope reached the
+    model only inside ``details``, framed as facts it MAY STATE rather than
+    bounds it must stay within. Live 2026-07-20 the shop offered noon on a
+    Wednesday, squarely inside "Do not book: Wed 7am-5pm (Work)", and the
+    agent answered "Wednesday at 12 is available".
+
+    Derived from ``details`` rather than stored alongside it on purpose:
+    ``details`` is what the user actually reviewed and edited on the confirm
+    card (it is the card's ``data_key``), so deriving keeps the bounds and
+    the approved brief from diverging when they edit.
+    """
+    if not details:
+        return None
+    lines = [
+        line.strip()
+        for line in details.splitlines()
+        if line.strip().lower().startswith(_CONSTRAINT_PREFIXES)
+    ]
+    if not lines:
+        return None
+    # A placeholder is not a constraint — it would tell the model its bounds
+    # are the literal words "(fill in your availability before calling)".
+    real = [ln for ln in lines if "(fill in" not in ln.lower()]
+    return "\n".join(real) if real else None
+
+
 def _format_availability(data: dict[str, Any]) -> str | None:
     """Render a calendar answer as the brief's constraint envelope.
 
@@ -590,7 +627,7 @@ def _format_availability(data: dict[str, Any]) -> str | None:
 
 
 async def apply_availability_envelope(
-    *, household_id: str, goal: str, details: str
+    *, household_id: str, goal: str, details: str, user_id: int | None = None
 ) -> str:
     """Bake real calendar availability into the brief at PLAN time.
 
@@ -602,6 +639,10 @@ async def apply_availability_envelope(
     Degrades in every direction: no scheduling goal, no node, no calendar
     command, node offline, malformed answer — all fall back to the
     fill-me-in placeholder rather than blocking or inventing times.
+
+    ``user_id`` is the person who asked for the call. Calendar credentials
+    are per-speaker, so without it the provider can only refuse ("unknown
+    speaker — no personal calendar") and the card silently degrades.
     """
     if not is_scheduling_goal(goal, details):
         return details
@@ -616,6 +657,7 @@ async def apply_availability_envelope(
             household_id,
             "availability",
             {"start": start.isoformat(), "end": (start + timedelta(days=7)).isoformat()},
+            user_id=user_id,
         )
     except Exception as e:  # noqa: BLE001 — context is an enhancement, never a gate
         logger.warning("Availability lookup failed: %s", e)

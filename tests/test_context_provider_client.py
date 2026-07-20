@@ -78,6 +78,30 @@ class TestQueryContext:
         assert "correlation_id" in payload
 
     @pytest.mark.asyncio
+    async def test_user_id_is_sent_when_given(self):
+        """Per-speaker providers (calendar, email) resolve credentials from
+        this. Live 2026-07-20: it was never sent, so the calendar provider
+        answered "unknown speaker" and every call plan degraded to a
+        fill-me-in placeholder."""
+        client = _mqtt_returning({"ok": True, "data": {"free": []}})
+        with _patch_nodes([_FakeNode("n1")]), _patch_mqtt(client):
+            await query_context(HH, "availability", {"start": "a"}, user_id=7)
+
+        payload = json.loads(client.request_response.call_args.args[2])
+        assert payload["user_id"] == 7
+
+    @pytest.mark.asyncio
+    async def test_user_id_omitted_when_absent(self):
+        """No identity is different from a null identity — don't send the key
+        at all, so older nodes see the exact payload they always did."""
+        client = _mqtt_returning({"ok": True, "data": {"free": []}})
+        with _patch_nodes([_FakeNode("n1")]), _patch_mqtt(client):
+            await query_context(HH, "availability", {"start": "a"})
+
+        payload = json.loads(client.request_response.call_args.args[2])
+        assert "user_id" not in payload
+
+    @pytest.mark.asyncio
     async def test_no_provider_falls_through_to_next_node(self):
         """A node without the calendar command isn't a failure — keep looking."""
         client = _mqtt_returning(

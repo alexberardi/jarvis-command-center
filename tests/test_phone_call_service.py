@@ -690,3 +690,66 @@ class TestAddressInBrief:
         assert "Address if asked:" in out and addr in out
         # And it must not collide with the times section.
         assert _ensure_times_section("order a pizza", out) == out
+
+
+class TestConstraintEnvelopeExtraction:
+    """The gateway prompt has a dedicated bounds section built from the
+    session's ``constraints`` field — "negotiate only within these". Nothing
+    ever populated that field, so the section never rendered on any call and
+    the availability envelope reached the model only as part of ``details``,
+    framed as facts it MAY STATE.
+
+    Live 2026-07-20: the shop offered Wednesday at noon, squarely inside
+    "Do not book: Wed 7am-5pm (Work)", and the agent replied "Wednesday at
+    12 is available."
+    """
+
+    def test_pulls_both_bound_lines_and_nothing_else(self):
+        from app.services.phone_call_service import extract_constraint_envelope
+
+        details = (
+            "make an appointment for one day this week\n"
+            "Acceptable times: Mon 5-8pm; Wed 5-8pm; Thu 9am-8pm\n"
+            "Do not book: Mon 7am-5pm (Work); Wed 7am-5pm (Work)\n"
+            "Address if asked: 742 Evergreen Ave, Springfield, IL 62704"
+        )
+        out = extract_constraint_envelope(details)
+
+        assert "Acceptable times: Mon 5-8pm" in out
+        assert "Do not book: Mon 7am-5pm (Work)" in out
+        # The address is a fact the agent may state, not a negotiating bound.
+        assert "Evergreen" not in out
+        assert "appointment for one day" not in out
+
+    def test_placeholder_is_not_a_constraint(self):
+        """Otherwise the model is told its bounds are the literal words
+        "(fill in your availability before calling)"."""
+        from app.services.phone_call_service import extract_constraint_envelope
+
+        details = (
+            "book a table\n"
+            "Acceptable times: (fill in your availability before calling)"
+        )
+        assert extract_constraint_envelope(details) is None
+
+    def test_no_bounds_returns_none(self):
+        from app.services.phone_call_service import extract_constraint_envelope
+
+        assert extract_constraint_envelope("order a large pepperoni") is None
+        assert extract_constraint_envelope("") is None
+        assert extract_constraint_envelope(None) is None
+
+    def test_survives_user_edits_on_the_card(self):
+        """`details` is the card's editable field, so bounds are derived from
+        it rather than stored separately — an edit must move the bounds too."""
+        from app.services.phone_call_service import extract_constraint_envelope
+
+        edited = (
+            "make an appointment\n"
+            "Acceptable times: Sat morning only\n"
+            "Do not book: weekdays"
+        )
+        out = extract_constraint_envelope(edited)
+
+        assert "Sat morning only" in out
+        assert "weekdays" in out
