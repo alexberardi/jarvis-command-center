@@ -34,7 +34,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.models import PhoneCallSession, PhoneContact
-from app.services.phone_number_search import find_business_number
+from app.services.phone_number_search import find_business_number, location_mismatch
 from app.services.server_callback_registry import (
     ServerCallbackContext,
     ServerCallbackResult,
@@ -387,6 +387,8 @@ async def create_call_plan(
         number_source = "phonebook" if resolved_number else None
         search_address: str | None = None
         search_url: str | None = None
+        searched_near: str | None = None
+        location_warning: str | None = None
         resolution_note = ""
 
         if contact is None:
@@ -400,9 +402,19 @@ async def create_call_plan(
                 number_source = "web"
                 search_address = search.address
                 search_url = search.source_url
+                searched_near = search.searched_near
+                # A wrong-state result is the failure mode that actually bit
+                # us (a Maryland pizzeria for a New Jersey household). Warn
+                # loudly on the card; never block — the tap is the checkpoint.
+                location_warning = location_mismatch(
+                    search.address, search.searched_near
+                )
+                near_note = (
+                    f" (searched near {searched_near})" if searched_near else ""
+                )
                 resolution_note = (
-                    "I found this number via web search — check it before "
-                    "calling."
+                    f"I found this number via web search{near_note} — check it "
+                    "before calling."
                 )
             else:
                 resolution_note = _search_miss_note(search.reason)
@@ -449,6 +461,7 @@ async def create_call_plan(
             " Note: this appears to be a mobile number." if line_type == "mobile" else ""
         )
         source_line = f" Source: {search_url}" if search_url else ""
+        warning_line = f"{location_warning}\n\n" if location_warning else ""
         metadata = {
             "household_id": household_id,
             "session_id": session_row.id,
@@ -500,6 +513,7 @@ async def create_call_plan(
             title=f"📞 Call plan: {session_row.contact_name}",
             summary=f"{goal}{mobile_note}",
             body=(
+                f"{warning_line}"
                 f"Review the number and details, then tap **Call now**. "
                 f"{resolution_note}{source_line} The call will open with an "
                 f"AI + recording disclosure.{mobile_note}"
