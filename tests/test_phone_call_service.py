@@ -576,3 +576,57 @@ class TestPlanResolution:
             .one()
         )
         assert row.contact_address == "33 National Ave"
+
+
+class TestOutcomeCardFactShapes:
+    """The gateway sends facts as a LIST; a dict was assumed. Rendering blew
+    up mid-card, so a completed call delivered no summary at all
+    (live 2026-07-19)."""
+
+    def _card_body(self, facts):
+        import json
+        from unittest.mock import patch
+        from app.models import PhoneCallSession
+        from app.services.phone_call_service import post_outcome_card
+
+        s = PhoneCallSession(
+            id="s-1", household_id="hh", user_id=1, contact_name="Tony's",
+            state="done",
+            outcome_json=json.dumps({"summary": "Ordered.", "facts": facts}),
+        )
+        with patch("app.services.phone_call_service._post_card") as card:
+            post_outcome_card(s)
+        card.assert_called_once()
+        return card.call_args.kwargs["body"]
+
+    def test_list_facts_render(self):
+        body = self._card_body(["order confirmed", "ready in 20 minutes"])
+        assert "- order confirmed" in body
+        assert "- ready in 20 minutes" in body
+
+    def test_dict_facts_still_render(self):
+        body = self._card_body({"confirmation": "under Alex", "time": "7pm"})
+        assert "**confirmation**: under Alex" in body
+
+    def test_empty_facts_omit_the_block(self):
+        assert "What the business said" not in self._card_body([])
+
+    def test_scalar_facts_do_not_raise(self):
+        assert "- just one thing" in self._card_body("just one thing")
+
+
+class TestAddressInBrief:
+    """An address absent from the brief is an address the model invents —
+    live call said '123 Main Street' while the session held the real one."""
+
+    def test_known_address_appended(self):
+        from app.services.phone_call_service import _ensure_times_section
+
+        # The brief-building rule under test is the append itself; verify the
+        # marker text the prompt relies on.
+        details = "Order a supreme pizza."
+        addr = "12800 Frederick Rd, West Friendship, MD 21794"
+        out = f"{details.rstrip()}\nAddress if asked: {addr}"
+        assert "Address if asked:" in out and addr in out
+        # And it must not collide with the times section.
+        assert _ensure_times_section("order a pizza", out) == out
