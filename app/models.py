@@ -911,6 +911,9 @@ class PhoneCallSession(Base):
     confirmed_by = Column(Integer, nullable=True)     # JWT user who tapped confirm
     contact_id = Column(String(36), ForeignKey('phone_contacts.id', ondelete='SET NULL'), nullable=True)
     contact_name = Column(String(255), nullable=True)
+    # Address discovered during resolution (web search); carried to the
+    # phonebook row auto-save writes when the call succeeds.
+    contact_address = Column(Text, nullable=True)
     goal = Column(Text, nullable=False)               # what the call should achieve
     details = Column(Text, nullable=True)             # the confirmed brief (guardrail boundary)
     constraints = Column(Text, nullable=True)         # constraint envelope (P2)

@@ -1,0 +1,193 @@
+"""Web-search fallback for a business's phone number.
+
+The governing rule: this saves the user typing, it is never trusted. Every
+path either produces a number the user will eyeball on an editable card, or
+an honest reason there isn't one — never a blocked plan, never a guess.
+"""
+
+from unittest.mock import patch
+
+import pytest
+
+from app.services.phone_number_search import (
+    NumberSearchResult,
+    extract_address,
+    extract_number,
+    find_business_number,
+    web_search_enabled,
+)
+
+HH = "hh-search"
+SEARCH = "app.services.phone_number_search"
+
+
+def _settings(value):
+    """Fake get_settings_service factory returning `value` for the gate key."""
+    class _S:
+        def get(self, key, household_id=None):
+            return value
+
+    return lambda: _S()
+
+
+# ---------------------------------------------------------------------------
+# Gate
+# ---------------------------------------------------------------------------
+
+
+class TestGate:
+    def test_enabled_when_true(self):
+        with patch("app.services.settings_service.get_settings_service", _settings(True)):
+            assert web_search_enabled(HH) is True
+
+    def test_string_true_accepted(self):
+        with patch("app.services.settings_service.get_settings_service", _settings("true")):
+            assert web_search_enabled(HH) is True
+
+    def test_disabled_when_false(self):
+        with patch("app.services.settings_service.get_settings_service", _settings(False)):
+            assert web_search_enabled(HH) is False
+
+    def test_no_household_is_disabled(self):
+        assert web_search_enabled(None) is False
+        assert web_search_enabled("") is False
+
+    def test_settings_error_fails_closed(self):
+        """Any doubt means no outbound egress."""
+        def _boom():
+            raise RuntimeError("settings down")
+
+        with patch("app.services.settings_service.get_settings_service", _boom):
+            assert web_search_enabled(HH) is False
+
+
+# ---------------------------------------------------------------------------
+# Number extraction
+# ---------------------------------------------------------------------------
+
+
+class TestExtractNumber:
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("Call us at (732) 592-4183 today", "+17325924183"),
+            ("Phone: 732-592-4183", "+17325924183"),
+            ("Tel 732.592.4183", "+17325924183"),
+            ("+1 732 592 4183", "+17325924183"),
+            ("Reach us: 1-732-592-4183", "+17325924183"),
+        ],
+    )
+    def test_common_listing_formats(self, text, expected):
+        assert extract_number(text) == expected
+
+    def test_first_valid_number_wins(self):
+        text = "Fax 900-555-1212 or call (732) 592-4183"
+        # The premium-rate fax is rejected by the shared validator, so the
+        # real number is returned rather than the first regex hit.
+        assert extract_number(text) == "+17325924183"
+
+    def test_emergency_number_never_returned(self):
+        assert extract_number("In an emergency dial 911") is None
+
+    def test_bare_digit_runs_ignored(self):
+        """Order numbers and zip+4 must not read as phone numbers."""
+        assert extract_number("Order 7325924183 shipped") is None
+
+    def test_no_number_returns_none(self):
+        assert extract_number("We are open 9 to 5 daily") is None
+        assert extract_number("") is None
+
+
+class TestExtractAddress:
+    def test_street_address_found(self):
+        text = "Visit us at 742 Evergreen Ave, Springfield, IL 62704 today"
+        assert "742 Evergreen Ave" in (extract_address(text) or "")
+
+    def test_no_address_returns_none(self):
+        assert extract_address("Call for hours") is None
+
+
+# ---------------------------------------------------------------------------
+# find_business_number — the degradation matrix
+# ---------------------------------------------------------------------------
+
+
+class TestFindBusinessNumber:
+    def test_gate_off_short_circuits_without_searching(self):
+        with patch(f"{SEARCH}.web_search_enabled", return_value=False), patch(
+            "app.core.tools.quick_search_tool._search_web"
+        ) as search:
+            result = find_business_number("Tony's Pizza", HH)
+        assert not result.found
+        assert result.reason == "web_search_disabled"
+        search.assert_not_called()  # no egress for an opted-out household
+
+    def test_number_found_in_scraped_page(self):
+        sources = [{"url": "https://tonys.example", "content": "Call (732) 592-4183"}]
+        with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
+            "app.core.tools.quick_search_tool._search_web",
+            return_value=[{"url": "https://tonys.example"}],
+        ), patch(
+            "app.core.tools.quick_search_tool._scrape_results", return_value=sources
+        ):
+            result = find_business_number("Tony's Pizza", HH)
+        assert result.found
+        assert result.number == "+17325924183"
+        assert result.source_url == "https://tonys.example"
+
+    def test_address_captured_when_present(self):
+        sources = [{
+            "url": "https://tonys.example",
+            "content": "Tony's, 742 Evergreen Ave, Springfield, IL 62704. Call 732-592-4183",
+        }]
+        with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
+            "app.core.tools.quick_search_tool._search_web", return_value=[{"url": "x"}]
+        ), patch(
+            "app.core.tools.quick_search_tool._scrape_results", return_value=sources
+        ):
+            result = find_business_number("Tony's", HH)
+        assert "742 Evergreen Ave" in (result.address or "")
+
+    def test_later_page_used_when_first_has_no_number(self):
+        sources = [
+            {"url": "https://a.example", "content": "Open daily"},
+            {"url": "https://b.example", "content": "Phone 732-592-4183"},
+        ]
+        with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
+            "app.core.tools.quick_search_tool._search_web",
+            return_value=[{"url": "a"}, {"url": "b"}],
+        ), patch(
+            "app.core.tools.quick_search_tool._scrape_results", return_value=sources
+        ):
+            result = find_business_number("Tony's", HH)
+        assert result.number == "+17325924183"
+        assert result.source_url == "https://b.example"
+
+    def test_no_search_results(self):
+        with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
+            "app.core.tools.quick_search_tool._search_web", return_value=[]
+        ):
+            result = find_business_number("Nowhere Inc", HH)
+        assert not result.found and result.reason == "no_results"
+
+    def test_results_but_no_parseable_number(self):
+        with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
+            "app.core.tools.quick_search_tool._search_web", return_value=[{"url": "x"}]
+        ), patch(
+            "app.core.tools.quick_search_tool._scrape_results",
+            return_value=[{"url": "x", "content": "Hours: 9-5"}],
+        ):
+            result = find_business_number("Tony's", HH)
+        assert not result.found and result.reason == "no_number_found"
+
+    def test_scraper_exception_degrades(self):
+        with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
+            "app.core.tools.quick_search_tool._search_web",
+            side_effect=RuntimeError("network down"),
+        ):
+            result = find_business_number("Tony's", HH)
+        assert not result.found and result.reason == "search_failed"
+
+    def test_result_dataclass_found_property(self):
+        assert NumberSearchResult(number="+17325924183").found is True
+        assert NumberSearchResult(reason="no_results").found is False
