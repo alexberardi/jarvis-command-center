@@ -563,6 +563,21 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Master toggle for AI phone calls (default OFF, fail-closed)",
     ),
     SettingDefinition(
+        key="phone_calls.call_context",
+        category="phone_calls",
+        value_type="string",
+        default="",
+        description=(
+            "Per-user details the call agent may use (JSON). Scoped by "
+            "user_id, not household: insurance and callback numbers are "
+            "personal. See app/services/call_context.py for the shape, the "
+            "category (is it loaded at all) and tier (may it be volunteered) "
+            "controls. Contains PII — anything reaching a call can be spoken "
+            "aloud and lands in the transcript and recording."
+        ),
+        is_secret=True,
+    ),
+    SettingDefinition(
         key="phone_calls.plan_ttl_minutes",
         category="phone_calls",
         value_type="int",

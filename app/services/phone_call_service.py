@@ -442,6 +442,18 @@ async def create_call_plan(
         if known_address and "address" not in details.lower():
             details = f"{details.rstrip()}\nAddress if asked: {known_address}"
 
+        # The caller's own stored details (name, callback number, and — only
+        # for calls in a matching category — things like insurance). General
+        # always applies; anything else has to be asked for, so a pizza order
+        # never carries a policy number.
+        # categories=None -> General only. Selecting a category (medical,
+        # auto, ...) is deliberately NOT inferred here: letting the model
+        # decide which secrets to load means one misclassification puts an
+        # insurance number on a pizza order. It arrives with the confirm
+        # card, where the chosen categories are shown and can be corrected
+        # before anything dials.
+        details = apply_call_context(details, user_id=user_id, categories=None)
+
         ttl_minutes = _int_setting("phone_calls.plan_ttl_minutes", household_id, 20)
         now = datetime.utcnow()
         session_row = PhoneCallSession(
@@ -624,6 +636,33 @@ def _format_availability(data: dict[str, Any]) -> str | None:
     if busy:
         parts.append("Do not book: " + "; ".join(busy[:6]))
     return "\n".join(parts)
+
+
+def apply_call_context(
+    details: str, *, user_id: int | None, categories: list[str] | None = None
+) -> str:
+    """Append the caller's stored details to the brief.
+
+    Category decides what is loaded (General always); tier decides whether
+    the agent may volunteer it. Both live in call_context.py. Degrades to the
+    unchanged brief on any failure — missing context is a worse call, not a
+    failed one.
+    """
+    try:
+        from app.services.call_context import (
+            build_context_block,
+            load_call_context,
+            select_fields,
+        )
+
+        selected = select_fields(load_call_context(user_id), categories)
+        block = build_context_block(selected)
+    except Exception as e:  # noqa: BLE001 — never block a call on this
+        logger.warning("call context assembly failed: %s", e)
+        return details
+    if not block:
+        return details
+    return f"{details.rstrip()}\n\n{block}"
 
 
 async def apply_availability_envelope(
