@@ -254,6 +254,7 @@ def _attention_gate(
     dedupe_key: str | None,
     target_user_id: int | None,
     payload: dict | None,
+    force: bool = False,
 ):
     """Returns a BrokerDecision, or None for legacy (broker off / broker error)."""
     from app.db import SessionLocal
@@ -276,6 +277,7 @@ def _attention_gate(
                 target_user_id=target_user_id,
                 origin_node_id=origin_node_id,
                 payload=payload,
+                force=force,
             )
         finally:
             db.close()
@@ -315,6 +317,9 @@ class PushNotificationRequest(BaseModel):
     # Stable identity for broker dedup (SDK Alert.dedupe_key). Optional and
     # additive — legacy callers fall back to a normalized-title hash.
     dedupe_key: str | None = None
+    # "never silence this" — bypasses every broker gate (dedup included) and
+    # always delivers. For safety-critical producers (medication, alarms).
+    force: bool = False
 
 
 class PushNotificationResponse(BaseModel):
@@ -361,6 +366,7 @@ async def node_push_notification(
         dedupe_key=request.dedupe_key,
         target_user_id=request.user_id,
         payload=request.model_dump(),
+        force=request.force,
     )
     if decision is not None and not decision.deliver:
         return PushNotificationResponse(sent=False, withheld_by=decision.withheld_by)
@@ -609,6 +615,9 @@ class NodeInboxItemRequest(BaseModel):
     # Stable identity for broker dedup (SDK Alert.dedupe_key). Optional and
     # additive — legacy callers fall back to a normalized-title hash.
     dedupe_key: str | None = None
+    # "never silence this" — bypasses every broker gate (dedup included) and
+    # always delivers. For safety-critical producers (medication, alarms).
+    force: bool = False
 
 
 class NodeInboxItemResponse(BaseModel):
@@ -664,6 +673,7 @@ def node_post_inbox_item(
         dedupe_key=request.dedupe_key or metadata.get("dedupe_key"),
         target_user_id=request.user_id,
         payload={k: v for k, v in request.model_dump().items() if k != "metadata"},
+        force=request.force,
     )
     if decision is not None and not decision.deliver:
         return NodeInboxItemResponse(sent=False, withheld_by=decision.withheld_by)

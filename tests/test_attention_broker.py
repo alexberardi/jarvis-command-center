@@ -198,6 +198,58 @@ class TestSafetyClass:
         second = _route(test_db, household, category="medication", dedupe_key="dose-1")
         assert second.withheld_by == "dedupe"
 
+    def test_safety_recurring_same_title_no_key_both_deliver(self, test_db, settings_stub):
+        # THE KEPPRA REGRESSION (2026-07-19): a twice-daily medication reminder
+        # reuses its title. Without an explicit key the title-hash fallback
+        # MUST NOT dedup the second dose, or the evening reminder is silently
+        # suppressed as a "duplicate" of the morning one. Both must deliver.
+        settings_stub()
+        household = _household()
+        morning = _route(test_db, household, source="medication", category="medication", title="Time for Leo kepra")
+        evening = _route(test_db, household, source="medication", category="medication", title="Time for Leo kepra")
+        assert morning.deliver is True
+        assert evening.deliver is True
+        assert evening.withheld_by is None
+        assert evening.gate_trail[0]["gate"] == "safety_class"
+
+    def test_safety_explicit_key_dedups_but_different_keys_both_fire(self, test_db, settings_stub):
+        # Correct long-term shape: a per-dose key lets morning/evening differ
+        # (both fire) while an exact re-emit of the SAME dose dedups.
+        settings_stub()
+        household = _household()
+        assert _route(test_db, household, category="medication", dedupe_key="2026-07-19:am").deliver is True
+        assert _route(test_db, household, category="medication", dedupe_key="2026-07-19:pm").deliver is True
+        dupe = _route(test_db, household, category="medication", dedupe_key="2026-07-19:pm")
+        assert dupe.withheld_by == "dedupe"
+
+
+class TestForce:
+    def test_force_bypasses_dedup(self, test_db, settings_stub):
+        settings_stub()
+        household = _household()
+        assert _route(test_db, household, title="same", force=True).deliver is True
+        second = _route(test_db, household, title="same", force=True)
+        assert second.deliver is True
+        assert second.gate_trail[0]["gate"] == "force"
+
+    def test_force_bypasses_budget_and_quiet_hours(self, test_db, settings_stub):
+        settings_stub(**{
+            "attention.daily_push_budget": 0,
+            "attention.daily_inbox_budget": 0,
+            "attention.quiet_hours": "00:00-23:59",
+        })
+        decision = _route(test_db, _household(), title="urgent", force=True)
+        assert decision.deliver is True
+        assert decision.rung == "push"
+
+    def test_force_bypasses_consent_never(self, test_db, settings_stub):
+        settings_stub()
+        household = _household()
+        test_db.add(AttentionConsent(household_id=household, source="news", category="news", max_rung="never"))
+        test_db.commit()
+        decision = _route(test_db, household, force=True)
+        assert decision.deliver is True
+
 
 class TestConsentAndTiers:
     def test_consent_never_withholds(self, test_db, settings_stub):
