@@ -318,8 +318,17 @@ def build_context_block(fields: list[ContextField]) -> str | None:
         parts.append(f"About the caller — you may state these:\n{lines}")
     if private:
         lines = "\n".join(f"- {f.label}: {f.value}" for f in private)
+        # Framing matters more than the rule here. A refusal-forward header
+        # ("give ONLY if they ask — never volunteer these") made the live model
+        # refuse the value even when the callee asked for it by name (2026-07-20:
+        # "what's the policy number?" → "I don't have that information", with
+        # the number sitting right here). Leading with "you have these, give
+        # when asked" flips it (verified 3/3 against the box model) — the guard
+        # is what enforces the "only when asked" half, so the brief can safely
+        # emphasise that these ARE to be given.
         parts.append(
-            "Give ONLY if they ask and it is needed to finish this task — "
-            f"never volunteer these:\n{lines}"
+            "You have these details on hand. Do not bring them up yourself, "
+            "but if the other person asks for one, give it to them directly "
+            f"and accurately — refusing a detail listed here fails the call:\n{lines}"
         )
     return "\n\n".join(parts)
