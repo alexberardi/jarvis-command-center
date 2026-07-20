@@ -107,7 +107,7 @@ def client(test_db):
 
 class TestAutoSave:
     def test_completed_call_creates_contact(self, test_db):
-        s = _mk_session(test_db, contact_address="33 National Ave, Brick, NJ")
+        s = _mk_session(test_db, contact_address="742 Evergreen Ave, Springfield, IL")
         contact = upsert_contact_from_call(test_db, s)
 
         assert contact is not None
@@ -115,7 +115,7 @@ class TestAutoSave:
         assert contact.number == "+19085551234"
         assert contact.source == "call"
         assert contact.line_type == "landline"
-        assert contact.address == "33 National Ave, Brick, NJ"
+        assert contact.address == "742 Evergreen Ave, Springfield, IL"
         assert contact.verified_at is not None
         assert contact.do_not_call is False
 
@@ -220,11 +220,11 @@ class TestCreate:
             json={
                 "name": "Tony's",
                 "number": "7325924183",
-                "address": "33 National Ave",
+                "address": "742 Evergreen Ave",
                 "notes": "Ask for Sal",
             },
         )
-        assert r.json()["address"] == "33 National Ave"
+        assert r.json()["address"] == "742 Evergreen Ave"
         assert r.json()["notes"] == "Ask for Sal"
 
     @pytest.mark.parametrize(

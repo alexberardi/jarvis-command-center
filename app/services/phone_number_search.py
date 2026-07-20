@@ -134,7 +134,7 @@ _ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
 def _state_of(text: str) -> str | None:
     """Last US state abbreviation in ``text``, if any.
 
-    Last, not first: addresses read "33 National Ave, Brick, NJ 08724", so
+    Last, not first: addresses read "742 Evergreen Ave, Springfield, IL 62704", so
     the trailing token is the state. Case-sensitive on purpose — lowercase
     "in"/"me"/"or" are ordinary words, and a false state reading here would
     produce a false alarm on the card.

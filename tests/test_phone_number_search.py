@@ -100,8 +100,8 @@ class TestExtractNumber:
 
 class TestExtractAddress:
     def test_street_address_found(self):
-        text = "Visit us at 33 National Ave, Brick, NJ 08724 today"
-        assert "33 National Ave" in (extract_address(text) or "")
+        text = "Visit us at 742 Evergreen Ave, Springfield, IL 62704 today"
+        assert "742 Evergreen Ave" in (extract_address(text) or "")
 
     def test_no_address_returns_none(self):
         assert extract_address("Call for hours") is None
@@ -138,7 +138,7 @@ class TestFindBusinessNumber:
     def test_address_captured_when_present(self):
         sources = [{
             "url": "https://tonys.example",
-            "content": "Tony's, 33 National Ave, Brick, NJ 08724. Call 732-592-4183",
+            "content": "Tony's, 742 Evergreen Ave, Springfield, IL 62704. Call 732-592-4183",
         }]
         with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
             "app.core.tools.quick_search_tool._search_web", return_value=[{"url": "x"}]
@@ -146,7 +146,7 @@ class TestFindBusinessNumber:
             "app.core.tools.quick_search_tool._scrape_results", return_value=sources
         ):
             result = find_business_number("Tony's", HH)
-        assert "33 National Ave" in (result.address or "")
+        assert "742 Evergreen Ave" in (result.address or "")
 
     def test_later_page_used_when_first_has_no_number(self):
         sources = [
@@ -213,9 +213,9 @@ class TestHouseholdLocation:
 
         with patch(
             "app.services.settings_service.get_settings_service",
-            _multi_settings({"household.location": "Brick, NJ 08724"}),
+            _multi_settings({"household.location": "Springfield, IL 62704"}),
         ):
-            assert household_location(HH) == "Brick, NJ 08724"
+            assert household_location(HH) == "Springfield, IL 62704"
 
     def test_unset_is_empty(self):
         from app.services.phone_number_search import household_location
@@ -260,8 +260,8 @@ class TestQueryBiasing:
 
     def test_location_appended_when_set(self):
         assert (
-            self._run_and_capture_query("Brick, NJ")
-            == "Tony's Pizzeria Brick, NJ phone number"
+            self._run_and_capture_query("Springfield, IL")
+            == "Tony's Pizzeria Springfield, IL phone number"
         )
 
     def test_no_location_is_unchanged_behavior(self):
@@ -271,14 +271,14 @@ class TestQueryBiasing:
     def test_searched_near_recorded_on_result(self):
         sources = [{"url": "https://t.example", "content": "Call 732-592-4183"}]
         with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
-            f"{SEARCH}.household_location", return_value="Brick, NJ"
+            f"{SEARCH}.household_location", return_value="Springfield, IL"
         ), patch(
             "app.core.tools.quick_search_tool._search_web", return_value=[{"url": "x"}]
         ), patch(
             "app.core.tools.quick_search_tool._scrape_results", return_value=sources
         ):
             result = find_business_number("Tony's", HH)
-        assert result.searched_near == "Brick, NJ"
+        assert result.searched_near == "Springfield, IL"
 
     def test_searched_near_none_without_location(self):
         sources = [{"url": "https://t.example", "content": "Call 732-592-4183"}]
@@ -303,16 +303,16 @@ class TestLocationMismatch:
         from app.services.phone_number_search import location_mismatch
 
         warning = location_mismatch(
-            "12800 Frederick Rd, West Friendship, MD 21794", "Brick, NJ 08724"
+            "12800 Frederick Rd, West Friendship, MD 21794", "Springfield, IL 62704"
         )
         assert warning is not None
-        assert "MD" in warning and "NJ" in warning
+        assert "MD" in warning and "IL" in warning
 
     def test_same_state_is_silent(self):
         from app.services.phone_number_search import location_mismatch
 
         assert (
-            location_mismatch("33 National Ave, Brick, NJ 08724", "Brick, NJ 08724")
+            location_mismatch("742 Evergreen Ave, Springfield, IL 62704", "Springfield, IL 62704")
             is None
         )
 
@@ -325,32 +325,32 @@ class TestLocationMismatch:
     def test_missing_address_is_silent(self):
         from app.services.phone_number_search import location_mismatch
 
-        assert location_mismatch(None, "Brick, NJ") is None
-        assert location_mismatch("", "Brick, NJ") is None
+        assert location_mismatch(None, "Springfield, IL") is None
+        assert location_mismatch("", "Springfield, IL") is None
 
     def test_missing_location_is_silent(self):
         from app.services.phone_number_search import location_mismatch
 
-        assert location_mismatch("33 National Ave, Brick, NJ", None) is None
-        assert location_mismatch("33 National Ave, Brick, NJ", "") is None
+        assert location_mismatch("742 Evergreen Ave, Springfield, IL", None) is None
+        assert location_mismatch("742 Evergreen Ave, Springfield, IL", "") is None
 
     def test_address_without_a_state_is_silent(self):
         from app.services.phone_number_search import location_mismatch
 
-        assert location_mismatch("33 National Ave", "Brick, NJ") is None
+        assert location_mismatch("742 Evergreen Ave", "Springfield, IL") is None
 
     def test_location_without_a_state_is_silent(self):
         """A bare ZIP household location can't be compared — say nothing."""
         from app.services.phone_number_search import location_mismatch
 
-        assert location_mismatch("33 National Ave, Brick, NJ 08724", "08724") is None
+        assert location_mismatch("742 Evergreen Ave, Springfield, IL 62704", "62704") is None
 
     def test_lowercase_words_are_not_read_as_states(self):
         """'in', 'me', 'or' are ordinary words — a false state reading here
         would put a false alarm on a card the user is meant to trust."""
         from app.services.phone_number_search import location_mismatch
 
-        assert location_mismatch("12 Main St in the plaza", "Brick, NJ") is None
+        assert location_mismatch("12 Main St in the plaza", "Springfield, IL") is None
 
     def test_trailing_state_wins_over_earlier_token(self):
         from app.services.phone_number_search import location_mismatch

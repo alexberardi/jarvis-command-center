@@ -41,7 +41,7 @@ HOUSEHOLD_CONTROLLABLE_SETTINGS: dict[str, str] = {
     "phone_calls.calls_per_day": "int",
     "phone_calls.monthly_minutes_cap": "int",
     "phone_calls.max_concurrent_calls": "int",
-    # Locality used to disambiguate business searches (e.g. "Brick, NJ").
+    # Locality used to disambiguate business searches (e.g. "Springfield, IL").
     # A household preference, not a compliance knob — and getting it wrong
     # calls the wrong business, so the household must own it.
     "household.location": "string",

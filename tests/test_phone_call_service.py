@@ -68,8 +68,8 @@ def _mk_session(db, *, state="draft", expires_in_min=20, **overrides) -> PhoneCa
 
 class TestNormalizeUsNumber:
     def test_valid_formats_normalize(self):
-        for raw in ("+1 908 278 1811", "9082781811", "1-908-278-1811", "(908) 278-1811"):
-            assert svc.normalize_us_number(raw) == "+19082781811"
+        for raw in ("+1 555 555 0123", "5555550123", "1-555-555-0123", "(555) 555-0123"):
+            assert svc.normalize_us_number(raw) == "+15555550123"
 
     def test_emergency_numbers_refused(self):
         for raw in ("911", "+1911", "112", "988"):
@@ -194,7 +194,7 @@ class TestCaps:
 # =============================================================================
 
 
-def _confirm_ctx(session_id, *, number="+1 908 278 1811", details="Book it.", user_id=42):
+def _confirm_ctx(session_id, *, number="+1 555 555 0123", details="Book it.", user_id=42):
     return ServerCallbackContext(
         job_id=str(uuid.uuid4()),
         household_id=HH,
@@ -215,7 +215,7 @@ class TestConfirmCall:
         assert result.success, result.error
         bound_db.refresh(s)
         assert s.state == "confirmed"
-        assert s.dialed_number == "+19082781811"
+        assert s.dialed_number == "+15555550123"
         assert s.number_edited is True  # differs from resolved +19085551234
         assert s.confirmed_by == 42
         enq.assert_called_once_with(s.id, HH)
@@ -488,7 +488,7 @@ class TestPlanResolution:
             search_result=NumberSearchResult(
                 number="+17325924183",
                 source_url="https://tonys.example",
-                address="33 National Ave",
+                address="742 Evergreen Ave",
             ),
         )
 
@@ -567,7 +567,7 @@ class TestPlanResolution:
         await self._run_plan(
             bound_db,
             search_result=NumberSearchResult(
-                number="+17325924183", address="33 National Ave"
+                number="+17325924183", address="742 Evergreen Ave"
             ),
         )
         row = (
@@ -575,7 +575,7 @@ class TestPlanResolution:
             .filter(PhoneCallSession.household_id == "hh-plan")
             .one()
         )
-        assert row.contact_address == "33 National Ave"
+        assert row.contact_address == "742 Evergreen Ave"
 
 
 class TestLocationWarningOnCard:
@@ -596,14 +596,14 @@ class TestLocationWarningOnCard:
                 number="+13015551234",
                 source_url="https://wrong-tonys.example",
                 address="12800 Frederick Rd, West Friendship, MD 21794",
-                searched_near="Brick, NJ 08724",
+                searched_near="Springfield, IL 62704",
             ),
         )
         body = posted["body"]
         assert "⚠️" in body
-        assert "MD" in body and "NJ" in body
+        assert "MD" in body and "IL" in body
         # And the user can see WHY this result was picked.
-        assert "searched near Brick, NJ 08724" in body
+        assert "searched near Springfield, IL 62704" in body
 
     @pytest.mark.asyncio
     async def test_in_state_result_has_no_warning(self, bound_db):
@@ -614,12 +614,12 @@ class TestLocationWarningOnCard:
             search_result=NumberSearchResult(
                 number="+17325924183",
                 source_url="https://tonys.example",
-                address="33 National Ave, Brick, NJ 08724",
-                searched_near="Brick, NJ 08724",
+                address="742 Evergreen Ave, Springfield, IL 62704",
+                searched_near="Springfield, IL 62704",
             ),
         )
         assert "⚠️" not in posted["body"]
-        assert "searched near Brick, NJ 08724" in posted["body"]
+        assert "searched near Springfield, IL 62704" in posted["body"]
 
     @pytest.mark.asyncio
     async def test_unbiased_search_omits_provenance_and_warning(self, bound_db):
@@ -631,7 +631,7 @@ class TestLocationWarningOnCard:
             search_result=NumberSearchResult(
                 number="+17325924183",
                 source_url="https://tonys.example",
-                address="33 National Ave, Brick, NJ 08724",
+                address="742 Evergreen Ave, Springfield, IL 62704",
             ),
         )
         body = posted["body"]

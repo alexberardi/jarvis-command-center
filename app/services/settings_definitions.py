@@ -611,7 +611,7 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         default="",
         description=(
             "Household locality used to disambiguate business searches — "
-            "e.g. 'Brick, NJ 08724', 'Brick, NJ', or a bare ZIP. Deliberately "
+            "e.g. 'Springfield, IL 62704', 'Springfield, IL', or a bare ZIP. Deliberately "
             "NOT a street address: this picks WHICH business, it is not used "
             "for directions and is never spoken on a call. Empty means "
             "searches run unbiased (the pre-2026-07 behavior)."

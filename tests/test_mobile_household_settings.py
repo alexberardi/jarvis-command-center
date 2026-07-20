@@ -171,19 +171,19 @@ class TestStringSettings:
     def test_coerce_passes_strings_through_untouched(self):
         from app.api.mobile_household_settings import _coerce
 
-        assert _coerce("Brick, NJ 08724", "string") == "Brick, NJ 08724"
+        assert _coerce("Springfield, IL 62704", "string") == "Springfield, IL 62704"
         assert _coerce("", "string") == ""
         # No truthiness games, no int parsing: a bare ZIP stays a string.
-        assert _coerce("08724", "string") == "08724"
+        assert _coerce("62704", "string") == "62704"
 
     def test_put_string_setting_writes_verbatim(self, client):
         stub = _settings_stub("")
         with patch(ROLE), patch(SETTINGS, stub):
-            r = client.put(f"{BASE}/household.location", json={"value": "Brick, NJ"})
+            r = client.put(f"{BASE}/household.location", json={"value": "Springfield, IL"})
         assert r.status_code == 200
-        assert r.json()["value"] == "Brick, NJ"
+        assert r.json()["value"] == "Springfield, IL"
         stub.return_value.set.assert_called_once_with(
-            "household.location", "Brick, NJ", household_id=HH
+            "household.location", "Springfield, IL", household_id=HH
         )
 
     def test_location_definition_exists_with_empty_default(self):
