@@ -16,7 +16,7 @@ from app.services.call_context import (
     STATE,
     build_context_block,
     parse_call_context,
-    restricted_values,
+    restricted_fields,
     select_fields,
 )
 
@@ -123,16 +123,34 @@ class TestBriefBlock:
         assert "never volunteer" in block and "XZ-9912345" in block
 
 
-class TestRestrictedValues:
-    def test_lists_exactly_the_values_that_must_not_be_volunteered(self):
+class TestRestrictedFields:
+    def test_lists_exactly_the_fields_that_must_not_be_volunteered(self):
         """The spoken-output guard consumes this; the prompt asking nicely is
         not the enforcement layer."""
         fields = parse_call_context(_blob(NAME, ADDRESS, MEMBER_ID))
-        vals = restricted_values(select_fields(fields, [MEDICAL]))
+        restricted = restricted_fields(select_fields(fields, [MEDICAL]))
+        values = [f.value for f in restricted]
 
-        assert "XZ-9912345" in vals
-        assert "742 Evergreen Ave, Springfield, IL 62704" in vals
-        assert "Alex B" not in vals
+        assert "XZ-9912345" in values
+        assert "742 Evergreen Ave, Springfield, IL 62704" in values
+        assert "Alex B" not in values
+
+    def test_carries_labels_so_the_guard_never_needs_the_value(self):
+        """The guard asks "did they ask for Insurance member ID?" — a question
+        answerable from the label alone. That is what keeps the secret out of
+        the classifier prompt, so a callee who manipulates it learns nothing."""
+        restricted = restricted_fields(parse_call_context(_blob(MEMBER_ID)))
+
+        assert [f.label for f in restricted] == ["Insurance member ID"]
+        assert [f.key for f in restricted] == ["insurance_member_id"]
+
+    def test_a_custom_field_is_restricted_by_default(self):
+        """Unknown keys default to IF_ASKED, so a hand-typed "Gate code" is
+        guarded without the user having to know the tier system exists."""
+        custom = {"key": "gate_code", "label": "Gate code", "value": "4417"}
+        restricted = restricted_fields(parse_call_context(_blob(custom)))
+
+        assert [(f.label, f.value) for f in restricted] == [("Gate code", "4417")]
 
 
 class TestBriefAssembly:

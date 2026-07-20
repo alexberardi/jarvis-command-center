@@ -197,14 +197,20 @@ def select_fields(
     return [f for f in fields if f.category in wanted]
 
 
-def restricted_values(fields: list[ContextField]) -> list[str]:
-    """Values that must never be volunteered.
+def restricted_fields(fields: list[ContextField]) -> list[ContextField]:
+    """Fields that must never be volunteered — the guard's denylist.
 
-    The spoken-output guard checks candidate speech against these before it
-    reaches TTS: the prompt asks the model not to offer them, this is how we
-    stop relying on that.
+    The gateway's spoken-output guard checks candidate speech against these
+    before it reaches TTS: the prompt asks the model not to offer them, this
+    is how we stop relying on that.
+
+    Returns whole fields, not bare values, because the guard needs the LABEL
+    too: deciding whether the callee actually asked for something is a
+    question about "Insurance member ID", and the guard is deliberately built
+    so that judgement can be made from the label alone — the value itself
+    never has to reach the classifier.
     """
-    return [f.value for f in fields if f.tier == IF_ASKED and f.value]
+    return [f for f in fields if f.tier == IF_ASKED and f.value]
 
 
 def build_context_block(fields: list[ContextField]) -> str | None:
