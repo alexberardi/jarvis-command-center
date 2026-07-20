@@ -89,6 +89,7 @@ async def get_phone_session(session_id: str, db: Session = Depends(get_db)) -> d
         "initiator_name": initiator_name,
         "household_id": s.household_id,
         "contact_name": s.contact_name,
+        "contact_address": s.contact_address,
         "dialed_number": s.dialed_number,
         "goal": s.goal,
         "details": s.details,

@@ -434,6 +434,13 @@ async def create_call_plan(
         details = await apply_availability_envelope(
             household_id=household_id, goal=goal, details=details
         )
+        # A delivery/pickup call gets asked for the address constantly. If we
+        # know it, put it IN the brief — the brief is the complete set of
+        # facts the agent may state, so an address absent from it is an
+        # address the model will invent (live 2026-07-19: "123 Main Street").
+        known_address = (contact.address if contact else None) or search_address
+        if known_address and "address" not in details.lower():
+            details = f"{details.rstrip()}\nAddress if asked: {known_address}"
 
         ttl_minutes = _int_setting("phone_calls.plan_ttl_minutes", household_id, 20)
         now = datetime.utcnow()
@@ -447,7 +454,8 @@ async def create_call_plan(
             details=details,
             resolved_number=resolved_number,
             dialed_number=None,
-            contact_address=search_address,
+            # Prefer the phonebook's verified address; fall back to search.
+            contact_address=(contact.address if contact else None) or search_address,
             line_type=line_type,
             state="draft",
             created_at=now,
@@ -961,8 +969,17 @@ def post_outcome_card(session: PhoneCallSession) -> None:
 
     achieved = outcome.get("goal_achieved")
     summary = outcome.get("summary") or "The call ended."
-    facts = outcome.get("facts") or {}
-    fact_lines = "\n".join(f"- **{k}**: {v}" for k, v in facts.items() if v)
+    # The gateway sends facts as a LIST of statements (its [OUTCOME: ...]
+    # tokens); older/other producers may send a dict. Rendering blew up on
+    # the list form and took the whole outcome card with it — the user got
+    # a completed call and no summary at all (live 2026-07-19).
+    facts = outcome.get("facts") or []
+    if isinstance(facts, dict):
+        fact_lines = "\n".join(f"- **{k}**: {v}" for k, v in facts.items() if v)
+    elif isinstance(facts, (list, tuple)):
+        fact_lines = "\n".join(f"- {f}" for f in facts if f)
+    else:
+        fact_lines = f"- {facts}" if facts else ""
     facts_block = (
         f"\n\nWhat the business said:\n{fact_lines}" if fact_lines else ""
     )
