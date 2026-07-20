@@ -157,3 +157,38 @@ class TestIntCoercion:
             r = client.get(BASE)
         assert r.status_code == 200
         assert r.json()["settings"]["phone_calls.plan_ttl_minutes"] is None
+
+
+class TestStringSettings:
+    """`household.location` is the first string-typed household setting —
+    getting it wrong calls the wrong business, so the household owns it."""
+
+    def test_location_is_allowlisted_as_string(self):
+        from app.api.mobile_household_settings import HOUSEHOLD_CONTROLLABLE_SETTINGS
+
+        assert HOUSEHOLD_CONTROLLABLE_SETTINGS["household.location"] == "string"
+
+    def test_coerce_passes_strings_through_untouched(self):
+        from app.api.mobile_household_settings import _coerce
+
+        assert _coerce("Springfield, IL 62704", "string") == "Springfield, IL 62704"
+        assert _coerce("", "string") == ""
+        # No truthiness games, no int parsing: a bare ZIP stays a string.
+        assert _coerce("62704", "string") == "62704"
+
+    def test_put_string_setting_writes_verbatim(self, client):
+        stub = _settings_stub("")
+        with patch(ROLE), patch(SETTINGS, stub):
+            r = client.put(f"{BASE}/household.location", json={"value": "Springfield, IL"})
+        assert r.status_code == 200
+        assert r.json()["value"] == "Springfield, IL"
+        stub.return_value.set.assert_called_once_with(
+            "household.location", "Springfield, IL", household_id=HH
+        )
+
+    def test_location_definition_exists_with_empty_default(self):
+        from app.services.settings_definitions import SETTINGS_DEFINITIONS
+
+        d = next(x for x in SETTINGS_DEFINITIONS if x.key == "household.location")
+        assert d.value_type == "string"
+        assert d.default == ""

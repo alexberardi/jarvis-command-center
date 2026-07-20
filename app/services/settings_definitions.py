@@ -605,6 +605,19 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Per-household monthly call minutes cap (fail-closed when exceeded)",
     ),
     SettingDefinition(
+        key="household.location",
+        category="household",
+        value_type="string",
+        default="",
+        description=(
+            "Household locality used to disambiguate business searches — "
+            "e.g. 'Springfield, IL 62704', 'Springfield, IL', or a bare ZIP. Deliberately "
+            "NOT a street address: this picks WHICH business, it is not used "
+            "for directions and is never spoken on a call. Empty means "
+            "searches run unbiased (the pre-2026-07 behavior)."
+        ),
+    ),
+    SettingDefinition(
         key="phone_calls.max_concurrent_calls",
         category="phone_calls",
         value_type="int",

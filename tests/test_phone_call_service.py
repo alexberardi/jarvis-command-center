@@ -578,6 +578,66 @@ class TestPlanResolution:
         assert row.contact_address == "742 Evergreen Ave"
 
 
+class TestLocationWarningOnCard:
+    """A wrong-state search result must be visible on the card.
+
+    Live 2026-07-19: a search for "Tony's Pizzeria" returned a Maryland
+    listing for a New Jersey household and the call went out to the wrong
+    business. The card is the human checkpoint — warn there, never block.
+    """
+
+    @pytest.mark.asyncio
+    async def test_out_of_state_result_warns_and_shows_provenance(self, bound_db):
+        from app.services.phone_number_search import NumberSearchResult
+
+        posted = await TestPlanResolution._run_plan(
+            bound_db,
+            search_result=NumberSearchResult(
+                number="+13015551234",
+                source_url="https://wrong-tonys.example",
+                address="12800 Frederick Rd, West Friendship, MD 21794",
+                searched_near="Springfield, IL 62704",
+            ),
+        )
+        body = posted["body"]
+        assert "⚠️" in body
+        assert "MD" in body and "NJ" in body
+        # And the user can see WHY this result was picked.
+        assert "searched near Springfield, IL 62704" in body
+
+    @pytest.mark.asyncio
+    async def test_in_state_result_has_no_warning(self, bound_db):
+        from app.services.phone_number_search import NumberSearchResult
+
+        posted = await TestPlanResolution._run_plan(
+            bound_db,
+            search_result=NumberSearchResult(
+                number="+17325924183",
+                source_url="https://tonys.example",
+                address="742 Evergreen Ave, Springfield, IL 62704",
+                searched_near="Springfield, IL 62704",
+            ),
+        )
+        assert "⚠️" not in posted["body"]
+        assert "searched near Springfield, IL 62704" in posted["body"]
+
+    @pytest.mark.asyncio
+    async def test_unbiased_search_omits_provenance_and_warning(self, bound_db):
+        """No household location set → behaves exactly as before."""
+        from app.services.phone_number_search import NumberSearchResult
+
+        posted = await TestPlanResolution._run_plan(
+            bound_db,
+            search_result=NumberSearchResult(
+                number="+17325924183",
+                source_url="https://tonys.example",
+                address="742 Evergreen Ave, Springfield, IL 62704",
+            ),
+        )
+        body = posted["body"]
+        assert "⚠️" not in body
+        assert "searched near" not in body
+        assert "web search" in body  # still attributed as a search result
 class TestOutcomeCardFactShapes:
     """The gateway sends facts as a LIST; a dict was assumed. Rendering blew
     up mid-card, so a completed call delivered no summary at all

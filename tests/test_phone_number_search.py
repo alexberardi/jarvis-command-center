@@ -191,3 +191,169 @@ class TestFindBusinessNumber:
     def test_result_dataclass_found_property(self):
         assert NumberSearchResult(number="+17325924183").found is True
         assert NumberSearchResult(reason="no_results").found is False
+
+
+# ---------------------------------------------------------------------------
+# Household location: biasing + mismatch detection
+# ---------------------------------------------------------------------------
+
+
+def _multi_settings(values: dict):
+    """Fake settings service resolving several keys."""
+    class _S:
+        def get(self, key, household_id=None):
+            return values.get(key)
+
+    return lambda: _S()
+
+
+class TestHouseholdLocation:
+    def test_reads_the_setting(self):
+        from app.services.phone_number_search import household_location
+
+        with patch(
+            "app.services.settings_service.get_settings_service",
+            _multi_settings({"household.location": "Springfield, IL 62704"}),
+        ):
+            assert household_location(HH) == "Springfield, IL 62704"
+
+    def test_unset_is_empty(self):
+        from app.services.phone_number_search import household_location
+
+        with patch(
+            "app.services.settings_service.get_settings_service",
+            _multi_settings({"household.location": ""}),
+        ):
+            assert household_location(HH) == ""
+
+    def test_no_household_is_empty(self):
+        from app.services.phone_number_search import household_location
+
+        assert household_location(None) == ""
+
+    def test_settings_error_degrades_to_empty(self):
+        """An unbiased search is worse, not fatal — never fail the plan."""
+        from app.services.phone_number_search import household_location
+
+        def _boom():
+            raise RuntimeError("settings down")
+
+        with patch("app.services.settings_service.get_settings_service", _boom):
+            assert household_location(HH) == ""
+
+
+class TestQueryBiasing:
+    def _run_and_capture_query(self, location):
+        captured = {}
+
+        def _fake_search(query):
+            captured["query"] = query
+            return []
+
+        with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
+            f"{SEARCH}.household_location", return_value=location
+        ), patch(
+            "app.core.tools.quick_search_tool._search_web", _fake_search
+        ):
+            find_business_number("Tony's Pizzeria", HH)
+        return captured["query"]
+
+    def test_location_appended_when_set(self):
+        assert (
+            self._run_and_capture_query("Springfield, IL")
+            == "Tony's Pizzeria Springfield, IL phone number"
+        )
+
+    def test_no_location_is_unchanged_behavior(self):
+        """Regression guard: empty setting must search exactly as before."""
+        assert self._run_and_capture_query("") == "Tony's Pizzeria phone number"
+
+    def test_searched_near_recorded_on_result(self):
+        sources = [{"url": "https://t.example", "content": "Call 732-592-4183"}]
+        with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
+            f"{SEARCH}.household_location", return_value="Springfield, IL"
+        ), patch(
+            "app.core.tools.quick_search_tool._search_web", return_value=[{"url": "x"}]
+        ), patch(
+            "app.core.tools.quick_search_tool._scrape_results", return_value=sources
+        ):
+            result = find_business_number("Tony's", HH)
+        assert result.searched_near == "Springfield, IL"
+
+    def test_searched_near_none_without_location(self):
+        sources = [{"url": "https://t.example", "content": "Call 732-592-4183"}]
+        with patch(f"{SEARCH}.web_search_enabled", return_value=True), patch(
+            f"{SEARCH}.household_location", return_value=""
+        ), patch(
+            "app.core.tools.quick_search_tool._search_web", return_value=[{"url": "x"}]
+        ), patch(
+            "app.core.tools.quick_search_tool._scrape_results", return_value=sources
+        ):
+            result = find_business_number("Tony's", HH)
+        assert result.searched_near is None
+
+
+class TestLocationMismatch:
+    """The live failure: a Maryland listing dialed for a New Jersey household.
+
+    Silence beats crying wolf — every ambiguous case must return None.
+    """
+
+    def test_different_state_warns(self):
+        from app.services.phone_number_search import location_mismatch
+
+        warning = location_mismatch(
+            "12800 Frederick Rd, West Friendship, MD 21794", "Springfield, IL 62704"
+        )
+        assert warning is not None
+        assert "MD" in warning and "NJ" in warning
+
+    def test_same_state_is_silent(self):
+        from app.services.phone_number_search import location_mismatch
+
+        assert (
+            location_mismatch("742 Evergreen Ave, Springfield, IL 62704", "Springfield, IL 62704")
+            is None
+        )
+
+    def test_same_state_distant_town_still_silent(self):
+        """Two towns far apart in one state is a judgement call, not an error."""
+        from app.services.phone_number_search import location_mismatch
+
+        assert location_mismatch("1 Beach Ave, Cape May, NJ 08204", "Newark, NJ") is None
+
+    def test_missing_address_is_silent(self):
+        from app.services.phone_number_search import location_mismatch
+
+        assert location_mismatch(None, "Springfield, IL") is None
+        assert location_mismatch("", "Springfield, IL") is None
+
+    def test_missing_location_is_silent(self):
+        from app.services.phone_number_search import location_mismatch
+
+        assert location_mismatch("742 Evergreen Ave, Springfield, IL", None) is None
+        assert location_mismatch("742 Evergreen Ave, Springfield, IL", "") is None
+
+    def test_address_without_a_state_is_silent(self):
+        from app.services.phone_number_search import location_mismatch
+
+        assert location_mismatch("742 Evergreen Ave", "Springfield, IL") is None
+
+    def test_location_without_a_state_is_silent(self):
+        """A bare ZIP household location can't be compared — say nothing."""
+        from app.services.phone_number_search import location_mismatch
+
+        assert location_mismatch("742 Evergreen Ave, Springfield, IL 62704", "62704") is None
+
+    def test_lowercase_words_are_not_read_as_states(self):
+        """'in', 'me', 'or' are ordinary words — a false state reading here
+        would put a false alarm on a card the user is meant to trust."""
+        from app.services.phone_number_search import location_mismatch
+
+        assert location_mismatch("12 Main St in the plaza", "Springfield, IL") is None
+
+    def test_trailing_state_wins_over_earlier_token(self):
+        from app.services.phone_number_search import location_mismatch
+
+        # "OR" appears early as a word-ish token; the real state is trailing.
+        assert location_mismatch("5 Water St, Portland, OR 97204", "Portland, OR") is None

@@ -63,6 +63,7 @@ class NumberSearchResult:
     source_url: str | None = None
     address: str | None = None
     reason: str | None = None  # why there's no number, for the card's note
+    searched_near: str | None = None  # household location used to bias, if any
 
     @property
     def found(self) -> bool:
@@ -93,6 +94,86 @@ def web_search_enabled(household_id: str | None) -> bool:
             "phone number search gate check failed, defaulting to DISABLED: %s", e
         )
         return False
+
+
+def household_location(household_id: str | None) -> str:
+    """The household's locality string, or "" when unset.
+
+    Explicitly household-scoped for the same reason as the gate above: the
+    plan step runs outside any conversation cache. Any failure degrades to
+    "" — an unbiased search is worse than a biased one, but it is not a
+    reason to fail the plan.
+    """
+    if not household_id:
+        return ""
+    try:
+        from app.services.settings_service import get_settings_service
+
+        val = get_settings_service().get(
+            "household.location", household_id=str(household_id)
+        )
+        return str(val).strip() if val else ""
+    except Exception as e:  # noqa: BLE001 — location is an enhancement
+        logger.warning("household location lookup failed: %s", e)
+        return ""
+
+
+# US state abbreviations, for the "is this result even near me?" check.
+_STATES = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID",
+    "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS",
+    "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK",
+    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+    "WI", "WY", "DC",
+}
+
+_STATE_RE = re.compile(r"\b([A-Z]{2})\b")
+_ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
+
+
+def _state_of(text: str) -> str | None:
+    """Last US state abbreviation in ``text``, if any.
+
+    Last, not first: addresses read "742 Evergreen Ave, Springfield, IL 62704", so
+    the trailing token is the state. Case-sensitive on purpose — lowercase
+    "in"/"me"/"or" are ordinary words, and a false state reading here would
+    produce a false alarm on the card.
+    """
+    found = [m.group(1) for m in _STATE_RE.finditer(text or "") if m.group(1) in _STATES]
+    return found[-1] if found else None
+
+
+def _zip_of(text: str) -> str | None:
+    match = _ZIP_RE.search(text or "")
+    return match.group(1) if match else None
+
+
+def location_mismatch(address: str | None, location: str | None) -> str | None:
+    """Human-readable warning when ``address`` is clearly not near ``location``.
+
+    Deliberately cheap and dependency-free — no geocoding. It answers only
+    the question that actually burned us: "is this result in a different
+    STATE than the household?" Anything less clear-cut returns None.
+
+    False-alarm guards (silence beats crying wolf on a card the user is
+    meant to trust):
+    - Either side missing a state → None.
+    - Same state → None, regardless of ZIP or city distance. Two towns 200
+      miles apart in the same state are a judgement call, not an error.
+    - ZIP is only used to corroborate a state we already read.
+    """
+    if not address or not location:
+        return None
+    addr_state = _state_of(address)
+    home_state = _state_of(location)
+    if not addr_state or not home_state:
+        return None
+    if addr_state == home_state:
+        return None
+    return (
+        f"\u26a0\ufe0f This result is in {addr_state} but your household is in "
+        f"{home_state} \u2014 check it's the right location before calling."
+    )
 
 
 def extract_number(text: str) -> str | None:
@@ -131,7 +212,15 @@ def find_business_number(business: str, household_id: str) -> NumberSearchResult
     if not web_search_enabled(household_id):
         return NumberSearchResult(reason="web_search_disabled")
 
-    query = f"{business} phone number"
+    # Bias the query toward the household's own area. Without this a search
+    # for a common business name returns whichever listing ranks highest
+    # nationally — live 2026-07-19 that dialed a Tony's Pizzeria in Maryland
+    # for a household in New Jersey.
+    location = household_location(household_id)
+    query = (
+        f"{business} {location} phone number" if location
+        else f"{business} phone number"
+    )
     try:
         from app.core.tools.quick_search_tool import _scrape_results, _search_web
 
@@ -157,6 +246,7 @@ def find_business_number(business: str, household_id: str) -> NumberSearchResult
                 number=number,
                 source_url=source.get("url"),
                 address=extract_address(content),
+                searched_near=location or None,
             )
 
     logger.info("[phone_search] no parseable number for %r", business)
