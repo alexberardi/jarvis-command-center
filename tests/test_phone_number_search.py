@@ -106,6 +106,46 @@ class TestExtractAddress:
     def test_no_address_returns_none(self):
         assert extract_address("Call for hours") is None
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # The live 2026-07-20 failure: scraped review prose became the
+            # address "2 yrs and am so pl" on a real call plan, because "Pl"
+            # matched the start of "pleased" under IGNORECASE with no word
+            # boundary. The brief is what the agent may say out loud, so a
+            # fabricated address is worse than none at all.
+            "I have been a patient for 2 yrs and am so pleased with the care",
+            "been going here 3 years and am still very happy",
+            "call us at 5 pm and we will drop by",
+            "Open 7 days a week and we are so pleasant",
+            "20 years in business, 4 doctors on staff",
+            "I waited 45 minutes and was still not seen",
+            # Street-ish word but no locality anchor — not an address.
+            "we are 3 doors down from Main Street",
+        ],
+    )
+    def test_prose_is_not_an_address(self, text):
+        assert extract_address(text) is None
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("1200 Route 70, Brick, NJ 08724", "1200 Route 70, Brick, NJ 08724"),
+            ("Located at 55 Main St, Brick NJ", "55 Main St, Brick NJ"),
+            (
+                "Office: 8 Kings Hwy Suite 3, Cherry Hill, NJ 08034",
+                "8 Kings Hwy Suite 3, Cherry Hill, NJ 08034",
+            ),
+            (
+                "15 Chambers Bridge Rd, Brick Township, NJ 08723",
+                "15 Chambers Bridge Rd, Brick Township, NJ 08723",
+            ),
+            ("742 Evergreen Ave 62704", "742 Evergreen Ave 62704"),
+        ],
+    )
+    def test_real_address_shapes_survive(self, text, expected):
+        assert extract_address(text) == expected
+
 
 # ---------------------------------------------------------------------------
 # find_business_number — the degradation matrix

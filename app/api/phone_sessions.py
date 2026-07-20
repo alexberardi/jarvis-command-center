@@ -30,6 +30,7 @@ from app.models import PhoneCallSession
 from app.services.phone_call_service import (
     ACTIVE_STATES,
     TERMINAL_STATES,
+    extract_constraint_envelope,
     post_escalation_card,
     post_outcome_card,
     transition,
@@ -93,7 +94,11 @@ async def get_phone_session(session_id: str, db: Session = Depends(get_db)) -> d
         "dialed_number": s.dialed_number,
         "goal": s.goal,
         "details": s.details,
-        "constraints": s.constraints,
+        # Derived from the CONFIRMED brief, so the gateway's
+        # "negotiate only within these" section reflects exactly what the
+        # user approved on the card — including any edits they made to the
+        # times. An explicit stored value still wins if one is ever set.
+        "constraints": s.constraints or extract_constraint_envelope(s.details),
         "line_type": s.line_type,
         "max_call_seconds": _int_setting(
             "phone_calls.max_call_seconds", s.household_id, 600

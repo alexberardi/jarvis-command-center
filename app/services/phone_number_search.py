@@ -46,12 +46,34 @@ _PHONE_RE = re.compile(
 )
 
 # Address-ish line near a hit, best-effort — nice to have, never required.
+#
+# Deliberately strict. This feeds the call brief, and the brief is the
+# complete set of facts the agent may state aloud, so a wrong address is
+# strictly worse than no address: it gets read to a real business. The
+# earlier pattern had no word boundary after the street-type list and ran
+# case-insensitively, so the two-letter abbreviations matched the START of
+# ordinary words — "2 yrs and am so pleased" yielded the address
+# "2 yrs and am so pl" (live 2026-07-20), because "Pl" matched "pl"eased.
+#
+# Two guards: the street type must end on a word boundary, and the match
+# must be anchored by a real locality (state abbreviation or ZIP). Prose
+# clears neither.
 _ADDRESS_RE = re.compile(
-    r"\d{1,6}\s+[A-Za-z0-9.\- ]{3,40}"
-    r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|"
-    r"Highway|Hwy|Route|Rt|Place|Pl|Court|Ct|Parkway|Pkwy)\.?"
-    r"(?:,\s*[A-Za-z .]{2,30})?(?:,\s*[A-Z]{2})?(?:\s+\d{5})?",
-    re.IGNORECASE,
+    r"""\b\d{1,6}\s+                        # street number
+        (?:[A-Za-z0-9.\-]+\ ){0,5}          # up to 5 street-name words
+        (?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|
+           Way|Highway|Hwy|Route|Rt|Place|Pl|Court|Ct|Parkway|Pkwy)
+        \b\.?                               # ends a WORD, not a prefix
+        (?:\ \d{1,4}[A-Za-z]?\b)?           # "Route 70", "Highway 35"
+        (?:\s*,?\s*(?:Suite|Ste|Unit|Apt|Bldg|Floor|Fl|\#)\s*[A-Za-z0-9\-]+)?
+        (?:\s*,?\s*[A-Za-z.\-]+(?:\ [A-Za-z.\-]+){0,2})?   # optional city
+        \s*,?\s*
+        (?:                                 # locality anchor — required
+            (?-i:[A-Z]{2})\b(?:\s+\d{5}(?:-\d{4})?)?       # NJ / NJ 08724
+          | \d{5}(?:-\d{4})?                               # bare ZIP
+        )
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 

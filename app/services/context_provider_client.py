@@ -112,6 +112,7 @@ async def query_context(
     params: dict[str, Any] | None = None,
     *,
     command: str | None = None,
+    user_id: int | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_SECONDS,
     db=None,
 ) -> ContextAnswer:
@@ -120,6 +121,11 @@ async def query_context(
     Tries nodes in liveness order and returns the first real answer. A node
     that reports `no_provider` is not a failure of that node — it simply
     doesn't have the command installed, so the next node is tried.
+
+    ``user_id`` identifies the speaker the context is being gathered FOR.
+    Providers whose data is per-person (calendar, email) resolve their
+    credentials from it; omitting it makes them refuse rather than answer
+    with someone else's data.
     """
     own_session = db is None
     if own_session:
@@ -140,6 +146,8 @@ async def query_context(
         payload: dict[str, Any] = {"operation": operation, "params": params or {}}
         if command:
             payload["command"] = command
+        if user_id is not None:
+            payload["user_id"] = user_id
 
         body = await _round_trip(node.node_id, payload, timeout_s)
         if body is None:
