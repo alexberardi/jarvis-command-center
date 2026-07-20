@@ -68,7 +68,7 @@ def _mk_session(db, *, state="draft", expires_in_min=20, **overrides) -> PhoneCa
 
 class TestNormalizeUsNumber:
     def test_valid_formats_normalize(self):
-        for raw in ("+1 555-555-0123", "5555550123", "1-555-555-0123", "555-555-0123"):
+        for raw in ("+1 555 555 0123", "5555550123", "1-555-555-0123", "(555) 555-0123"):
             assert svc.normalize_us_number(raw) == "+15555550123"
 
     def test_emergency_numbers_refused(self):
@@ -194,7 +194,7 @@ class TestCaps:
 # =============================================================================
 
 
-def _confirm_ctx(session_id, *, number="+1 555-555-0123", details="Book it.", user_id=42):
+def _confirm_ctx(session_id, *, number="+1 555 555 0123", details="Book it.", user_id=42):
     return ServerCallbackContext(
         job_id=str(uuid.uuid4()),
         household_id=HH,
@@ -601,7 +601,7 @@ class TestLocationWarningOnCard:
         )
         body = posted["body"]
         assert "⚠️" in body
-        assert "MD" in body and "NJ" in body
+        assert "MD" in body and "IL" in body
         # And the user can see WHY this result was picked.
         assert "searched near Springfield, IL 62704" in body
 

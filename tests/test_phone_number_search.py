@@ -306,7 +306,7 @@ class TestLocationMismatch:
             "12800 Frederick Rd, West Friendship, MD 21794", "Springfield, IL 62704"
         )
         assert warning is not None
-        assert "MD" in warning and "NJ" in warning
+        assert "MD" in warning and "IL" in warning
 
     def test_same_state_is_silent(self):
         from app.services.phone_number_search import location_mismatch
