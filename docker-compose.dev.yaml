@@ -69,6 +69,39 @@ services:
       timeout: 3s
       retries: 5
 
+  # Disposable Postgres for the test suite. Separate from `postgres` above
+  # (that one is the standalone DEV database on 5432 with its own volume).
+  #
+  # Port 5544, not 5433: CI publishes its Postgres on 5433 and the committed
+  # TEST_DATABASE_URL default matches that, but on a dev box running the full
+  # jarvis stack 5433 is pantry's database — so the suite connected happily to
+  # the wrong server and failed with "password authentication failed for user
+  # jarvis_user", which reads like a credentials problem rather than a port
+  # collision. Anything but 5433 avoids the confusion.
+  #
+  # pg16, matching the repo-wide pin that test_compose_pgvector_pin.py guards
+  # (roadmap#46: majors are not data-compatible, so a mixed setup fails with
+  # "database files are incompatible with server"). Note CI still runs its
+  # Postgres service on pg15 — that divergence predates this file and is worth
+  # closing separately. tmpfs storage: this database is meant to be thrown
+  # away and never wants a volume that could outlive a schema change.
+  postgres-test:
+    profiles: ["test"]
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: jarvis_user
+      POSTGRES_PASSWORD: jarvis_password
+      POSTGRES_DB: jarvis_command_center
+    ports:
+      - "5544:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jarvis_user -d jarvis_command_center"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   cc-pg-data:
   caddy-data:
