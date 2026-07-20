@@ -113,9 +113,13 @@ class TestBriefBlock:
         block = build_context_block(select_fields(fields, [MEDICAL]))
 
         assert "you may state these" in block
-        assert "never volunteer these" in block
-        # Name is statable; address and member id are not.
-        state_part, private_part = block.split("Give ONLY if they ask")
+        # The private group leads with "give when asked", not a refusal — a
+        # refusal-forward header made the model refuse legitimate asks (live
+        # 2026-07-20). It must still forbid volunteering.
+        assert "give it to them directly" in block
+        assert "Do not bring them up yourself" in block
+        # Name is statable; address and member id are in the give-when-asked group.
+        state_part, private_part = block.split("You have these details")
         assert "Alex B" in state_part
         assert "Evergreen" in private_part and "XZ-9912345" in private_part
 
@@ -125,7 +129,7 @@ class TestBriefBlock:
     def test_only_private_fields_still_renders(self):
         fields = parse_call_context(_blob(MEMBER_ID))
         block = build_context_block(select_fields(fields, [MEDICAL]))
-        assert "never volunteer" in block and "XZ-9912345" in block
+        assert "Do not bring them up yourself" in block and "XZ-9912345" in block
 
 
 class TestRestrictedFields:
