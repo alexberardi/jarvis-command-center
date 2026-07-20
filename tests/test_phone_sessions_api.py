@@ -21,6 +21,7 @@ os.environ.setdefault("JARVIS_AUTH_BASE_URL", "http://localhost:7701")
 from app.deps import get_db, require_app_auth
 from app.main import app
 from app.models import PhoneCallSession
+from app.services.call_context import parse_call_context
 
 HH = "hh-phone-api"
 
@@ -82,6 +83,7 @@ class TestGetSession:
         for key in (
             "id", "state", "household_id", "contact_name", "dialed_number",
             "goal", "details", "constraints", "line_type", "max_call_seconds",
+            "restricted_details",
         ):
             assert key in body, f"snapshot missing {key}"
         assert body["state"] == "confirmed"
@@ -89,6 +91,44 @@ class TestGetSession:
 
     def test_unknown_session_404(self, client):
         assert client.get(f"/internal/phone/sessions/{uuid.uuid4()}").status_code == 404
+
+    def test_restricted_details_carry_key_label_and_value(self, client, test_db):
+        """The gateway's guard needs all three: value to detect the leak,
+        label to ask whether it was requested, key to match the verdict back.
+        Drop any one and the guard cannot be built on this payload."""
+        s = _mk_session(test_db)
+        context = [
+            {"key": "full_name", "value": "Alex B"},
+            {"key": "callback_number", "value": "+15555550123"},
+        ]
+        with patch(
+            "app.services.call_context.load_call_context",
+            return_value=parse_call_context({"fields": context}),
+        ):
+            body = client.get(f"/internal/phone/sessions/{s.id}").json()
+
+        # full_name is tier STATE — it may be said freely, so it is NOT here.
+        assert body["restricted_details"] == [
+            {
+                "key": "callback_number",
+                "label": "Callback number",
+                "value": "+15555550123",
+            }
+        ]
+
+    def test_restricted_details_degrade_to_empty_not_500(self, client, test_db):
+        """Context lookup is an enhancement. A settings outage must not stop
+        the worker fetching its snapshot — that would turn a degraded guard
+        into a failed call."""
+        s = _mk_session(test_db)
+        with patch(
+            "app.services.call_context.load_call_context",
+            side_effect=RuntimeError("settings down"),
+        ):
+            r = client.get(f"/internal/phone/sessions/{s.id}")
+
+        assert r.status_code == 200
+        assert r.json()["restricted_details"] == []
 
 
 class TestClaimDial:

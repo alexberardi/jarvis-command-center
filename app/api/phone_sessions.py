@@ -59,6 +59,37 @@ class SessionEventBody(BaseModel):
     audio_key: str | None = None
 
 
+def _restricted_details(s: PhoneCallSession) -> list[dict[str, str]]:
+    """The session's give-if-asked fields, for the gateway's guard.
+
+    Recomputed from stored context rather than parsed back out of `details`:
+    the brief is prose the user may have edited, and a denylist reconstructed
+    from prose would be exactly as reliable as the prose. Categories match
+    plan time (General only until the confirm card offers the choice), so the
+    guard restricts precisely the set the brief was built from.
+
+    Degrades to [] on any failure — consistent with the rest of call context,
+    where missing context is a worse call but never a failed one. Note the
+    guard itself fails CLOSED on top of this: an empty list only means
+    nothing is restricted, not that everything is permitted.
+    """
+    try:
+        from app.services.call_context import (
+            load_call_context,
+            restricted_fields,
+            select_fields,
+        )
+
+        selected = select_fields(load_call_context(s.user_id), None)
+        return [
+            {"key": f.key, "label": f.label, "value": f.value}
+            for f in restricted_fields(selected)
+        ]
+    except Exception as e:  # noqa: BLE001 — never block a dial on context
+        logger.warning("restricted details unavailable for %s: %s", s.id, e)
+        return []
+
+
 def _get_session_or_404(db: Session, session_id: str) -> PhoneCallSession:
     session = (
         db.query(PhoneCallSession)
@@ -85,6 +116,12 @@ async def get_phone_session(session_id: str, db: Session = Depends(get_db)) -> d
     initiator_name = await _resolve_initiator_name(s.user_id)
 
     return {
+        # Give-if-asked details, structured, for the gateway's spoken-output
+        # guard. These values already travel in `details` as prose (the brief
+        # renders them), so this adds no exposure — it makes them CHECKABLE.
+        # Same category selection as plan time, so the guard's denylist and
+        # the brief cannot drift apart.
+        "restricted_details": _restricted_details(s),
         "id": s.id,
         "state": s.state,
         "initiator_name": initiator_name,
