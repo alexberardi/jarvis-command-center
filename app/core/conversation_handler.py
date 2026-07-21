@@ -44,9 +44,7 @@ from app.core.utils.think_block_stripper import (
 from app.core.voice_command_helpers import (
     get_tool_name,
     build_available_command_flags,
-    apply_tool_routing,
-    prune_tools_by_router_decision,
-)
+    apply_tool_routing,)
 from app.core.warmup_service import warmup_service
 
 logger = logging.getLogger("uvicorn")
@@ -560,14 +558,12 @@ class ConversationHandler:
             )
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool routing done (router took {(time.time()-_router_t0)*1000:.0f}ms)")
 
-        # Apply high-confidence tool pruning — also rebuilds the system
-        # prompt with only the pruned tools, dramatically reducing token count.
-        with timing.measure("tool_pruning") if timing else nullcontext():
-            tools = self._apply_high_confidence_pruning(
-                tools, router_decision, server_tool_names,
-                messages=messages, conversation_id=conversation_id,
-                available_commands=available_commands,
-            )
+        # Tool pruning removed 2026-07-21: rebuilding the system prompt with a
+        # pruned tool set overwrote messages[0], so the command prompt no longer
+        # matched the warmed one and cold-prefilled the whole ~6k-token prompt
+        # (~1.3s) every turn — to save ~200 tokens. Keeping the full tool set
+        # means every voice request reuses the warmup KV prefix. The router's
+        # prediction is still handed to the model via the hint block below.
 
         # Inject the per-turn speaker block (name + memories) as a trailing
         # system message AFTER the cached/pruned prefix — never into messages[0].
@@ -2369,58 +2365,6 @@ class ConversationHandler:
 
         return router_decision
 
-    def _apply_high_confidence_pruning(
-        self,
-        tools: Optional[List[Dict[str, Any]]],
-        router_decision: Optional[Dict[str, Any]],
-        server_tool_names: Set[str],
-        messages: Optional[List[Dict[str, Any]]] = None,
-        conversation_id: Optional[str] = None,
-        available_commands: Optional[List[Dict[str, Any]]] = None,
-    ) -> Optional[List[Dict[str, Any]]]:
-        """
-        Prune tools based on high-confidence router decision.
-
-        When pruning fires, rebuilds the system prompt with only the pruned
-        tools. This trades the warmup KV cache for a much smaller prompt
-        (~500 tokens instead of ~3000), which is a net win because prefill
-        on the smaller prompt is faster than reusing a cached large prompt.
-        """
-        if not router_decision or not tools:
-            return tools
-
-        # Determine pruning confidence threshold
-        small_mode = get_settings_service().get_bool("model.small_model_mode", True)
-        try:
-            default_conf = 0.8 if small_mode else 0.85
-            prune_conf = float(os.getenv("JARVIS_TOOL_ROUTER_FILTER_MIN_CONFIDENCE", str(default_conf)))
-        except ValueError:
-            prune_conf = 0.8 if small_mode else 0.85
-
-        pruned_tools = prune_tools_by_router_decision(
-            tools=tools,
-            router_decision=router_decision,
-            server_tool_names=server_tool_names,
-            prune_confidence=prune_conf,
-        )
-
-        if len(pruned_tools) < len(tools):
-            predicted_tool = router_decision.get("tool_name")
-            logger.info(
-                "🧹 Pruned tools from %d to %d (predicted=%s)",
-                len(tools), len(pruned_tools), predicted_tool,
-            )
-
-            # Rebuild system prompt with only the pruned tools so the LLM
-            # processes far fewer tokens. This invalidates the warmup KV
-            # cache but the smaller prompt more than compensates.
-            if messages and conversation_id:
-                self._rebuild_system_prompt_for_pruned_tools(
-                    messages, conversation_id, pruned_tools, available_commands,
-                )
-
-        return pruned_tools
-
     def _sync_advanced_thinking(self, conversation_id: str) -> bool:
         """Read model.advanced_thinking setting and propagate to the provider.
 
@@ -2517,49 +2461,6 @@ class ConversationHandler:
         except Exception as e:
             logger.warning("Failed to get agent context: %s", e)
             return None
-
-    def _rebuild_system_prompt_for_pruned_tools(
-        self,
-        messages: List[Dict[str, Any]],
-        conversation_id: str,
-        pruned_tools: List[Dict[str, Any]],
-        available_commands: Optional[List[Dict[str, Any]]] = None,
-    ) -> None:
-        """Replace the system prompt in messages[0] with one built from pruned tools.
-
-        This dramatically reduces input token count (e.g. 3000 → 500 tokens)
-        at the cost of invalidating the warmup KV cache.
-        """
-        node_context = conversation_cache.get_node_context(conversation_id)
-        timezone = conversation_cache.get_timezone(conversation_id)
-
-        if not node_context:
-            logger.warning("Cannot rebuild system prompt: no cached node_context")
-            return
-
-        # Filter available_commands to only include pruned tool names
-        pruned_names = {get_tool_name(t) for t in pruned_tools if get_tool_name(t)}
-        filtered_commands = None
-        if available_commands:
-            filtered_commands = [
-                cmd for cmd in available_commands
-                if cmd.get("command_name") in pruned_names
-            ]
-
-        available_command_flags = build_available_command_flags(
-            filtered_commands or []
-        )
-
-        new_prompt = self._get_system_prompt(
-            node_context, timezone, pruned_tools, available_command_flags
-        )
-
-        old_len = len(messages[0]["content"]) if messages else 0
-        messages[0] = {"role": "system", "content": new_prompt}
-        logger.info(
-            "📝 Rebuilt system prompt: %d → %d chars (~%d → ~%d tokens)",
-            old_len, len(new_prompt), old_len // 4, len(new_prompt) // 4,
-        )
 
     def _get_system_prompt(
         self,

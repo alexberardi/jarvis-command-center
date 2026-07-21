@@ -49,13 +49,12 @@ class TestSettingsDefinitions:
         assert "llm.proxy.url" in keys
         assert "tool_classifier.enabled" in keys
         assert "tool_classifier.min_confidence" in keys
-        assert "tool_router.filter_min_confidence" in keys
         assert "model.small_model_mode" in keys
 
     def test_categories_are_valid(self):
         """Test that categories are descriptive."""
         categories = set(d.category for d in SETTINGS_DEFINITIONS)
-        expected_categories = {"llm", "tool_classifier", "tool_router", "transcription",
+        expected_categories = {"llm", "tool_classifier", "transcription",
                               "prompt", "model", "conversation", "admin", "memory",
                               "network", "oauth", "smart_home", "adapter", "voice",
                               "routines", "web_search", "updates", "attention",
