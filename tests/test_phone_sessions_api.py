@@ -92,6 +92,37 @@ class TestGetSession:
     def test_unknown_session_404(self, client):
         assert client.get(f"/internal/phone/sessions/{uuid.uuid4()}").status_code == 404
 
+    def test_check_time_uses_the_sessions_envelope(self, client, test_db):
+        """The validator checks against the same bounds the snapshot exposes —
+        constraints, else derived from the confirmed brief."""
+        s = _mk_session(
+            test_db,
+            details="make an appointment\nAcceptable times: Thu 9am-8pm; Wed 5-8pm",
+        )
+        base = f"/internal/phone/sessions/{s.id}/check-time"
+
+        # Noon is inside Thu 9am-8pm — the case the model false-declined live.
+        avail = client.post(base, json={"utterance": "Can you do Thursday at noon?"}).json()
+        assert avail["time_detected"] is True
+        assert avail["available"] is True
+        assert "Thursday" in avail["proposed_label"]
+
+        # Noon is before Wed's 5pm open — the case the model false-accepted live.
+        no = client.post(base, json={"utterance": "How about Wednesday at 12?"}).json()
+        assert no["available"] is False
+
+        # A turn with no time leaves the verdict to the model.
+        none = client.post(base, json={"utterance": "And the patient's name?"}).json()
+        assert none["time_detected"] is False
+        assert none["available"] is None
+
+    def test_check_time_unknown_session_404(self, client):
+        r = client.post(
+            f"/internal/phone/sessions/{uuid.uuid4()}/check-time",
+            json={"utterance": "Thursday at noon"},
+        )
+        assert r.status_code == 404
+
     def test_restricted_details_carry_key_label_and_value(self, client, test_db):
         """The gateway's guard needs all three: value to detect the leak,
         label to ask whether it was requested, key to match the verdict back.
