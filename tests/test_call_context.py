@@ -107,29 +107,51 @@ class TestCategorySelection:
         assert [f.key for f in select_fields(fields, ["nonsense", None])] == ["full_name"]
 
 
+PHARMACY = {"key": "pharmacy", "value": "Rite Aid on Main"}  # medical, STATE tier
+
+
 class TestBriefBlock:
-    def test_groups_are_labelled_the_way_the_prompt_rules_expect(self):
+    def test_drops_full_name_and_frames_as_assistant(self):
+        """full_name repeated as a caller detail made the model introduce
+        itself AS the caller ("I'm Alex Berardi", 5/5 on the box). It is
+        already in the disclosure, so it is dropped and the block states the
+        model is the caller's assistant, not the caller."""
         fields = parse_call_context(_blob(NAME, ADDRESS, MEMBER_ID))
         block = build_context_block(select_fields(fields, [MEDICAL]))
 
-        assert "you may state these" in block
-        # The private group leads with "give when asked", not a refusal — a
-        # refusal-forward header made the model refuse legitimate asks (live
-        # 2026-07-20). It must still forbid volunteering.
-        assert "give it to them directly" in block
-        assert "Do not bring them up yourself" in block
-        # Name is statable; address and member id are in the give-when-asked group.
-        state_part, private_part = block.split("You have these details")
-        assert "Alex B" in state_part
-        assert "Evergreen" in private_part and "XZ-9912345" in private_part
+        assert "Alex B" not in block  # full_name dropped
+        assert "you are" in block and "assistant" in block
+        assert "never claim to be them" in block
+
+    def test_give_when_asked_group_still_renders(self):
+        """The private group leads with "give when asked", not a refusal — a
+        refusal-forward header made the model refuse legitimate asks (live
+        2026-07-20). It must still forbid volunteering."""
+        fields = parse_call_context(_blob(ADDRESS, MEMBER_ID))
+        block = build_context_block(select_fields(fields, [MEDICAL]))
+
+        assert "give it directly" in block
+        assert "Never volunteer them" in block
+        assert "Evergreen" in block and "XZ-9912345" in block
+
+    def test_statable_non_name_details_still_render(self):
+        fields = parse_call_context(_blob(PHARMACY))
+        block = build_context_block(select_fields(fields, [MEDICAL]))
+        assert "You may state these" in block
+        assert "Rite Aid on Main" in block
 
     def test_no_fields_means_no_scaffolding(self):
         assert build_context_block([]) is None
 
+    def test_a_block_with_only_full_name_disappears(self):
+        """Dropping full_name can empty the block — then there is nothing to
+        render, not empty scaffolding."""
+        assert build_context_block(parse_call_context(_blob(NAME))) is None
+
     def test_only_private_fields_still_renders(self):
         fields = parse_call_context(_blob(MEMBER_ID))
         block = build_context_block(select_fields(fields, [MEDICAL]))
-        assert "Do not bring them up yourself" in block and "XZ-9912345" in block
+        assert "Never volunteer them" in block and "XZ-9912345" in block
 
 
 class TestRestrictedFields:
@@ -175,11 +197,12 @@ class TestBriefAssembly:
     def test_general_fields_are_appended_to_the_brief(self, monkeypatch):
         from app.services.phone_call_service import apply_call_context
 
-        self._patch(monkeypatch, _blob(NAME, MEMBER_ID))
+        callback = {"key": "callback_number", "value": "+15555550123"}
+        self._patch(monkeypatch, _blob(callback, MEMBER_ID))
         out = apply_call_context("order a pizza", user_id=7)
 
         assert out.startswith("order a pizza")
-        assert "Alex B" in out
+        assert "+15555550123" in out  # general field reaches the brief
         assert "XZ-9912345" not in out  # medical was not requested
 
     def test_requested_category_reaches_the_brief(self, monkeypatch):
