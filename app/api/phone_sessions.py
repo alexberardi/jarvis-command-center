@@ -143,6 +143,41 @@ async def get_phone_session(session_id: str, db: Session = Depends(get_db)) -> d
     }
 
 
+class CheckTimeBody(BaseModel):
+    utterance: str
+
+
+@router.post(
+    "/internal/phone/sessions/{session_id}/check-time",
+    dependencies=[Depends(require_app_auth)],
+)
+def check_session_time(
+    session_id: str,
+    body: CheckTimeBody,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Is the time the callee proposed available under this session's bounds?
+
+    Scheduling is interval arithmetic the live model can't do reliably, so the
+    gateway asks per turn and states the verdict instead of computing it. The
+    envelope is the same one the snapshot exposes (constraints, else derived
+    from the confirmed brief), so the answer matches the bounds the model was
+    given. Never raises for a bad utterance — a no-time turn just comes back
+    ``time_detected=False`` and the gateway leaves the turn to the model.
+    """
+    s = _get_session_or_404(db, session_id)
+    from app.services.time_window import check_time
+
+    envelope = s.constraints or extract_constraint_envelope(s.details)
+    result = check_time(envelope, body.utterance)
+    return {
+        "time_detected": result.time_detected,
+        "available": result.available,
+        "proposed_label": result.proposed_label,
+        "acceptable_summary": result.acceptable_summary,
+    }
+
+
 @router.post(
     "/internal/phone/sessions/{session_id}/events",
     dependencies=[Depends(require_app_auth)],
