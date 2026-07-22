@@ -47,15 +47,6 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
     ),
 
     # Tool router settings
-    SettingDefinition(
-        key="tool_router.filter_min_confidence",
-        category="tool_router",
-        value_type="float",
-        default=0.85,
-        description="Minimum confidence for tool router filtering",
-        env_fallback="JARVIS_TOOL_ROUTER_FILTER_MIN_CONFIDENCE",
-    ),
-
     # Transcription settings
     SettingDefinition(
         key="transcription.cleanup_enabled",

@@ -303,32 +303,50 @@ def catalog() -> dict[str, Any]:
 def build_context_block(fields: list[ContextField]) -> str | None:
     """Render selected fields as the brief's caller-details section.
 
-    Two labelled groups, because the prompt's rules refer to them: details it
-    may state, and details it may give only if asked. Returns None when there
-    is nothing to say, so the brief gains no empty scaffolding.
+    Framed so the model can never read these as its OWN identity. The old
+    header ("About the caller — you may state these: Full Name: Alex Berardi")
+    made the agent introduce itself AS the caller ("Hi, I'm Alex Berardi")
+    on 5/5 openings against the box model — it collapsed "calling on behalf of
+    Alex" into "I'm Alex". Two fixes, together taking that to 0/6:
+
+    - ``full_name`` is dropped entirely: it is already conveyed by the
+      disclosure and the "on behalf of {name}" system line, and repeating it
+      as a caller detail is exactly what triggered the identity collapse.
+    - the block opens by stating whose details these are and that the model is
+      the caller's ASSISTANT, not the caller.
+
+    Returns None when there is nothing to say, so the brief gains no empty
+    scaffolding.
     """
+    # full_name is redundant (see above) and the worst identity offender.
+    fields = [f for f in fields if f.key != "full_name"]
     statable = [f for f in fields if f.tier == STATE]
     private = [f for f in fields if f.tier == IF_ASKED]
     if not statable and not private:
         return None
 
-    parts: list[str] = []
+    # "on behalf of" + "never ask to speak to them": a generic "the person you
+    # are calling for" was ambiguous — the model opened with "Can I speak to
+    # Alex Berardi?", reading it as calling to REACH the person. This wording
+    # holds identity, the who-am-I-calling confusion, and give-when-asked all
+    # at once (0/8, 0/8, 5/5 against the box model).
+    parts: list[str] = [
+        "The details below belong to the person you are calling ON BEHALF OF. "
+        "You are their assistant: never claim to be them, never introduce "
+        "yourself with their name, and never ask to speak to them."
+    ]
     if statable:
         lines = "\n".join(f"- {f.label}: {f.value}" for f in statable)
-        parts.append(f"About the caller — you may state these:\n{lines}")
+        parts.append(f"You may state these if it helps:\n{lines}")
     if private:
         lines = "\n".join(f"- {f.label}: {f.value}" for f in private)
-        # Framing matters more than the rule here. A refusal-forward header
-        # ("give ONLY if they ask — never volunteer these") made the live model
-        # refuse the value even when the callee asked for it by name (2026-07-20:
-        # "what's the policy number?" → "I don't have that information", with
-        # the number sitting right here). Leading with "you have these, give
-        # when asked" flips it (verified 3/3 against the box model) — the guard
-        # is what enforces the "only when asked" half, so the brief can safely
-        # emphasise that these ARE to be given.
+        # "Give when asked" framing (not "give ONLY if they ask — never
+        # volunteer"): the refusal-forward version made the model refuse a
+        # value the callee asked for by name. The guard enforces the "only
+        # when asked" half, so the brief safely emphasises giving.
         parts.append(
-            "You have these details on hand. Do not bring them up yourself, "
-            "but if the other person asks for one, give it to them directly "
-            f"and accurately — refusing a detail listed here fails the call:\n{lines}"
+            "If the business asks for one of these details, give it directly "
+            "and accurately — refusing one listed here fails the call. Never "
+            f"volunteer them otherwise:\n{lines}"
         )
     return "\n\n".join(parts)
