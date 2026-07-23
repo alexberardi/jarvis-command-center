@@ -2480,7 +2480,10 @@ class ConversationHandler:
         The false-wake gating instruction is appended here so it lives in
         one place and applies uniformly across providers — placing it at
         the END of the system prompt also gives it strong recency right
-        before the user message lands.
+        before the user message lands. Providers whose models have the
+        policy trained into their weights (``bakes_not_for_me`` True)
+        opt out: the instruction block is omitted, everything else is
+        unchanged.
 
         Returns:
             System prompt string.
@@ -2489,6 +2492,10 @@ class ConversationHandler:
             base = self.prompt_provider.build_system_prompt(
                 node_context, timezone, tools, available_command_flags
             )
+            if self.prompt_provider.bakes_not_for_me:
+                # Policy lives in the model weights — appending the
+                # instruction would duplicate it in the prompt.
+                return f"{base.rstrip()}\n"
         elif hasattr(self.model, "_build_system_prompt"):
             base = self.model._build_system_prompt(  # type: ignore[attr-defined]
                 node_context, timezone, tools, available_command_flags

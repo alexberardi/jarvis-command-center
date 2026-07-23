@@ -197,6 +197,20 @@ class IJarvisPromptProvider(ABC):
         return False
 
     @property
+    def bakes_not_for_me(self) -> bool:
+        """Whether the not_for_me policy is trained into the model weights.
+
+        When True: this provider's model has the false-wake gating policy
+        (``NOT_FOR_ME_INSTRUCTION``) baked in via fine-tuning, so the
+        runtime must NOT append NOT_FOR_ME_INSTRUCTION to the system
+        prompt — appending it would duplicate the policy and waste
+        prompt tokens.
+
+        Default: False (ConversationHandler appends the instruction).
+        """
+        return False
+
+    @property
     def supports_native_tools(self) -> bool:
         """
         Whether to pass tools natively to the LLM proxy.

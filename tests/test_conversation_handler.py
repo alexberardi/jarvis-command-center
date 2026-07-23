@@ -368,10 +368,13 @@ class TestGetSystemPromptDispatch:
             NOT_FOR_ME_INSTRUCTION,
         )
 
-        # Provider path
+        # Provider path (bakes_not_for_me=False — the default for every
+        # real provider; a bare MagicMock attribute would be truthy and
+        # take the opt-out branch instead)
         mock_model_a = MagicMock()
         mock_provider = MagicMock()
         mock_provider.build_system_prompt = MagicMock(return_value="provider body")
+        mock_provider.bakes_not_for_me = False
         handler_a = ConversationHandler(
             model=mock_model_a, llm_client=MagicMock(), prompt_provider=mock_provider,
         )
@@ -403,6 +406,7 @@ class TestGetSystemPromptDispatch:
 
         mock_provider = MagicMock()
         mock_provider.build_system_prompt = MagicMock(return_value="provider body")
+        mock_provider.bakes_not_for_me = False
         handler = ConversationHandler(
             model=MagicMock(), llm_client=MagicMock(), prompt_provider=mock_provider,
         )
