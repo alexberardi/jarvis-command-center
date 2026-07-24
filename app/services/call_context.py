@@ -189,6 +189,9 @@ def select_fields(
 
     Unknown category names are ignored rather than rejected — a caller
     passing junk gets General, not an exception on the plan path.
+
+    Not used on the call path yet — see ``select_for_call``. It is the
+    per-call filter that ships once the confirm card can choose categories.
     """
     wanted = {GENERAL}
     for c in categories or []:
@@ -196,6 +199,21 @@ def select_fields(
         if c in CATEGORIES:
             wanted.add(c)
     return [f for f in fields if f.category in wanted]
+
+
+def select_for_call(fields: list[ContextField]) -> list[ContextField]:
+    """What a call loads TODAY: everything, regardless of category.
+
+    The category is captured when the user adds a detail, but it does not
+    filter a call yet — per-call category selection (the confirm-card toggle)
+    is future work. Loading everything until then is deliberate (Alex,
+    2026-07-23): it means categorizing a detail — or the grid defaulting a new
+    one to a non-General category — can never silently drop it from a call in
+    the meantime. When filtering ships, the call path swaps this for
+    ``select_fields(fields, chosen_categories)``; the category data captured
+    now is what makes that possible without a backfill.
+    """
+    return list(fields)
 
 
 def restricted_fields(fields: list[ContextField]) -> list[ContextField]:
