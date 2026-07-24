@@ -41,3 +41,8 @@ class VoiceCommandRequest(BaseModel):
     # seconds → wake fired mid-conversation, lean toward silent abort.
     # None when the node didn't report it (old client, alternate entry path).
     pre_wake_speech_seconds: Optional[float] = None
+    # Acoustic affect read from whisper (``{read, arousal, confidence}``) when
+    # voice.emotion_enabled is on, forwarded verbatim by the node. Surfaced to
+    # the LLM as a per-turn tone hint (shape, don't announce). None when the
+    # feature is off or the read was withheld.
+    affect: Optional[Dict[str, Any]] = None

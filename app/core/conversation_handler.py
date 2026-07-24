@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from app.core.conversation_cache import conversation_cache
 from app.core.direction_hint import build_direction_hint
+from app.core.affect_hint import build_affect_hint
 from app.core.errors import ConversationPreconditionError
 from app.core.not_for_me import contains_sentinel
 from app.core.prompt_providers.shared.core_rules import (
@@ -468,6 +469,7 @@ class ConversationHandler:
         conversation_id: str,
         speaker_user_id: int | None = None,
         pre_wake_speech_seconds: float | None = None,
+        affect: dict | None = None,
     ) -> Dict[str, Any]:
         """
         Process a voice command using tool-based architecture.
@@ -620,6 +622,10 @@ class ConversationHandler:
         user_content: str = voice_command
         if direction_hint:
             user_content = f"{user_content}\n\n{direction_hint}"
+        affect_hint: str | None = build_affect_hint(affect)
+        if affect_hint:
+            logger.info("🎭 Affect hint applied | hint=%s", affect_hint)
+            user_content = f"{user_content}\n\n{affect_hint}"
         if agent_context:
             user_content = f"{user_content}\n\n{agent_context}"
         if suffix:
@@ -721,6 +727,7 @@ class ConversationHandler:
         tts_client,
         speaker_user_id: int | None = None,
         pre_wake_speech_seconds: float | None = None,
+        affect: dict | None = None,
     ):
         """Attempt to stream LLM tokens directly to TTS for eligible queries.
 
@@ -838,6 +845,10 @@ class ConversationHandler:
         user_content: str = voice_command
         if direction_hint:
             user_content = f"{user_content}\n\n{direction_hint}"
+        affect_hint: str | None = build_affect_hint(affect)
+        if affect_hint:
+            logger.info("🎭 Affect hint applied (stream path) | hint=%s", affect_hint)
+            user_content = f"{user_content}\n\n{affect_hint}"
         if suffix:
             user_content = f"{user_content}\n{suffix}"
         messages.append({"role": "user", "content": user_content})
@@ -1024,6 +1035,7 @@ class ConversationHandler:
         tts_client,
         speaker_user_id: int | None = None,
         pre_wake_speech_seconds: float | None = None,
+        affect: dict | None = None,
     ):
         """Stream LLM → TTS for commands that need server-side tool execution.
 
@@ -1158,6 +1170,10 @@ class ConversationHandler:
         user_content = voice_command
         if direction_hint:
             user_content = f"{user_content}\n\n{direction_hint}"
+        affect_hint: str | None = build_affect_hint(affect)
+        if affect_hint:
+            logger.info("🎭 Affect hint applied (tool-stream path) | hint=%s", affect_hint)
+            user_content = f"{user_content}\n\n{affect_hint}"
         if suffix:
             user_content = f"{user_content}\n{suffix}"
         messages.append({"role": "user", "content": user_content})

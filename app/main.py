@@ -984,6 +984,7 @@ async def handle_voice(
                 voice_command=request.voice_command,
                 conversation_id=request.conversation_id,
                 pre_wake_speech_seconds=request.pre_wake_speech_seconds,
+                affect=request.affect,
             )
 
         # Build response based on stop_reason
@@ -1182,6 +1183,7 @@ async def handle_voice_stream(
             tts_client=tts_client,
             speaker_user_id=speaker_user_id,
             pre_wake_speech_seconds=request.pre_wake_speech_seconds,
+            affect=request.affect,
         )
         if streaming_audio is not None:
             try:
@@ -1217,6 +1219,7 @@ async def handle_voice_stream(
             tts_client=tts_client,
             speaker_user_id=speaker_user_id,
             pre_wake_speech_seconds=request.pre_wake_speech_seconds,
+            affect=request.affect,
         )
         if streaming_audio is not None:
             try:
@@ -1247,6 +1250,7 @@ async def handle_voice_stream(
                 conversation_id=request.conversation_id,
                 speaker_user_id=speaker_user_id,
                 pre_wake_speech_seconds=request.pre_wake_speech_seconds,
+                affect=request.affect,
             )
 
         stop_reason = result.get("stop_reason", "complete")
