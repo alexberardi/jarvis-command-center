@@ -289,6 +289,7 @@ class ModelService:
         conversation_id: str,
         speaker_user_id: int | None = None,
         pre_wake_speech_seconds: float | None = None,
+        affect: dict | None = None,
     ) -> Dict[str, Any]:
         """
         Process a voice command using tool-based architecture.
@@ -316,6 +317,7 @@ class ModelService:
             conversation_id=conversation_id,
             speaker_user_id=speaker_user_id,
             pre_wake_speech_seconds=pre_wake_speech_seconds,
+            affect=affect,
         )
 
     async def try_stream_voice_response(
@@ -325,6 +327,7 @@ class ModelService:
         tts_client,
         speaker_user_id: int | None = None,
         pre_wake_speech_seconds: float | None = None,
+        affect: dict | None = None,
     ):
         """Attempt router-gated streaming LLM → TTS.
 
@@ -337,6 +340,7 @@ class ModelService:
             tts_client=tts_client,
             speaker_user_id=speaker_user_id,
             pre_wake_speech_seconds=pre_wake_speech_seconds,
+            affect=affect,
         )
 
     async def try_stream_voice_response_with_tools(
@@ -346,6 +350,7 @@ class ModelService:
         tts_client,
         speaker_user_id: int | None = None,
         pre_wake_speech_seconds: float | None = None,
+        affect: dict | None = None,
     ):
         """Attempt streaming LLM → TTS for commands needing server-side tools.
 
@@ -362,6 +367,7 @@ class ModelService:
             tts_client=tts_client,
             speaker_user_id=speaker_user_id,
             pre_wake_speech_seconds=pre_wake_speech_seconds,
+            affect=affect,
         )
 
     async def try_stream_continue_with_tool_results(
