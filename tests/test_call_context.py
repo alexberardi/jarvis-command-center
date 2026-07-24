@@ -194,7 +194,12 @@ class TestBriefAssembly:
             cc, "load_call_context", lambda user_id: cc.parse_call_context(blob)
         )
 
-    def test_general_fields_are_appended_to_the_brief(self, monkeypatch):
+    def test_every_stored_detail_is_loaded_regardless_of_category(self, monkeypatch):
+        """Today the call loads everything — category is captured but does not
+        filter yet, so a Medical detail rides along on a pizza order. This is
+        the deliberate "capture now, filter later" state (2026-07-23): the
+        alternative (filter on captured category with no per-call selection)
+        would make categorizing a detail silently drop it from calls."""
         from app.services.phone_call_service import apply_call_context
 
         callback = {"key": "callback_number", "value": "+15555550123"}
@@ -202,16 +207,19 @@ class TestBriefAssembly:
         out = apply_call_context("order a pizza", user_id=7)
 
         assert out.startswith("order a pizza")
-        assert "+15555550123" in out  # general field reaches the brief
-        assert "XZ-9912345" not in out  # medical was not requested
+        assert "+15555550123" in out  # general
+        assert "XZ-9912345" in out    # medical, loaded anyway (no filter yet)
 
-    def test_requested_category_reaches_the_brief(self, monkeypatch):
+    def test_categories_arg_is_ignored_for_now(self, monkeypatch):
+        """The param is reserved for the future per-call filter; passing it
+        changes nothing today — everything loads either way."""
         from app.services.phone_call_service import apply_call_context
 
-        self._patch(monkeypatch, _blob(NAME, MEMBER_ID))
-        out = apply_call_context("book a check-up", user_id=7, categories=[MEDICAL])
-
-        assert "XZ-9912345" in out
+        self._patch(monkeypatch, _blob(MEMBER_ID))
+        with_arg = apply_call_context("x", user_id=7, categories=[MEDICAL])
+        without = apply_call_context("x", user_id=7)
+        assert with_arg == without
+        assert "XZ-9912345" in without
 
     def test_no_context_leaves_the_brief_untouched(self, monkeypatch):
         from app.services.phone_call_service import apply_call_context

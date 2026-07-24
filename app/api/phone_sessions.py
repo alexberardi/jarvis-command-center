@@ -77,10 +77,13 @@ def _restricted_details(s: PhoneCallSession) -> list[dict[str, str]]:
         from app.services.call_context import (
             load_call_context,
             restricted_fields,
-            select_fields,
+            select_for_call,
         )
 
-        selected = select_fields(load_call_context(s.user_id), None)
+        # Same selection the brief uses (everything, for now) so the guard's
+        # denylist covers exactly what the brief loaded — a field in the brief
+        # that the guard didn't know about would be an unenforced leak.
+        selected = select_for_call(load_call_context(s.user_id))
         return [
             {"key": f.key, "label": f.label, "value": f.value}
             for f in restricted_fields(selected)

@@ -643,19 +643,23 @@ def apply_call_context(
 ) -> str:
     """Append the caller's stored details to the brief.
 
-    Category decides what is loaded (General always); tier decides whether
-    the agent may volunteer it. Both live in call_context.py. Degrades to the
-    unchanged brief on any failure — missing context is a worse call, not a
-    failed one.
+    Today every stored detail is loaded regardless of category (see
+    ``select_for_call``); the category is captured for a future per-call
+    filter but does not yet decide what loads. Tier still decides whether the
+    agent may volunteer it. Degrades to the unchanged brief on any failure —
+    missing context is a worse call, not a failed one.
+
+    ``categories`` is accepted for when per-call filtering ships; it is
+    ignored for now so that categorizing a detail can't silently drop it.
     """
     try:
         from app.services.call_context import (
             build_context_block,
             load_call_context,
-            select_fields,
+            select_for_call,
         )
 
-        selected = select_fields(load_call_context(user_id), categories)
+        selected = select_for_call(load_call_context(user_id))
         block = build_context_block(selected)
     except Exception as e:  # noqa: BLE001 — never block a call on this
         logger.warning("call context assembly failed: %s", e)
