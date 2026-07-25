@@ -19,6 +19,12 @@ from app.deps import (
     verify_household_role,
     verify_user_jwt,
 )
+from app.services.persona_presets import (
+    DEFAULT_PERSONA,
+    DEFAULT_PERSONA_PRESET_ID,
+    PERSONA_MAX_CHARS,
+    PERSONA_PRESETS,
+)
 from app.services.settings_service import get_settings_service
 
 logger = logging.getLogger("uvicorn")
@@ -45,6 +51,11 @@ HOUSEHOLD_CONTROLLABLE_SETTINGS: dict[str, str] = {
     # A household preference, not a compliance knob — and getting it wrong
     # calls the wrong business, so the household must own it.
     "household.location": "string",
+    # Household speaking-voice persona (the "voice" layer). Free text, shapes
+    # tone ONLY — the CC prompt fences it in <personality> so it can't touch
+    # tools/safety. Length-capped on write (PERSONA_MAX_CHARS) to bound the
+    # cached prefix. Starter presets served via GET .../persona/presets.
+    "persona.household_prompt": "string",
 }
 
 # Role required to CHANGE a household setting. Reads are open to any member;
@@ -138,6 +149,19 @@ async def put_household_setting(
             status_code=400,
             detail=f"Invalid value for {key}: {e}",
         )
+
+    # The persona rides the cached prompt on every LLM call, so a paste-bomb
+    # would balloon each turn. Cap its length (an empty string is allowed — it
+    # clears the voice layer back to the flat identity line).
+    if key == "persona.household_prompt" and len(str(coerced)) > PERSONA_MAX_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Persona is too long ({len(str(coerced))} chars); "
+                f"max is {PERSONA_MAX_CHARS}."
+            ),
+        )
+
     settings = get_settings_service()
     ok = settings.set(key, coerced, household_id=str(household_id))
     if not ok:
@@ -147,3 +171,24 @@ async def put_household_setting(
         "Household %s set %s=%r (by user %s)", household_id, key, coerced, user.user_id
     )
     return {"success": True, "key": key, "value": coerced}
+
+
+@router.get("/household/{household_id}/persona/presets")
+async def get_persona_presets(
+    household_id: str = Path(..., description="Household UUID"),
+    user: AuthenticatedUser = Depends(verify_user_jwt),
+) -> dict[str, Any]:
+    """Return the starter persona presets + the default, for the mobile chips.
+
+    Any household member may read. The UI renders each preset as a tappable chip
+    that loads its ``text`` into the editable persona box; ``default_preset_id``
+    marks which chip is "the default" and doubles as the reset affordance.
+    ``max_chars`` bounds the editor input.
+    """
+    verify_household_role(user.user_id, household_id, required_role=_READ_ROLE)
+    return {
+        "presets": PERSONA_PRESETS,
+        "default_preset_id": DEFAULT_PERSONA_PRESET_ID,
+        "default_text": DEFAULT_PERSONA,
+        "max_chars": PERSONA_MAX_CHARS,
+    }

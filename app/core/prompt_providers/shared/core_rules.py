@@ -240,6 +240,54 @@ def build_speaker_block(speaker_name: str, user_memories: str = "") -> str:
     return block
 
 
+def build_personality_block(persona_text: str | None) -> str:
+    """Return the household ``<personality>`` block for the cached identity header.
+
+    The household-definable SPEAKING VOICE — shapes tone/word choice only. Fenced
+    in a ``<personality>`` tag with a one-line frame that walls it off from tools
+    and safety, so free-text a household types can never bleed into tool-calling.
+    Placed in :meth:`IJarvisPromptProvider.build_context_header` right after the
+    identity line, so it rides the per-household cached prefix (byte-stable across
+    speakers — rule #1 safe, like room/style). Returns ``""`` for empty input
+    (byte-identical to the pre-persona header — the safe fallback).
+    """
+    from app.services.persona_presets import PERSONA_FRAME
+
+    persona_text = (persona_text or "").strip()
+    if not persona_text:
+        return ""
+    return (
+        "<personality>\n"
+        f"{PERSONA_FRAME}\n"
+        f"{persona_text}\n"
+        "</personality>"
+    )
+
+
+def build_personality_reminder(persona_text: str | None) -> str:
+    """Return the END-OF-PROMPT voice reminder that restates the household voice.
+
+    The ``<personality>`` block sits at the TOP of the prompt, but on a small
+    model 90%+ of the prompt — terse tool-calling rules + the not-for-me wall —
+    follows it, and by generation time the voice is drowned out (recency wins).
+    This restates the voice as the LAST instruction before the user turn, scoped
+    hard to *wording/tone of a spoken reply* so it can't touch tools, the rules,
+    or the silence decision. Per-household constant → stays in the cached prefix.
+    Returns ``""`` for empty input (prompt byte-identical when no persona set).
+    """
+    persona_text = (persona_text or "").strip()
+    if not persona_text:
+        return ""
+    return (
+        "YOUR VOICE — this is how you sound in every spoken reply "
+        "(acknowledgments, answers, even one-liners, even when told to be brief):\n"
+        f"{persona_text}\n"
+        "Talk this way every time. It shapes only your wording and tone — never "
+        "which function you call, the rules above, or the decision to stay "
+        "silent. Don't announce or describe the voice; just speak in it."
+    )
+
+
 # Marker prefix for the per-turn "recently shown" transient block. Kept in sync
 # with conversation_handler._is_transient_system_block so the block is stripped
 # and rebuilt every turn instead of accumulating across a multi-turn conversation.

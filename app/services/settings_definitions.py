@@ -6,6 +6,8 @@ Uses the shared jarvis-settings-client library.
 
 from jarvis_settings_client import SettingDefinition
 
+from app.services.persona_presets import DEFAULT_PERSONA
+
 
 # Command-center settings definitions
 SETTINGS_DEFINITIONS: list[SettingDefinition] = [
@@ -172,6 +174,24 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         value_type="int",
         default=7,
         description="Days to retain conversation transcripts before cleanup",
+    ),
+
+    # Household speaking-voice persona (the "voice" layer — VOICE/tone only,
+    # walled off from tools + safety). Per-household so it rides the cached
+    # prefix. Default = warm & folksy, so households that never touch the box
+    # still get a voice warmer than the old flat "function calling assistant".
+    SettingDefinition(
+        key="persona.household_prompt",
+        category="persona",
+        value_type="string",
+        default=DEFAULT_PERSONA,
+        description=(
+            "Household speaking-voice persona injected into the voice prompt as a "
+            "fenced <personality> block. Shapes tone and word choice ONLY — never "
+            "tool-calling or safety, which stay non-overridable. Per-household; "
+            "editable from mobile (starter presets + free text). Empty = no voice "
+            "layer (falls back to the flat identity line)."
+        ),
     ),
 
     # Agent context injection settings (background agents → prompt)

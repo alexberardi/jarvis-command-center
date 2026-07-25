@@ -21,6 +21,8 @@ from app.core.prompt_providers.shared.core_rules import (
     RULE_USE_ACTUAL_PARAM_NAMES,
     build_fallback_line,
     build_identity_header,
+    build_personality_block,
+    build_personality_reminder,
     build_rules_block,
     build_speaker_block,
 )
@@ -259,6 +261,45 @@ class TestBuildSpeakerBlock:
 
     def test_empty_inputs(self):
         assert build_speaker_block("", "") == ""
+
+
+class TestBuildPersonalityBlock:
+    """build_personality_block renders the household voice into a fenced
+    <personality> block. VOICE-only; must never be empty-fenced or leak into
+    tool-calling — the frame line + tag are the wall."""
+
+    def test_empty_returns_empty(self):
+        assert build_personality_block("") == ""
+        assert build_personality_block("   ") == ""
+        assert build_personality_block(None) == ""
+
+    def test_wraps_in_personality_tags(self):
+        out = build_personality_block("You're warm and folksy.")
+        assert out.startswith("<personality>")
+        assert out.endswith("</personality>")
+        assert "You're warm and folksy." in out
+
+    def test_includes_voice_only_frame(self):
+        from app.services.persona_presets import PERSONA_FRAME
+        out = build_personality_block("Be terse.")
+        assert PERSONA_FRAME in out
+        assert "never your tools or safety" in out
+
+
+class TestBuildPersonalityReminder:
+    """build_personality_reminder restates the voice at the END of the prompt for
+    recency — the fix for a small model losing the top-of-prompt persona."""
+
+    def test_empty_returns_empty(self):
+        assert build_personality_reminder("") == ""
+        assert build_personality_reminder(None) == ""
+
+    def test_restates_and_is_scoped_to_voice(self):
+        out = build_personality_reminder("Be warm.")
+        assert "Be warm." in out
+        assert "every spoken reply" in out
+        assert "function" in out  # walls off tool-calling
+        assert "Don't announce" in out or "don't announce" in out
 
 
 class TestBuildRulesBlock:
