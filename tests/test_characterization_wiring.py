@@ -136,19 +136,30 @@ class TestSystemPromptGateIntegration:
 
 
 class TestRoutesMounted:
-    """The reconstructed router + callback endpoint are actually on the app."""
+    """The reconstructed router + callback endpoint are actually on the app.
 
-    def test_characterization_routes_present(self):
+    Asserted via real routing (TestClient), NOT by walking ``app.routes`` — how
+    included routers appear there (flat ``APIRoute`` with ``.path`` vs. a wrapped
+    ``_IncludedRouter`` mount with none) varies by FastAPI/Starlette version. A
+    mounted route returns *anything except 404*; an unmounted path returns 404.
+    Auth/validation short-circuits (401/403/422/503) still prove the route exists.
+    """
+
+    @pytest.fixture()
+    def client(self):
         from app.main import app
+        return TestClient(app)
 
-        # Not every entry in app.routes is a plain Route with a `.path` — mounted
-        # sub-apps / included routers surface as objects without one (and which
-        # object type that is varies by Starlette version). Guard with getattr so
-        # the assertion tests route presence, not the router internals.
-        paths = {getattr(r, "path", None) for r in app.routes}
-        assert "/api/v0/characterizations" in paths
-        assert "/api/v0/characterizations/synthesize" in paths
-        assert "/api/v0/characterization-synthesis/callback" in paths
+    def test_get_characterization_route_mounted(self, client):
+        assert client.get("/api/v0/characterizations").status_code != 404
+
+    def test_synthesize_route_mounted(self, client):
+        assert client.post("/api/v0/characterizations/synthesize").status_code != 404
+
+    def test_synthesis_callback_route_mounted(self, client):
+        assert client.post(
+            "/api/v0/characterization-synthesis/callback", json={}
+        ).status_code != 404
 
 
 class TestSynthesisCallbackEndpoint:
