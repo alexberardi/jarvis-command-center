@@ -34,7 +34,7 @@ class IJarvisPromptProvider(ABC):
     # and injected into the prompt. Providers call these helpers instead
     # of manually pulling fields out of node_context.
 
-    def build_context_header(self, node_context: Dict[str, Any]) -> str:
+    def build_context_header(self, node_context: Dict[str, Any] | None) -> str:
         """Build the SPEAKER-AGNOSTIC identity + room/style header.
 
         This is the LEADING (cached) segment of the system prompt — it must be
@@ -43,17 +43,36 @@ class IJarvisPromptProvider(ABC):
         included here; they are injected per-turn via :meth:`build_speaker_context`
         as a trailing system message after the cached prefix.
 
+        When the household set a speaking-voice persona, a ``<personality>`` block
+        is appended after the identity/context lines. The persona is node-level
+        (one voice per household), so it rides the cached prefix and stays
+        byte-identical across speakers. It's loaded into ``node_context`` once at
+        warmup (see ``ConversationHandler._get_household_persona``); absent → the
+        output is byte-identical to the pre-persona header.
+
         Returns a string like::
 
             You are Jarvis, a function calling voice assistant.
             Context: room=kitchen, style=brief
+
+            <personality>
+            The household chose this as your speaking style — ...
+            </personality>
         """
-        from app.core.prompt_providers.shared.core_rules import build_identity_header
+        from app.core.prompt_providers.shared.core_rules import (
+            build_identity_header,
+            build_personality_block,
+        )
 
         ctx = node_context or {}
         room: str = ctx.get("room", "unknown")
         voice_mode: str = ctx.get("voice_mode", "brief")
-        return build_identity_header(room, voice_mode)
+        header = build_identity_header(room, voice_mode)
+
+        personality = build_personality_block(ctx.get("household_persona", ""))
+        if personality:
+            header = f"{header}\n\n{personality}"
+        return header
 
     def build_speaker_context(self, node_context: Dict[str, Any]) -> str:
         """Build the per-turn SPEAKER-SPECIFIC block (name + memories) from

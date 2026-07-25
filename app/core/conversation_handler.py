@@ -239,6 +239,22 @@ class ConversationHandler:
             "OFFERED" if _web_search_enabled else "WITHHELD",
         )
 
+        # Household speaking-voice persona (VOICE/tone only, walled off from tools
+        # + safety). Resolved once here so it rides the cached prefix — byte-stable
+        # across speakers, like room/style. Injected in TWO places: the top
+        # <personality> block (build_context_header) and the end-of-prompt reminder
+        # (_get_system_prompt) for recency. Setting it before prompt-build + cache
+        # keeps every turn's rebuild identical.
+        if node_context is not None:
+            _persona = self._get_household_persona(node_context)
+            node_context["household_persona"] = _persona
+            logger.info(
+                "[persona] household=%s voice=%s (%d chars)",
+                node_context.get("household_id"),
+                "SET" if _persona else "none",
+                len(_persona),
+            )
+
         # Get server tools from registry
         # Text-based providers should only see client/command tools in the prompt.
         # Server tools (get_command_utterance_examples, request_validation) confuse
@@ -2511,7 +2527,19 @@ class ConversationHandler:
             )
         else:
             base = "You are a helpful voice assistant."
-        return f"{base.rstrip()}\n\n{NOT_FOR_ME_INSTRUCTION}\n"
+        prompt = f"{base.rstrip()}\n\n{NOT_FOR_ME_INSTRUCTION}\n"
+
+        # Reinforce the household VOICE at the very end for recency. The top-of-
+        # prompt <personality> block is buried under 90%+ terse tool-calling +
+        # not-for-me text, so a small model loses the voice by generation time.
+        # This restates it as the last instruction before the user turn (stays in
+        # the cached prefix — per-household constant; byte-identical when unset).
+        if node_context is not None:
+            from app.core.prompt_providers.shared.core_rules import build_personality_reminder
+            _reminder = build_personality_reminder(node_context.get("household_persona", ""))
+            if _reminder:
+                prompt = f"{prompt}\n{_reminder}\n"
+        return prompt
 
     @staticmethod
     def _get_memory_settings(node_context: Dict[str, Any] | None) -> tuple[bool, bool]:
@@ -2582,6 +2610,42 @@ class ConversationHandler:
                 f"⚠️ Failed to check web_search setting, defaulting to DISABLED: {e}"
             )
             return False
+
+    @staticmethod
+    def _get_household_persona(node_context: Dict[str, Any] | None) -> str:
+        """Resolve the household speaking-voice persona for the cached prompt.
+
+        Returns the household's persona text, or the warm default when no override
+        row exists (the SettingDefinition default flows through). An empty stored
+        value is HONORED — a household that cleared the box gets no
+        ``<personality>`` block, dropping back to the flat identity line.
+
+        Unlike ``_get_web_search_enabled`` this FAILS SAFE, not closed: the
+        persona is voice/tone only, with no egress or safety consequence, so on a
+        settings error we fall back to the warm ``DEFAULT_PERSONA`` rather than
+        silently stripping Jarvis down to the flat "function calling assistant".
+        """
+        from app.services.persona_presets import DEFAULT_PERSONA
+
+        try:
+            from app.services.settings_service import get_settings_service
+
+            settings = get_settings_service()
+            household_id = node_context.get("household_id") if node_context else None
+
+            kwargs: Dict[str, Any] = {}
+            if household_id:
+                kwargs["household_id"] = str(household_id)
+
+            value = settings.get("persona.household_prompt", **kwargs)
+            if value is None:
+                return ""
+            return str(value).strip()
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Failed to load persona.household_prompt, using default voice: {e}"
+            )
+            return DEFAULT_PERSONA
 
     async def _build_turn_speaker_message(
         self,

@@ -192,3 +192,64 @@ class TestStringSettings:
         d = next(x for x in SETTINGS_DEFINITIONS if x.key == "household.location")
         assert d.value_type == "string"
         assert d.default == ""
+
+
+class TestPersonaSetting:
+    """The household speaking-voice persona: allowlisted free text, length-capped
+    on write, with starter presets served for the mobile chips."""
+
+    def test_persona_is_allowlisted_as_string(self):
+        from app.api.mobile_household_settings import HOUSEHOLD_CONTROLLABLE_SETTINGS
+        assert HOUSEHOLD_CONTROLLABLE_SETTINGS["persona.household_prompt"] == "string"
+
+    def test_put_writes_persona_verbatim(self, client):
+        stub = _settings_stub("")
+        with patch(ROLE), patch(SETTINGS, stub):
+            r = client.put(f"{BASE}/persona.household_prompt", json={"value": "You're dry and witty."})
+        assert r.status_code == 200
+        assert r.json()["value"] == "You're dry and witty."
+        stub.return_value.set.assert_called_once_with(
+            "persona.household_prompt", "You're dry and witty.", household_id=HH
+        )
+
+    def test_put_allows_empty_persona(self, client):
+        stub = _settings_stub("x")
+        with patch(ROLE), patch(SETTINGS, stub):
+            r = client.put(f"{BASE}/persona.household_prompt", json={"value": ""})
+        assert r.status_code == 200
+
+    def test_put_rejects_overlong_persona_with_400(self, client):
+        from app.services.persona_presets import PERSONA_MAX_CHARS
+        stub = _settings_stub("")
+        with patch(ROLE), patch(SETTINGS, stub):
+            r = client.put(f"{BASE}/persona.household_prompt", json={"value": "x" * (PERSONA_MAX_CHARS + 1)})
+        assert r.status_code == 400
+        stub.return_value.set.assert_not_called()
+
+    def test_persona_setting_default_is_folksy(self):
+        from app.services.persona_presets import DEFAULT_PERSONA
+        from app.services.settings_definitions import SETTINGS_DEFINITIONS
+        d = next(x for x in SETTINGS_DEFINITIONS if x.key == "persona.household_prompt")
+        assert d.value_type == "string"
+        assert d.default == DEFAULT_PERSONA
+
+
+class TestPersonaPresetsEndpoint:
+    def test_returns_presets_and_default(self, client):
+        from app.services.persona_presets import DEFAULT_PERSONA_PRESET_ID, PERSONA_MAX_CHARS
+        with patch(ROLE):
+            r = client.get(f"/api/v0/mobile/household/{HH}/persona/presets")
+        assert r.status_code == 200
+        body = r.json()
+        ids = {p["id"] for p in body["presets"]}
+        assert {"warm_folksy", "terse", "dry_witty", "classic_jarvis"} <= ids
+        assert body["default_preset_id"] == DEFAULT_PERSONA_PRESET_ID
+        assert body["max_chars"] == PERSONA_MAX_CHARS
+        assert body["default_text"]
+
+    def test_requires_membership(self, client):
+        def deny(*a, **k):
+            raise HTTPException(status_code=403, detail="Not a member")
+        with patch(ROLE, side_effect=deny):
+            r = client.get(f"/api/v0/mobile/household/{HH}/persona/presets")
+        assert r.status_code == 403
