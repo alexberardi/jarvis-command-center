@@ -141,7 +141,11 @@ class TestRoutesMounted:
     def test_characterization_routes_present(self):
         from app.main import app
 
-        paths = {r.path for r in app.routes}
+        # Not every entry in app.routes is a plain Route with a `.path` — mounted
+        # sub-apps / included routers surface as objects without one (and which
+        # object type that is varies by Starlette version). Guard with getattr so
+        # the assertion tests route presence, not the router internals.
+        paths = {getattr(r, "path", None) for r in app.routes}
         assert "/api/v0/characterizations" in paths
         assert "/api/v0/characterizations/synthesize" in paths
         assert "/api/v0/characterization-synthesis/callback" in paths
