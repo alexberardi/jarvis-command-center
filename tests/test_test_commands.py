@@ -227,8 +227,9 @@ class TestErrorHandling:
 class TestWarmupBehavior:
     """Tests for warmup behavior."""
 
-    def test_default_skips_warmup(self, mock_model_service, sample_request):
-        """By default, skip_warmup_inference=True."""
+    def test_always_warms_by_default(self, mock_model_service, sample_request):
+        """Warmup is never skipped: skip_warmup_inference is no longer
+        forwarded to the model service, so the warmup inference always runs."""
         mock_model_service.process_voice_command_with_tools.return_value = {
             "stop_reason": "complete",
             "assistant_message": "ok",
@@ -238,16 +239,18 @@ class TestWarmupBehavior:
 
         _run(_run_test_command(sample_request, mock_model_service))
 
+        mock_model_service.warmup_conversation_with_tools.assert_called_once()
         warmup_call = mock_model_service.warmup_conversation_with_tools.call_args
-        assert warmup_call.kwargs["skip_warmup_inference"] is True
+        assert "skip_warmup_inference" not in warmup_call.kwargs
 
-    def test_respects_skip_warmup_false(self, mock_model_service):
-        """When skip_warmup_inference=False, warmup runs inference."""
+    def test_deprecated_skip_flag_is_ignored(self, mock_model_service):
+        """Even when a caller sends the deprecated skip_warmup_inference flag,
+        it is ignored — the warmup still runs and the flag is not forwarded."""
         request = CommandTestRequest(
             voice_command="test",
             available_commands=[],
             client_tools=[],
-            skip_warmup_inference=False,
+            skip_warmup_inference=True,  # deprecated / ignored
         )
         mock_model_service.process_voice_command_with_tools.return_value = {
             "stop_reason": "complete",
@@ -258,8 +261,9 @@ class TestWarmupBehavior:
 
         _run(_run_test_command(request, mock_model_service))
 
+        mock_model_service.warmup_conversation_with_tools.assert_called_once()
         warmup_call = mock_model_service.warmup_conversation_with_tools.call_args
-        assert warmup_call.kwargs["skip_warmup_inference"] is False
+        assert "skip_warmup_inference" not in warmup_call.kwargs
 
     def test_passes_commands_and_tools(self, mock_model_service, sample_request):
         """Warmup receives available_commands and client_tools."""

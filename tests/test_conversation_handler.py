@@ -105,6 +105,98 @@ class TestWarmupConversation:
                 assert "get_weather" in tool_names
 
 
+class TestWarmupAlwaysRuns:
+    """The warmup inference is ALWAYS performed — it is never skippable.
+
+    Regression lock for the live incident where a node sending
+    ``skip_warmup_inference=True`` disabled the pre-warm, making every voice
+    turn pay a ~1.4s cold prefill. The skip flag has been removed from the
+    warmup path entirely; these tests assert the warmup LLM call fires
+    regardless and that no skip parameter is accepted anymore.
+    """
+
+    @pytest.mark.asyncio
+    async def test_text_path_always_warms(self):
+        """Text-based path (no native tools) issues the max_tokens=1 warmup
+        call to populate the prompt-prefix KV cache."""
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock()
+        mock_model._build_system_prompt = MagicMock(return_value="System prompt")
+        mock_client = AsyncMock()
+        mock_client.allows_warmup_caching.return_value = True
+        mock_client.get_date_keys.return_value = []
+
+        handler = ConversationHandler(model=mock_model, llm_client=mock_client)
+
+        with patch("app.core.conversation_handler.conversation_cache"):
+            with patch("app.core.conversation_handler.tool_registry") as mock_registry:
+                mock_registry.get_tools_for_model.return_value = []
+
+                await handler.warmup_conversation_with_tools(
+                    conversation_id="test-conv",
+                    node_context={"room": "kitchen"},
+                    timezone="America/New_York",
+                    client_tools=[{"function": {"name": "get_weather"}}],
+                    available_commands=None,
+                )
+
+        mock_client.chat_completion.assert_awaited_once()
+        assert mock_client.chat_completion.call_args.kwargs.get("max_tokens") == 1
+
+    @pytest.mark.asyncio
+    async def test_native_path_always_warms(self):
+        """Native-tools path issues the warmup call with tool definitions."""
+        from app.core.conversation_handler import ConversationHandler
+
+        mock_model = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.get_date_keys.return_value = []
+
+        provider = MagicMock()
+        provider.supports_native_tools = True
+        provider.force_tool_calls = False
+        provider.build_system_prompt = MagicMock(return_value="System prompt")
+        provider.build_tools = MagicMock(return_value=[{"type": "function"}])
+
+        handler = ConversationHandler(
+            model=mock_model, llm_client=mock_client, prompt_provider=provider
+        )
+
+        with patch("app.core.conversation_handler.conversation_cache"):
+            with patch("app.core.conversation_handler.tool_registry") as mock_registry:
+                mock_registry.get_tools_for_model.return_value = []
+
+                await handler.warmup_conversation_with_tools(
+                    conversation_id="test-conv",
+                    node_context={"room": "kitchen"},
+                    timezone="America/New_York",
+                    client_tools=[{"function": {"name": "get_weather"}}],
+                    available_commands=None,
+                )
+
+        mock_client.chat_completion.assert_awaited_once()
+        assert "tools" in mock_client.chat_completion.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_skip_flag_no_longer_accepted(self):
+        """The skip_warmup_inference parameter is gone — passing it must raise
+        TypeError so the skip path can never be reintroduced by a caller."""
+        from app.core.conversation_handler import ConversationHandler
+
+        handler = ConversationHandler(model=MagicMock(), llm_client=AsyncMock())
+
+        with pytest.raises(TypeError):
+            await handler.warmup_conversation_with_tools(
+                conversation_id="test-conv",
+                node_context={"room": "kitchen"},
+                timezone="America/New_York",
+                client_tools=None,
+                available_commands=None,
+                skip_warmup_inference=True,
+            )
+
+
 class TestSttNoisePreFilter:
     """The pre-LLM gate added 2026-06-02: bracketed / empty transcripts
     must return ``not_for_me`` without invoking the LLM at all. Locks in
@@ -919,3 +1011,30 @@ class TestTerminalFillerGuard:
     def test_handles_missing_assistant_message(self):
         out = self._guard({"stop_reason": "complete"})
         assert out.get("assistant_message") in (None,)  # untouched (no filler match)
+
+
+class TestConversationStartRequestSkipFlagDeprecated:
+    """The deprecated skip_warmup_inference field is kept on the request model
+    only so older nodes that still send it don't 422 during rollout. It is
+    ignored — the warmup always runs."""
+
+    def test_accepts_skip_true_without_error(self):
+        """An old-node payload carrying skip_warmup_inference=True still parses."""
+        from app.request_models.conversation_start_request import (
+            ConversationStartRequest,
+        )
+
+        req = ConversationStartRequest(
+            conversation_id="conv-1", skip_warmup_inference=True
+        )
+        # Field is retained for backward compat but has no effect on warmup.
+        assert req.skip_warmup_inference is True
+
+    def test_field_absent_defaults_and_parses(self):
+        """A payload omitting the field parses fine (new nodes)."""
+        from app.request_models.conversation_start_request import (
+            ConversationStartRequest,
+        )
+
+        req = ConversationStartRequest(conversation_id="conv-2")
+        assert req.skip_warmup_inference is False

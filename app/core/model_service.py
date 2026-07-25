@@ -256,13 +256,13 @@ class ModelService:
         client_tools: Optional[List[Dict[str, Any]]] = None,
         available_commands: Optional[List[CommandDefinition]] = None,
         adapter_settings: Optional[Dict[str, Any]] = None,
-        skip_warmup_inference: bool = False,
     ) -> None:
         """
         Initialize a tool-based conversation with warmup.
 
         Sets up the conversation cache with system prompt, tools, and available commands.
-        Optionally performs a warmup inference call to reduce first-response latency.
+        ALWAYS performs a warmup inference call to reduce first-response latency — the
+        warmup is not skippable.
 
         Args:
             node_context: Context about the node (room, user, etc.)
@@ -271,7 +271,6 @@ class ModelService:
             client_tools: Tools provided by the client
             available_commands: Command definitions for examples/antipatterns
             adapter_settings: Optional adapter configuration
-            skip_warmup_inference: If True, skip the warmup LLM call
         """
         await self._conversation_handler.warmup_conversation_with_tools(
             conversation_id=conversation_id,
@@ -280,7 +279,6 @@ class ModelService:
             client_tools=client_tools,
             available_commands=available_commands,
             adapter_settings=adapter_settings,
-            skip_warmup_inference=skip_warmup_inference,
         )
 
     async def process_voice_command_with_tools(

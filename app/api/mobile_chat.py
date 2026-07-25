@@ -238,7 +238,6 @@ async def _do_warmup(
         timezone=timezone,
         client_tools=ct,
         available_commands=ac,
-        skip_warmup_inference=False,
     )
 
 
