@@ -27,5 +27,8 @@ class ConversationStartRequest(BaseModel):
     node_context: Optional[dict] = None  # Keep for backward compatibility but we'll use provider context
     available_commands: Optional[List[CommandDefinition]] = None  # Available commands for this conversation
     client_tools: Optional[List[Dict[str, Any]]] = None  # Client-side tool definitions in OpenAI format
-    skip_warmup_inference: bool = False  # Skip the LLM warmup call (useful for vLLM which doesn't cache KV)
+    # DEPRECATED / IGNORED: the warmup inference now ALWAYS runs and is never
+    # skippable. Field kept only so older nodes that still send it don't 422
+    # during rollout. CC does not act on this value.
+    skip_warmup_inference: bool = False
     adapter_settings: Optional[AdapterOverride] = None  # Phase 2: test-mode adapter override

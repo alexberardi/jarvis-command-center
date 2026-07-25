@@ -872,16 +872,17 @@ async def start_conversation(
 
         client_tools = request.client_tools or []
         available_commands = request.available_commands or []
-        logger.info(f"🔧 Starting tool-based conversation with {len(client_tools)} client tools (skip_warmup={request.skip_warmup_inference})")
+        logger.info(f"🔧 Starting tool-based conversation with {len(client_tools)} client tools")
 
         with timing.measure("warmup_conversation_with_tools"):
+            # Warmup inference ALWAYS runs (request.skip_warmup_inference is
+            # deprecated and ignored — see ConversationStartRequest).
             await model_service.warmup_conversation_with_tools(
                 node_context=node_context,
                 conversation_id=request.conversation_id,
                 timezone=client_timezone,
                 client_tools=client_tools,
                 available_commands=request.available_commands,
-                skip_warmup_inference=request.skip_warmup_inference
             )
 
         latency_logger.end_request(request.conversation_id)

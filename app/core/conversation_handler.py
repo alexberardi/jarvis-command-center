@@ -209,13 +209,14 @@ class ConversationHandler:
         client_tools: Optional[List[Dict[str, Any]]],
         available_commands: Optional[List[Any]],
         adapter_settings: Optional[Dict[str, Any]] = None,
-        skip_warmup_inference: bool = False,
     ) -> None:
         """
         Initialize a tool-based conversation with warmup.
 
         Sets up the conversation cache with system prompt, tools, and available commands.
-        Optionally performs a warmup inference call to reduce first-response latency.
+        ALWAYS performs a warmup inference call to reduce first-response latency — the
+        warmup is not skippable. Skipping it left the prompt prefix uncached, so every
+        voice turn paid a cold prefill (~1.4s).
 
         Args:
             conversation_id: Unique conversation identifier
@@ -224,7 +225,6 @@ class ConversationHandler:
             client_tools: Tools provided by the client
             available_commands: Command definitions for examples/antipatterns
             adapter_settings: Optional adapter configuration
-            skip_warmup_inference: If True, skip the warmup LLM call
         """
         logger.info(f"🔥 Warming up tool-based conversation {conversation_id[:8]}...")
 
@@ -415,42 +415,44 @@ class ConversationHandler:
             self.prompt_provider is not None
             and self.prompt_provider.supports_native_tools
         )
-        if not skip_warmup_inference:
-            try:
-                if use_native_tools:
-                    # Native tools path: full warmup with tool definitions.
-                    # IMPORTANT: use the same tool transformation as the inference
-                    # path (strip_jarvis_extensions + prompt_provider.build_tools)
-                    # so the token sequence matches and llama.cpp's prefix cache
-                    # is reused on the first real inference call.
-                    from app.core.tool_builder import ToolBuilder
-                    warmup_tools = self.prompt_provider.build_tools(
-                        ToolBuilder.strip_jarvis_extensions(all_tools)
-                    )
+        # Warmup inference ALWAYS runs — it is never skippable. (A client-supplied
+        # skip_warmup_inference flag used to gate this; a node sending it as True
+        # disabled the pre-warm and made every voice turn pay a cold prefill.)
+        try:
+            if use_native_tools:
+                # Native tools path: full warmup with tool definitions.
+                # IMPORTANT: use the same tool transformation as the inference
+                # path (strip_jarvis_extensions + prompt_provider.build_tools)
+                # so the token sequence matches and llama.cpp's prefix cache
+                # is reused on the first real inference call.
+                from app.core.tool_builder import ToolBuilder
+                warmup_tools = self.prompt_provider.build_tools(
+                    ToolBuilder.strip_jarvis_extensions(all_tools)
+                )
+                await self.llm_client.chat_completion(
+                    conversation_id=conversation_id,
+                    messages=messages,
+                    tools=warmup_tools,
+                    adapter_settings=adapter_settings,
+                )
+            else:
+                # Text-based path: send system prompt for KV caching
+                # with max_tokens=1 to avoid generating useless output.
+                # llama.cpp caches the prompt prefix; the voice command
+                # inference then only processes the new user message.
+                allows_caching: bool = await self.llm_client.allows_warmup_caching()
+                if allows_caching:
                     await self.llm_client.chat_completion(
                         conversation_id=conversation_id,
                         messages=messages,
-                        tools=warmup_tools,
                         adapter_settings=adapter_settings,
+                        max_tokens=1,
                     )
                 else:
-                    # Text-based path: send system prompt for KV caching
-                    # with max_tokens=1 to avoid generating useless output.
-                    # llama.cpp caches the prompt prefix; the voice command
-                    # inference then only processes the new user message.
-                    allows_caching: bool = await self.llm_client.allows_warmup_caching()
-                    if allows_caching:
-                        await self.llm_client.chat_completion(
-                            conversation_id=conversation_id,
-                            messages=messages,
-                            adapter_settings=adapter_settings,
-                            max_tokens=1,
-                        )
-                    else:
-                        logger.info(f"⏭️ Engine doesn't benefit from warmup ({conversation_id[:8]})")
-                logger.info(f"✅ Warmup inference complete for {conversation_id[:8]}...")
-            except Exception as e:
-                logger.warning(f"⚠️ Warmup inference failed (non-fatal): {e}")
+                    logger.info(f"⏭️ Engine doesn't benefit from warmup ({conversation_id[:8]})")
+            logger.info(f"✅ Warmup inference complete for {conversation_id[:8]}...")
+        except Exception as e:
+            logger.warning(f"⚠️ Warmup inference failed (non-fatal): {e}")
 
     @staticmethod
     def _rewrite_terminal_filler(result: Dict[str, Any]) -> Dict[str, Any]:

@@ -43,6 +43,9 @@ class CommandTestRequest(BaseModel):
     client_tools: list[dict[str, Any]] = Field(..., max_length=100)
     timezone: str = Field(default="America/New_York", max_length=100)
     node_context: dict[str, Any] | None = None
+    # DEPRECATED / IGNORED: the warmup inference now ALWAYS runs and is never
+    # skippable. Field kept only so existing callers that still send it don't
+    # 422. CC does not act on this value.
     skip_warmup_inference: bool = True
 
 
@@ -81,13 +84,14 @@ async def _run_test_command(
     }
 
     try:
+        # Warmup inference ALWAYS runs (skip_warmup_inference is deprecated and
+        # ignored — see CommandTestRequest).
         await model_service.warmup_conversation_with_tools(
             node_context=node_context,
             conversation_id=conversation_id,
             timezone=request.timezone,
             client_tools=request.client_tools,
             available_commands=request.available_commands,
-            skip_warmup_inference=request.skip_warmup_inference,
         )
 
         result = await model_service.process_voice_command_with_tools(
