@@ -389,6 +389,37 @@ class UserMemory(Base):
     expires_at = Column(DateTime, nullable=True)
 
 
+class PersonCharacterization(Base):
+    """Synthesized, evolving "view of a person" — one row per (user, household).
+
+    A background job (``characterization_synthesis_service``) regenerates a single
+    document from the person's facts + recent transcripts: a structured ``body``
+    (JSON) plus a ``rendered`` prose summary that can be injected into the voice
+    prompt as a ``<person_view>`` tail (gated, default OFF). Distinct from
+    ``UserMemory`` (discrete facts) and the persona (household VOICE) — this is
+    Jarvis's model of WHO it's talking to, and it only grows richer over time.
+    """
+    __tablename__ = 'person_characterizations'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False)
+    household_id = Column(String(255), nullable=False)
+    body = Column(Text, nullable=False)  # structured JSON document
+    rendered = Column(Text, nullable=True)  # prose summary for prompt injection
+    confidence = Column(Float, nullable=True)
+    version = Column(Integer, nullable=False, server_default='1')
+    last_transcript_at = Column(DateTime, nullable=True)  # newest transcript folded in
+    model = Column(String(100), nullable=True)  # which background model synthesized it
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'user_id', 'household_id', name='uq_person_characterization_user_household'
+        ),
+    )
+
+
 class ConversationTranscript(Base):
     """Buffered voice conversation transcript for passive memory extraction.
 

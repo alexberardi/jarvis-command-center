@@ -58,7 +58,8 @@ class TestSettingsDefinitions:
                               "prompt", "model", "conversation", "admin", "memory",
                               "network", "oauth", "smart_home", "adapter", "voice",
                               "routines", "web_search", "updates", "attention",
-                              "phone_calls", "household", "persona"}
+                              "phone_calls", "household", "persona",
+                              "characterization"}
         assert categories == expected_categories
 
 
