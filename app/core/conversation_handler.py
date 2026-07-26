@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Set
 from app.core.conversation_cache import conversation_cache
 from app.core.direction_hint import build_direction_hint
 from app.core.affect_hint import build_affect_hint
+from app.core.turn_context import build_turn_hint
 from app.core.errors import ConversationPreconditionError
 from app.core.not_for_me import contains_sentinel
 from app.core.prompt_providers.shared.core_rules import (
@@ -553,6 +554,7 @@ class ConversationHandler:
         speaker_user_id: int | None = None,
         pre_wake_speech_seconds: float | None = None,
         affect: dict | None = None,
+        turn_context: dict | None = None,
     ) -> Dict[str, Any]:
         """
         Process a voice command using tool-based architecture.
@@ -712,6 +714,15 @@ class ConversationHandler:
         if affect_hint:
             logger.info("🎭 Affect hint applied | hint=%s", affect_hint)
             user_content = f"{user_content}\n\n{affect_hint}"
+        turn_hint: str | None = build_turn_hint(
+            (turn_context or {}).get("source"),
+            wake_confidence=(turn_context or {}).get("wake_confidence"),
+            follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
+            pre_wake_speech_seconds=pre_wake_speech_seconds,
+        )
+        if turn_hint:
+            logger.info("🧭 Turn hint applied | hint=%s", turn_hint)
+            user_content = f"{user_content}\n\n{turn_hint}"
         if agent_context:
             user_content = f"{user_content}\n\n{agent_context}"
         if suffix:
@@ -775,16 +786,20 @@ class ConversationHandler:
                 if pre_wake_speech_seconds is not None else -1.0
             )
             hint_state = "active" if direction_hint else "absent"
+            turn_source = (turn_context or {}).get("source") or (
+                "wake_inferred" if pre_wake_speech_seconds is not None else "unknown"
+            )
             logger.info(
                 "🚫 not_for_me_sentinel | "
                 "conversation_id=%s speaker_user_id=%s prompt_provider=%s "
-                "pre_wake_speech_secs=%.2f direction_hint=%s "
+                "pre_wake_speech_secs=%.2f direction_hint=%s turn_source=%s "
                 "transcript=%r raw_assistant=%r",
                 conversation_id,
                 speaker_user_id,
                 provider_name,
                 pre_wake,
                 hint_state,
+                turn_source,
                 voice_command,
                 raw_msg[:160],
             )
@@ -814,6 +829,7 @@ class ConversationHandler:
         speaker_user_id: int | None = None,
         pre_wake_speech_seconds: float | None = None,
         affect: dict | None = None,
+        turn_context: dict | None = None,
     ):
         """Attempt to stream LLM tokens directly to TTS for eligible queries.
 
@@ -938,6 +954,15 @@ class ConversationHandler:
         if affect_hint:
             logger.info("🎭 Affect hint applied (stream path) | hint=%s", affect_hint)
             user_content = f"{user_content}\n\n{affect_hint}"
+        turn_hint: str | None = build_turn_hint(
+            (turn_context or {}).get("source"),
+            wake_confidence=(turn_context or {}).get("wake_confidence"),
+            follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
+            pre_wake_speech_seconds=pre_wake_speech_seconds,
+        )
+        if turn_hint:
+            logger.info("🧭 Turn hint applied (stream path) | hint=%s", turn_hint)
+            user_content = f"{user_content}\n\n{turn_hint}"
         if suffix:
             user_content = f"{user_content}\n{suffix}"
         messages.append({"role": "user", "content": user_content})
@@ -1125,6 +1150,7 @@ class ConversationHandler:
         speaker_user_id: int | None = None,
         pre_wake_speech_seconds: float | None = None,
         affect: dict | None = None,
+        turn_context: dict | None = None,
     ):
         """Stream LLM → TTS for commands that need server-side tool execution.
 
@@ -1266,6 +1292,15 @@ class ConversationHandler:
         if affect_hint:
             logger.info("🎭 Affect hint applied (tool-stream path) | hint=%s", affect_hint)
             user_content = f"{user_content}\n\n{affect_hint}"
+        turn_hint: str | None = build_turn_hint(
+            (turn_context or {}).get("source"),
+            wake_confidence=(turn_context or {}).get("wake_confidence"),
+            follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
+            pre_wake_speech_seconds=pre_wake_speech_seconds,
+        )
+        if turn_hint:
+            logger.info("🧭 Turn hint applied (tool-stream path) | hint=%s", turn_hint)
+            user_content = f"{user_content}\n\n{turn_hint}"
         if suffix:
             user_content = f"{user_content}\n{suffix}"
         messages.append({"role": "user", "content": user_content})

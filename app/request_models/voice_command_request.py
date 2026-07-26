@@ -46,3 +46,13 @@ class VoiceCommandRequest(BaseModel):
     # the LLM as a per-turn tone hint (shape, don't announce). None when the
     # feature is off or the read was withheld.
     affect: Optional[Dict[str, Any]] = None
+    # Turn provenance — how the mic came to be open for this transcript.
+    # "wake": a wake-word fire captured it (wake_confidence carries the OWW
+    # detection score). "follow_up": no wake word — the node kept the mic
+    # open after TTS (follow_up_iteration is the 1-based window iteration).
+    # Selects the not_for_me posture for the turn (see core/turn_context.py).
+    # All None on old clients → CC falls back to inferring wake mode from
+    # pre_wake_speech_seconds (only the wake path measures it).
+    turn_source: Optional[str] = None
+    wake_confidence: Optional[float] = None
+    follow_up_iteration: Optional[int] = None
