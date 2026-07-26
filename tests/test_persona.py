@@ -224,6 +224,24 @@ class TestEndOfPromptReminder:
         out = ch.ConversationHandler._get_system_prompt(self._handler(), nc, None, [], None)
         assert "YOUR VOICE" not in out
 
+    def test_reminder_fences_off_withholding_and_optional_params(self):
+        # The recency reminder can out-shout the mid-prompt rules on a small
+        # model, so its own guardrail must forbid the failure mode that broke the
+        # behavior corpus: the warm voice turning "what time is it" into a chatty
+        # "what location?" instead of calling the tool with a defaulted optional.
+        from app.core.prompt_providers.shared.core_rules import build_personality_reminder
+
+        out = build_personality_reminder("You're warm and folksy.")
+        lowered = out.lower()
+        # Still scoped to tone/wording only (unchanged intent)...
+        assert "shapes only your wording and tone" in out
+        # ...and now also fences off deferring/withholding the action.
+        assert "clarifying question" in lowered
+        assert "optional parameter" in lowered
+        assert "withholds or delays a tool call" in lowered
+        # Ending is preserved (recency anchor for other tests).
+        assert out.rstrip().endswith("just speak in it.")
+
 
 class TestSettingDefinition:
     def test_persona_setting_defined_with_folksy_default(self):
