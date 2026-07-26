@@ -1073,6 +1073,7 @@ async def handle_voice(
                     stop_reason=stop_reason,
                     assistant_message=_msg or None,
                     reasoning=result.get("reasoning"),
+                    end_of_exchange=result.get("end_of_exchange"),
                     tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
                     validation_request=(
                         ValidationRequest(**result["validation_request"])
@@ -1353,6 +1354,7 @@ async def handle_voice_stream(
             ),
             stop_reason=stop_reason_enum,
             assistant_message=assistant_message,
+            end_of_exchange=result.get("end_of_exchange"),
             tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
             validation_request=(
                 ValidationRequest(**result["validation_request"])
@@ -1956,6 +1958,7 @@ async def continue_voice_command(
             ),
             stop_reason=StopReason(result.get("stop_reason", "complete")),
             assistant_message=result.get("assistant_message"),
+            end_of_exchange=result.get("end_of_exchange"),
             tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
             validation_request=(
                 ValidationRequest(**result["validation_request"])

@@ -18,9 +18,11 @@ from app.core.conversation_cache import conversation_cache
 from app.core.direction_hint import build_direction_hint
 from app.core.affect_hint import build_affect_hint
 from app.core.turn_context import build_turn_hint
+from app.core.exchange_complete import apply_to_result as apply_exchange_complete
 from app.core.errors import ConversationPreconditionError
 from app.core.not_for_me import contains_sentinel
 from app.core.prompt_providers.shared.core_rules import (
+    EXCHANGE_COMPLETE_INSTRUCTION,
     NOT_FOR_ME_INSTRUCTION,
     RECENTLY_SHOWN_PREFIX,
     build_characterization_section,
@@ -812,6 +814,13 @@ class ConversationHandler:
         conversation_cache.update_messages(conversation_id, messages)
         if result.get("stop_reason") == "error":
             logger.error("❌ Tool loop returned stop_reason=error: %s", result)
+
+        # Strip the <exchange_complete/> marker BEFORE the filler rewrite so
+        # the prose check sees the clean reply; sets end_of_exchange for the
+        # node to skip its follow-up window.
+        result = apply_exchange_complete(result)
+        if result.get("end_of_exchange"):
+            logger.info("🏁 exchange_complete | conversation_id=%s", conversation_id)
 
         result = self._rewrite_terminal_filler(result)
 
@@ -1889,6 +1898,12 @@ class ConversationHandler:
         # Update cache
         conversation_cache.update_messages(conversation_id, messages)
 
+        # Final replies after tool rounds ("Timer set!") are the most common
+        # terminal replies — same marker handling as the initial turn.
+        result = apply_exchange_complete(result)
+        if result.get("end_of_exchange"):
+            logger.info("🏁 exchange_complete (continue) | conversation_id=%s", conversation_id)
+
         return result
 
     async def _format_tool_result_text_mode(
@@ -2638,7 +2653,7 @@ class ConversationHandler:
             )
         else:
             base = "You are a helpful voice assistant."
-        prompt = f"{base.rstrip()}\n\n{NOT_FOR_ME_INSTRUCTION}\n"
+        prompt = f"{base.rstrip()}\n\n{NOT_FOR_ME_INSTRUCTION}\n\n{EXCHANGE_COMPLETE_INSTRUCTION}\n"
 
         # Reinforce the household VOICE at the very end for recency. The top-of-
         # prompt <personality> block is buried under 90%+ terse tool-calling +

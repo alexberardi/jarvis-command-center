@@ -8,6 +8,7 @@ prediction). No DB or model needed.
 import types
 
 from app.core.prompt_providers.shared.core_rules import (
+    EXCHANGE_COMPLETE_INSTRUCTION,
     NOT_FOR_ME_INSTRUCTION,
     build_characterization_section,
 )
@@ -100,7 +101,7 @@ class TestGetSystemPromptInjection:
         )
 
     def _base_full(self):
-        return f"PROVIDER_BASE\n\n{NOT_FOR_ME_INSTRUCTION}\n"
+        return f"PROVIDER_BASE\n\n{NOT_FOR_ME_INSTRUCTION}\n\n{EXCHANGE_COMPLETE_INSTRUCTION}\n"
 
     def test_disabled_is_byte_identical(self):
         nc = {"characterization": "Loves jazz."}

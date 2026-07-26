@@ -24,7 +24,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.prompt_providers.shared.core_rules import NOT_FOR_ME_INSTRUCTION
+from app.core.prompt_providers.shared.core_rules import (
+    EXCHANGE_COMPLETE_INSTRUCTION,
+    NOT_FOR_ME_INSTRUCTION,
+)
 
 SETTINGS = "app.services.settings_service.get_settings_service"
 
@@ -106,7 +109,7 @@ class TestSystemPromptGateIntegration:
         return h
 
     def _base_full(self):
-        return f"PROVIDER_BASE\n\n{NOT_FOR_ME_INSTRUCTION}\n"
+        return f"PROVIDER_BASE\n\n{NOT_FOR_ME_INSTRUCTION}\n\n{EXCHANGE_COMPLETE_INSTRUCTION}\n"
 
     def test_setting_on_appends_tail_and_stashes_base(self):
         nc = {"household_id": "h1", "characterization": "Alex builds things in Brick, NJ."}

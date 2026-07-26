@@ -61,6 +61,10 @@ class VoiceCommandResponse(BaseModel):
     validation_request: Optional[ValidationRequest] = None
     assistant_message: Optional[str] = None
     reasoning: Optional[str] = None
+    # The model marked this reply as terminal (<exchange_complete/> was
+    # stripped from assistant_message). The node skips its follow-up
+    # window and returns to idle. None/False → normal window behavior.
+    end_of_exchange: Optional[bool] = None
     
     @property
     def success(self) -> bool:
