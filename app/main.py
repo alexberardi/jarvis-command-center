@@ -230,6 +230,30 @@ async def startup_event():
 
     asyncio.create_task(_periodic_memory_extraction())
 
+    # Schedule background characterization synthesis (the evolving per-person view).
+    # Off by default; enqueues background-model jobs whose results land via
+    # /characterization-synthesis/callback. Kept off the hot path, mirrors the
+    # memory-extraction loop (interval-driven, exceptions swallowed to stay alive).
+    async def _periodic_characterization_synthesis() -> None:
+        while True:
+            try:
+                interval = int(
+                    settings_service.get("characterization.synthesis_interval_seconds") or 3600
+                )
+            except (TypeError, ValueError):
+                interval = 3600
+            await asyncio.sleep(interval)
+            try:
+                enabled = settings_service.get("characterization.synthesis_enabled")
+                if enabled is not True and str(enabled).lower() not in ("true", "1", "yes"):
+                    continue
+                from app.services.characterization_synthesis_service import run_synthesis_batch
+                await run_synthesis_batch()
+            except Exception as e:
+                logger.warning("Characterization synthesis batch failed: %s", e)
+
+    asyncio.create_task(_periodic_characterization_synthesis())
+
     # Schedule transcript TTL cleanup (daily)
     async def _periodic_transcript_cleanup() -> None:
         while True:
@@ -623,6 +647,11 @@ app.include_router(mobile_memories.router, prefix="/api/v0", tags=["mobile-memor
 # Include transcript feedback router (Phase 1 — mobile rating UI)
 from app.api import transcripts
 app.include_router(transcripts.router, prefix="/api/v0", tags=["transcripts"])
+
+# Characterization inspection + manual synthesis trigger (admin or household JWT).
+# Read/eyeball the synthesized per-person "view" before injection is turned on.
+from app.api import characterizations
+app.include_router(characterizations.router, prefix="/api/v0", tags=["characterizations"])
 
 # Self-scoped account-data purge (user JWT) — account-deletion contract.
 # jarvis-auth fans out to DELETE /api/v0/me/data during DELETE /auth/me.
@@ -1701,6 +1730,29 @@ async def memory_extraction_callback(request: Request):
         await handle_extraction_callback(payload)
     except Exception as e:
         logger.error("Memory extraction callback failed: %s", e, exc_info=True)
+
+    return {"status": "ok"}
+
+
+@v0_router.post("/characterization-synthesis/callback", name="characterization_synthesis_callback")
+async def characterization_synthesis_callback(request: Request):
+    """Receive the background-model LLM queue callback for characterization synthesis."""
+    _verify_callback_auth(request)
+
+    payload = await request.json()
+    job_id = payload.get("job_id")
+    status = payload.get("status")
+    user_id = payload.get("metadata", {}).get("user_id", "?")
+    logger.info(
+        "Characterization synthesis callback: job_id=%s status=%s user_id=%s",
+        job_id, status, user_id,
+    )
+
+    from app.services.characterization_synthesis_service import handle_synthesis_callback
+    try:
+        await handle_synthesis_callback(payload)
+    except Exception as e:
+        logger.error("Characterization synthesis callback failed: %s", e, exc_info=True)
 
     return {"status": "ok"}
 

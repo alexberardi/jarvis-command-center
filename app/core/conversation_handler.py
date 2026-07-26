@@ -22,6 +22,7 @@ from app.core.not_for_me import contains_sentinel
 from app.core.prompt_providers.shared.core_rules import (
     NOT_FOR_ME_INSTRUCTION,
     RECENTLY_SHOWN_PREFIX,
+    build_characterization_section,
     render_referenced_items_block,
 )
 from app.core.transcript_filter import is_stt_noise
@@ -156,6 +157,39 @@ def _append_referenced_items_block(messages: List[Dict[str, Any]], conversation_
     block = render_referenced_items_block(conversation_cache.get_referenced_items(conversation_id))
     if block:
         messages.append({"role": "system", "content": block})
+
+
+def _apply_characterization_swap(messages: List[Dict[str, Any]], conversation_id: str) -> None:
+    """Reconcile ``messages[0]``'s characterization tail against the stashed base.
+
+    The warmup builds ``messages[0]`` once (for the predicted speaker) and stashes
+    the byte-stable base — everything up to the ``<person_view>`` tail — in
+    ``node_context["_system_prompt_base"]``. Each turn we recompute the desired
+    tail from ``node_context["characterization"]`` and swap ``messages[0]`` to it:
+
+      * prediction correct → desired == current → **no-op** (full KV-cache hit),
+      * no characterization → tail cleared back to the bare base,
+      * characterization present → base + one ``<person_view>`` section.
+
+    No-op when nothing was stashed (injection disabled / not warmed). Always
+    REPLACES the ``messages[0]`` dict rather than mutating it — the tool-stream
+    path shares that dict with the conversation cache, so an in-place edit would
+    corrupt the cached prefix. Hermetic: reads only the cached node_context, never
+    the DB or the model.
+    """
+    if not messages:
+        return
+    node_context = conversation_cache.get_node_context(conversation_id)
+    if not node_context:
+        return
+    base = node_context.get("_system_prompt_base")
+    if not base:
+        return
+    section = build_characterization_section(node_context.get("characterization", ""))
+    desired = f"{base}\n{section}" if section else base
+    if messages[0].get("content") == desired:
+        return
+    messages[0] = {**messages[0], "content": desired}
 
 
 class ConversationHandler:
@@ -362,6 +396,37 @@ class ConversationHandler:
                     db.close()
             except Exception as e:
                 logger.warning(f"⚠️ Failed to load user memories: {e}")
+
+        # Load the synthesized characterization for the (predicted) speaker so the
+        # prompt build can append its <person_view> tail. Gated behind the same
+        # per-household injection flag (default OFF) so this DB read stays entirely
+        # off the hot path unless the household opted in. The per-turn
+        # _apply_characterization_swap reconciles this against the confirmed
+        # speaker without a re-read.
+        if (
+            speaker_user_id
+            and household_id
+            and self._get_characterization_injection_enabled(node_context)
+        ):
+            try:
+                from app.db import get_session_local
+                from app.services.characterization_service import CharacterizationService
+
+                SessionLocal = get_session_local()
+                db = SessionLocal()
+                try:
+                    row = CharacterizationService(db).get(speaker_user_id, household_id)
+                    rendered = (row.rendered or "").strip() if row else ""
+                    if rendered:
+                        node_context["characterization"] = rendered
+                        logger.info(
+                            "🧭 Loaded characterization for speaker %s (v%s, %d chars)",
+                            speaker_user_id, getattr(row, "version", "?"), len(rendered),
+                        )
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load characterization: {e}")
 
         # Fetch date keys for prompt providers that need them.
         # We INTENTIONALLY trim to a small high-frequency subset before
@@ -594,6 +659,9 @@ class ConversationHandler:
         # never accumulate across a multi-turn conversation and bloat the
         # prompt toward the model's context limit.
         messages[:] = [m for m in messages if not _is_transient_system_block(m)]
+        # Reconcile messages[0]'s characterization tail for the confirmed speaker —
+        # a no-op (full KV-cache hit) when the warmup prediction was already right.
+        _apply_characterization_swap(messages, conversation_id)
         _speaker_msg = await self._build_turn_speaker_message(
             conversation_id, speaker_user_id,
             conversation_cache.get_node_context(conversation_id),
@@ -835,6 +903,9 @@ class ConversationHandler:
         # never accumulate across a multi-turn conversation and bloat the
         # prompt toward the model's context limit.
         messages[:] = [m for m in messages if not _is_transient_system_block(m)]
+        # Reconcile messages[0]'s characterization tail for the confirmed speaker —
+        # a no-op (full KV-cache hit) when the warmup prediction was already right.
+        _apply_characterization_swap(messages, conversation_id)
         _speaker_msg = await self._build_turn_speaker_message(
             conversation_id, speaker_user_id,
             conversation_cache.get_node_context(conversation_id),
@@ -1151,6 +1222,9 @@ class ConversationHandler:
         # never accumulate across a multi-turn conversation and bloat the
         # prompt toward the model's context limit.
         messages[:] = [m for m in messages if not _is_transient_system_block(m)]
+        # Reconcile messages[0]'s characterization tail for the confirmed speaker —
+        # a no-op (full KV-cache hit) when the warmup prediction was already right.
+        _apply_characterization_swap(messages, conversation_id)
         _speaker_msg = await self._build_turn_speaker_message(
             conversation_id, speaker_user_id,
             conversation_cache.get_node_context(conversation_id),
@@ -2541,6 +2615,21 @@ class ConversationHandler:
             _reminder = build_personality_reminder(node_context.get("household_persona", ""))
             if _reminder:
                 prompt = f"{prompt}\n{_reminder}\n"
+
+        # Characterization tail (Slice 3) — Jarvis's evolving "view of the person",
+        # appended LAST for recency. Gated per-household (default OFF). When enabled
+        # we stash the byte-stable base (everything above) so the per-turn
+        # _apply_characterization_swap can reconcile the tail for the confirmed
+        # speaker without disturbing the cached prefix on a correct prediction.
+        # When disabled the prompt is byte-identical to the pre-characterization
+        # path and nothing is stashed.
+        if node_context is not None and self._get_characterization_injection_enabled(node_context):
+            node_context["_system_prompt_base"] = prompt
+            _char_section = build_characterization_section(
+                node_context.get("characterization", "")
+            )
+            if _char_section:
+                prompt = f"{prompt}\n{_char_section}"
         return prompt
 
     @staticmethod
@@ -2648,6 +2737,43 @@ class ConversationHandler:
                 f"⚠️ Failed to load persona.household_prompt, using default voice: {e}"
             )
             return DEFAULT_PERSONA
+
+    @staticmethod
+    def _get_characterization_injection_enabled(node_context: Dict[str, Any] | None) -> bool:
+        """Whether the synthesized characterization may be injected into the prompt.
+
+        Gates ONLY the Slice-3 prompt tail (the ``<person_view>`` block). Background
+        synthesis is governed separately by ``characterization.synthesis_enabled``,
+        so a household can build a characterization for inspection long before it
+        ever touches a live prompt.
+
+        Default OFF. Fails CLOSED — a settings outage, missing key, or typo leaves
+        the prompt byte-identical to the no-characterization path (no surprise
+        injection, no cache churn), matching ``_get_web_search_enabled``.
+        """
+        try:
+            from app.services.settings_service import get_settings_service
+
+            settings = get_settings_service()
+            household_id = node_context.get("household_id") if node_context else None
+
+            kwargs: Dict[str, Any] = {}
+            if household_id:
+                kwargs["household_id"] = str(household_id)
+
+            enabled = settings.get("characterization.injection_enabled", **kwargs)
+
+            if isinstance(enabled, bool):
+                return enabled
+            if isinstance(enabled, str):
+                return enabled.lower() in ("true", "1", "yes")
+            return bool(enabled)
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Failed to check characterization.injection_enabled, "
+                f"defaulting to DISABLED: {e}"
+            )
+            return False
 
     async def _build_turn_speaker_message(
         self,

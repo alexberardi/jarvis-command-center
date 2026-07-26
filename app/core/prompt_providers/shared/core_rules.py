@@ -294,6 +294,35 @@ def build_personality_reminder(persona_text: str | None) -> str:
     )
 
 
+def build_characterization_section(rendered: str | None) -> str:
+    """Return the synthesized "view of the person" as a voice-shaping tail block.
+
+    This is Jarvis's evolving model of WHO it's talking to — built in the
+    background from the person's facts + past conversations (see
+    ``characterization_synthesis_service``), NOT anything they said this turn. It
+    lets Jarvis draw on what it knows (so "who's Leo?" resolves) and MEET the
+    person in tone — but it is a lens, never a script to read back. Appended at
+    the very END of the assembled prompt (after the not-for-me wall) so a small
+    model still carries it into generation, and swapped per-turn against a stashed
+    byte-stable base (see ``conversation_handler._apply_characterization_swap``)
+    so a correct prediction stays a full KV-cache hit. Returns ``""`` for empty
+    input (byte-identical to the no-characterization path — the safe fallback).
+    """
+    rendered = (rendered or "").strip()
+    if not rendered:
+        return ""
+    return (
+        "<person_view>\n"
+        "What you've come to know about the person you're talking to, from past "
+        "conversations:\n"
+        f"{rendered}\n"
+        "Let it shape your tone and how you meet them, and draw on it naturally "
+        "when it helps — but don't recite it back as a list, and if it conflicts "
+        "with the User Profile above, defer to the profile.\n"
+        "</person_view>"
+    )
+
+
 # Marker prefix for the per-turn "recently shown" transient block. Kept in sync
 # with conversation_handler._is_transient_system_block so the block is stripped
 # and rebuilt every turn instead of accumulating across a multi-turn conversation.

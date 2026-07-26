@@ -194,6 +194,52 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         ),
     ),
 
+    # Characterization — Jarvis's evolving synthesized "view of a person", built
+    # in the background from their facts + recent transcripts. Synthesis and
+    # injection are gated SEPARATELY so a household can build + inspect the view
+    # long before it ever shapes a live prompt. Both default OFF.
+    SettingDefinition(
+        key="characterization.synthesis_enabled",
+        category="characterization",
+        value_type="bool",
+        default=False,
+        description=(
+            "Enable the background job that synthesizes a per-person characterization "
+            "from their facts + recent transcripts. Off the hot path; default OFF."
+        ),
+    ),
+    SettingDefinition(
+        key="characterization.synthesis_interval_seconds",
+        category="characterization",
+        value_type="int",
+        default=3600,
+        description=(
+            "Interval in seconds between characterization synthesis batch runs "
+            "(e.g., 300 for dev, 3600 for prod)."
+        ),
+    ),
+    SettingDefinition(
+        key="characterization.max_transcripts",
+        category="characterization",
+        value_type="int",
+        default=50,
+        description=(
+            "Max recent transcripts fed into a single characterization synthesis "
+            "prompt (bounds the background model's input)."
+        ),
+    ),
+    SettingDefinition(
+        key="characterization.injection_enabled",
+        category="characterization",
+        value_type="bool",
+        default=False,
+        description=(
+            "Allow the synthesized characterization to be injected into the live "
+            "voice prompt as a <person_view> tail. Default OFF, fail-closed — "
+            "separate from synthesis so the view can be built + inspected first."
+        ),
+    ),
+
     # Agent context injection settings (background agents → prompt)
     SettingDefinition(
         key="memory.agent_context_enabled",
