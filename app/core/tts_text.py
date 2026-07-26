@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import re
 
+from app.core.exchange_complete import contains_marker, strip_marker
+
 
 # Targeted ranges for the unicode blocks where most emoji live, plus the
 # zero-width joiner and variation selector that combine modifiers into
@@ -107,7 +109,11 @@ def clean_for_tts(text: str) -> str:
     """
     if not text:
         return text
-    cleaned = _EMOJI_RE.sub("", text)
+    # Control markers must never reach spoken audio. The blocking path
+    # strips <exchange_complete/> in exchange_complete.apply_to_result;
+    # this is the backstop for streaming paths that TTS raw LLM text.
+    cleaned = strip_marker(text) if contains_marker(text) else text
+    cleaned = _EMOJI_RE.sub("", cleaned)
     for pattern, replacement in _MARKDOWN_SUBS:
         cleaned = pattern.sub(replacement, cleaned)
     cleaned = _ORPHAN_MARKDOWN_RE.sub("", cleaned)

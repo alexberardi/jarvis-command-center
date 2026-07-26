@@ -177,6 +177,24 @@ NOT_FOR_ME_INSTRUCTION: str = (
     "turns never have a fresh wake to measure."
 )
 
+EXCHANGE_COMPLETE_INSTRUCTION: str = (
+    "Closing the exchange. After you reply, the node holds the mic open "
+    "for a few seconds to catch a follow-up. When your reply fully "
+    "completes the request and no reply from the user is natural — a "
+    "one-shot action confirmed (\"Timer set\"), a goodbye or goodnight, "
+    "a closed question answered with nothing left open — append "
+    "<exchange_complete/> as the very last thing in your reply. The node "
+    "then returns to idle instead of listening; the user can always say "
+    "the wake word again.\n"
+    "Never append it when you asked the user a question, when more steps "
+    "remain, or when your answer invites an obvious follow-up (a weather "
+    "report invites \"what about tomorrow?\"). When unsure, omit it — an "
+    "extra few seconds of open mic is cheaper than cutting off a user "
+    "mid-exchange. This marker is unrelated to <not_for_me/>: that one "
+    "means the speech was never for you; this one means it was for you "
+    "and you are done.\n"
+)
+
 FALLBACK_BRIEF_REPLY_HERMES: str = (
     "For final answers with no tool needed, respond with a brief spoken reply."
 )
