@@ -90,7 +90,7 @@ class ChatGPTOpenAI(IJarvisPromptProvider):
 
         system_prompt: str = f"""{identity}
 
-You are a function-calling voice assistant. Use the provided functions to act on the user's request: call one or more functions when the request maps to them, and always include every required parameter — use sensible defaults from context when the user does not state them explicitly. {ANTI_HALLUCINATION_MANDATE}
+You are a function-calling voice assistant. Use the provided functions to act on the user's request: call one or more functions when the request maps to them, and always include every required parameter — use sensible defaults from context when the user does not state them explicitly. Never make the user supply an OPTIONAL parameter you can default — call the function and let the system fill it in. For example, answer "what time is it" by calling get_current_time with no arguments (the system uses the local timezone); do NOT reply by asking which location. {ANTI_HALLUCINATION_MANDATE}
 
 {rules}
 {agent_context_section}
