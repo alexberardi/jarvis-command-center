@@ -48,6 +48,18 @@ class TestRuleConstants:
         assert "Extract parameters" in RULE_EXTRACT_PARAMS
         assert "clarification" in RULE_EXTRACT_PARAMS
 
+    def test_rule_extract_params_covers_optional_params(self):
+        # Decisiveness guardrail: the model must apply an OPTIONAL param's default
+        # instead of asking (e.g. "what time is it" → get_current_time with no
+        # location, not "what location?"). Locks the behavior-corpus fix.
+        lowered = RULE_EXTRACT_PARAMS.lower()
+        assert "optional" in lowered
+        assert "default" in lowered
+        # Clarification is restricted to REQUIRED params only.
+        assert "required" in lowered
+        # Bias toward acting rather than asking.
+        assert "acting" in lowered or "act" in lowered
+
     def test_rule_date_params(self):
         assert "resolved_datetimes" in RULE_DATE_PARAMS
         assert "MUST use ONLY" in RULE_DATE_PARAMS
@@ -405,7 +417,7 @@ class TestProviderOutputConsistency:
             "- Use the actual parameter names from the function schema above.",
             "- Pick the function whose described purpose matches the user's actual topic — match on meaning, not keyword overlap. Use get_command_utterance_examples if unsure.",
             '- For date parameters like resolved_datetimes, you MUST use ONLY these natural date keys as string values: "today", "tomorrow", "day_after_tomorrow", "yesterday", "this_weekend", "this_year", "next_week". NEVER output ISO dates (e.g. 2025-01-01T00:00:00Z) or timestamps — the downstream system resolves these keys to actual dates.',
-            "- Extract parameters from the user's words; only request clarification if required params are truly missing/ambiguous.",
+            "- Extract parameters from the user's words. Only request clarification if a REQUIRED parameter is truly missing or ambiguous — never ask about an OPTIONAL parameter; apply the tool's documented default instead (e.g. omit location for local time). Prefer acting on sensible defaults over asking.",
             '- User input comes from speech-to-text and may contain transcription errors. Interpret homophones and near-misses charitably (e.g., "watts" → "what\'s", "won" → "one", "whether" → "weather"). Proper nouns like team names, cities, and people are often misspelled — infer the intended name (e.g., "Ankeys" → "Yankees", "Albukirky" → "Albuquerque").',
         ]
         assert result == "\n".join(expected_lines)
@@ -434,7 +446,7 @@ class TestProviderOutputConsistency:
             "- Call ONE tool at a time to fulfill requests.",
             "- Pick the tool whose described purpose matches the user's actual topic — match on meaning, not keyword overlap. Use get_command_utterance_examples if unsure.",
             '- For date parameters like resolved_datetimes, you MUST use ONLY these natural date keys as string values: "today", "tomorrow", "day_after_tomorrow", "yesterday", "this_weekend", "this_year", "next_week". NEVER output ISO dates (e.g. 2025-01-01T00:00:00Z) or timestamps — the downstream system resolves these keys to actual dates.',
-            "- Extract parameters from the user's words; only request clarification if required params are truly missing/ambiguous.",
+            "- Extract parameters from the user's words. Only request clarification if a REQUIRED parameter is truly missing or ambiguous — never ask about an OPTIONAL parameter; apply the tool's documented default instead (e.g. omit location for local time). Prefer acting on sensible defaults over asking.",
             '- User input comes from speech-to-text and may contain transcription errors. Interpret homophones and near-misses charitably (e.g., "watts" → "what\'s", "won" → "one", "whether" → "weather"). Proper nouns like team names, cities, and people are often misspelled — infer the intended name (e.g., "Ankeys" → "Yankees", "Albukirky" → "Albuquerque").',
         ]
         assert result == "\n".join(expected_lines)

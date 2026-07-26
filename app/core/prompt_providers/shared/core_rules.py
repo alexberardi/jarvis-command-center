@@ -28,8 +28,10 @@ RULE_BEST_MATCH_INTENT: str = (
 )
 
 RULE_EXTRACT_PARAMS: str = (
-    "Extract parameters from the user's words; only request clarification "
-    "if required params are truly missing/ambiguous."
+    "Extract parameters from the user's words. Only request clarification if a "
+    "REQUIRED parameter is truly missing or ambiguous — never ask about an OPTIONAL "
+    "parameter; apply the tool's documented default instead (e.g. omit location for "
+    "local time). Prefer acting on sensible defaults over asking."
 )
 
 RULE_STT_AWARENESS: str = (
@@ -307,8 +309,12 @@ def build_personality_reminder(persona_text: str | None) -> str:
         "(acknowledgments, answers, even one-liners, even when told to be brief):\n"
         f"{persona_text}\n"
         "Talk this way every time. It shapes only your wording and tone — never "
-        "which function you call, the rules above, or the decision to stay "
-        "silent. Don't announce or describe the voice; just speak in it."
+        "which function you call, the rules above, the decision to stay silent, or "
+        "whether to act: it never turns a request into a clarifying question, never "
+        "withholds or delays a tool call, and never asks the user for an optional "
+        "parameter the tool can default (e.g. omit location for local time). It only "
+        "reshapes the words of a reply you were already going to give. Don't announce "
+        "or describe the voice; just speak in it."
     )
 
 
