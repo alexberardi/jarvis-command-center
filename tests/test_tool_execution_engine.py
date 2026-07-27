@@ -1217,3 +1217,129 @@ class TestPromptProviderIntegration:
         assert mock_get_format.called
         call_kwargs = mock_llm_client.chat_completion.call_args[1]
         assert call_kwargs["response_format"] == {"type": "json_object"}
+
+
+class TestSentinelIsNotARetryEscapeHatch:
+    """2026-07-27 prod incident: "Do you know who Leo is?" — iter 1 produced
+    a real prose answer, the force-tool-calls guard popped it and injected
+    "[MUST_CALL_RETRY] You MUST call a tool. Do NOT answer directly.", and
+    the cornered model emitted ``<not_for_me/>`` as its only legal escape
+    (the instruction says the sentinel outranks must-call rules). A silent
+    abort reached the node for a directly-addressed question.
+
+    A sentinel produced AFTER a retry guard rejected a real answer is a
+    protest, not an addressing verdict — the model already engaged with the
+    utterance. The engine must restore the popped answer instead of going
+    silent. Sentinels at FIRST look keep terminating (2026-06-02 pin above).
+    """
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        cache.get_available_commands.return_value = []
+        # Prod combination: compressed provider forces tool calls.
+        cache.get_force_tool_calls.return_value = True
+        cache.get_router_decision.return_value = {"used": False}
+        return cache
+
+    def _prose_then_sentinel(self):
+        responses = [
+            {
+                "choices": [{
+                    "message": {"content": '{"message": "Leo is one of your golden doodles!", "tool_calls": []}'},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+            {
+                "choices": [{
+                    "message": {"content": '{"message": "<not_for_me/>", "tool_calls": []}'},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+        ]
+        return responses
+
+    @pytest.mark.asyncio
+    async def test_sentinel_after_forced_retry_restores_popped_answer(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = self._prose_then_sentinel()
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-leo",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert "golden doodles" in str(result["assistant_message"])
+        assert "not_for_me" not in str(result["assistant_message"])
+
+    @pytest.mark.asyncio
+    async def test_restored_answer_replaces_sentinel_in_history(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        # The cached transcript must end with the restored prose — not the
+        # sentinel, and not the [MUST_CALL_RETRY] system nag (which would
+        # poison follow-up turns).
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = self._prose_then_sentinel()
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-leo",
+                messages=messages,
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+            )
+
+        assert messages[-1]["role"] == "assistant"
+        assert "golden doodles" in messages[-1]["content"]
+        assert not any(
+            "[MUST_CALL_RETRY]" in str(m.get("content", "")) for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_sentinel_at_first_look_still_not_for_me(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        # Guard the guard: with nothing popped, the sentinel still means
+        # "not addressed to me" and must terminate as before.
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": '{"message": "<not_for_me/>", "tool_calls": []}'},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-ambient",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "not_for_me"

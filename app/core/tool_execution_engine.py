@@ -546,6 +546,15 @@ class ToolExecutionEngine:
             )
             logger.info("Native tool calling enabled (%d tools)", len(native_tools or []))
 
+        # The prose answer most recently popped by a MUST_CALL_RETRY guard.
+        # If the cornered retry then emits <not_for_me/>, that sentinel is a
+        # protest ("I have no tool for this"), not an addressing verdict —
+        # the model already engaged with the utterance once. We restore this
+        # answer instead of silently aborting (2026-07-27 "who is Leo?"
+        # incident: good iter-1 answer popped → forced retry → sentinel →
+        # false silence on a directly-addressed question).
+        popped_prose: str | None = None
+
         # Main execution loop
         for iteration in range(max_iterations):
             logger.info(f"Tool loop iteration {iteration + 1}/{max_iterations}")
@@ -721,6 +730,42 @@ class ToolExecutionEngine:
             if contains_sentinel(raw_content) or contains_sentinel(
                 assistant_message if isinstance(assistant_message, str) else None
             ):
+                # A sentinel emitted AFTER a retry guard popped a real prose
+                # answer is not an addressing verdict — the model answered
+                # the utterance at iter 1, so "was this for me?" is settled.
+                # It's the model's only legal escape from "You MUST call a
+                # tool" when no tool fits. Restore the popped answer.
+                if popped_prose is not None:
+                    logger.info(
+                        "🛟 sentinel at iter %d is a retry escape, not an "
+                        "addressing verdict — restoring the popped answer",
+                        iteration + 1,
+                    )
+                    # Drop the sentinel + the [MUST_CALL_RETRY] nag from the
+                    # transcript so follow-up turns aren't poisoned by them.
+                    if messages and messages[-1].get("role") == "assistant":
+                        messages.pop()
+                    while (
+                        messages
+                        and messages[-1].get("role") == "system"
+                        and "[MUST_CALL_RETRY]" in str(messages[-1].get("content", ""))
+                    ):
+                        messages.pop()
+                    restored: str = popped_prose
+                    if self.prompt_provider:
+                        restored = self.prompt_provider.sanitize_text(restored)
+                    from app.core.tts_text import clean_for_tts
+                    restored = clean_for_tts(restored)
+                    messages.append({"role": "assistant", "content": restored})
+                    _log_usage(iteration + 1, "complete")
+                    result = {
+                        "stop_reason": "complete",
+                        "assistant_message": restored,
+                    }
+                    if reasoning_parts:
+                        result["reasoning"] = "\n\n".join(reasoning_parts)
+                    return result
+
                 logger.info(
                     "🚫 not_for_me sentinel detected at iter %d — short-circuit return",
                     iteration + 1,
@@ -743,6 +788,10 @@ class ToolExecutionEngine:
                 force_tools = conversation_cache.get_force_tool_calls(conversation_id)
                 retry_count = _must_call_retry_count()
                 if force_tools and retry_count < 2:
+                    # Stash the answer we're about to discard: if the retry
+                    # corners the model into <not_for_me/>, this comes back.
+                    if isinstance(assistant_message, str) and assistant_message.strip():
+                        popped_prose = assistant_message
                     messages.pop()  # Remove the assistant message with no tool call
                     retry_message = (
                         f"[MUST_CALL_RETRY] You MUST call a tool. Do NOT answer directly. "
@@ -763,6 +812,9 @@ class ToolExecutionEngine:
                 )
                 must_call_tools = _get_must_call_tools()
                 if must_call_tools and router_matched and retry_count < 1:
+                    # Same stash as the force-tools guard above.
+                    if isinstance(assistant_message, str) and assistant_message.strip():
+                        popped_prose = assistant_message
                     messages.pop()  # Remove the assistant message with no tool call
                     retry_message = (
                         "[MUST_CALL_RETRY] Direct answers are not allowed for this request. "
