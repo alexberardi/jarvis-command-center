@@ -1343,3 +1343,315 @@ class TestSentinelIsNotARetryEscapeHatch:
             )
 
         assert result["stop_reason"] == "not_for_me"
+
+
+class TestSentinelDoubleCheck:
+    """2026-07-27 round 2: "Can you tell me who Leo is?" — quiet-room wake,
+    speaker matched, profile block carrying the Leo memory IN CONTEXT — and
+    the no-think model still snap-emitted ``<not_for_me/>`` at iter 1 (it
+    pattern-matches "mentions a pet name" onto the different-addressee
+    rule). Prompt tuning keeps losing to new pattern-matches, so: when the
+    acoustics clearly say "directed" (caller passes sentinel_double_check),
+    a FIRST-look sentinel buys one reasoned second opinion (/think). A
+    confirmed sentinel still goes silent; an answer gets spoken.
+    """
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        cache.get_available_commands.return_value = []
+        cache.get_force_tool_calls.return_value = True
+        cache.get_router_decision.return_value = {"used": False}
+        return cache
+
+    def _responses(self, *contents):
+        return [
+            {
+                "choices": [{
+                    "message": {"content": c},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+            for c in contents
+        ]
+
+    @pytest.mark.asyncio
+    async def test_double_check_rescues_false_silence(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = self._responses(
+            '{"message": "<not_for_me/>", "tool_calls": []}',
+            '{"message": "Leo is one of your golden doodles!", "tool_calls": []}',
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-dc",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+                sentinel_double_check=True,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert "golden doodles" in str(result["assistant_message"])
+
+    @pytest.mark.asyncio
+    async def test_confirmed_sentinel_still_goes_silent(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = self._responses(
+            '{"message": "<not_for_me/>", "tool_calls": []}',
+            '{"message": "<not_for_me/>", "tool_calls": []}',
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-dc2",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+                sentinel_double_check=True,
+            )
+
+        assert result["stop_reason"] == "not_for_me"
+        # Exactly two calls: original + one reasoned re-check, never a loop.
+        assert mock_llm_client.chat_completion.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_double_check_message_uses_think_and_is_scrubbed(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        # The re-check must enable reasoning (/think soft switch) and must
+        # not linger in the transcript to poison follow-up turns.
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        # The engine passes ``messages`` by reference and later scrubs it in
+        # place, so snapshot what each LLM call actually saw at call time.
+        responses = self._responses(
+            '{"message": "<not_for_me/>", "tool_calls": []}',
+            '{"message": "Leo is your dog!", "tool_calls": []}',
+        )
+        seen_messages: list = []
+
+        async def _capture(*args, **kwargs):
+            seen_messages.append([dict(m) for m in kwargs["messages"]])
+            return responses[len(seen_messages) - 1]
+
+        mock_llm_client.chat_completion.side_effect = _capture
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-dc3",
+                messages=messages,
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+                sentinel_double_check=True,
+            )
+
+        # The second LLM call saw the /think re-check message...
+        dc_msgs = [
+            m for m in seen_messages[1]
+            if "[NOT_FOR_ME_DOUBLE_CHECK]" in str(m.get("content", ""))
+        ]
+        assert dc_msgs and dc_msgs[0]["content"].rstrip().endswith("/think")
+        # ...but the final transcript is clean of it (and of the sentinel).
+        assert not any(
+            "[NOT_FOR_ME_DOUBLE_CHECK]" in str(m.get("content", "")) for m in messages
+        )
+        assert not any(
+            "not_for_me" in str(m.get("content", "")) for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_rescued_answer_is_exempt_from_force_tools_guard(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        # After a double-check rescue, the prose answer must NOT be popped
+        # by the force-tool-calls guard (which would burn two more calls
+        # re-manufacturing the same corner). Exactly two calls total.
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = self._responses(
+            '{"message": "<not_for_me/>", "tool_calls": []}',
+            '{"message": "Leo is your dog!", "tool_calls": []}',
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-dc4",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+                sentinel_double_check=True,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert mock_llm_client.chat_completion.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_flag_off_keeps_first_look_short_circuit(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = self._responses(
+            '{"message": "<not_for_me/>", "tool_calls": []}',
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-dc5",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "not_for_me"
+        assert mock_llm_client.chat_completion.call_count == 1
+
+
+class TestSentinelDetectionIgnoresThinkBlocks:
+    """2026-07-27 prod validation run: the /think double-check pass QUOTED
+    the earlier <not_for_me/> while reasoning about it ("the system
+    initially responded with <not_for_me/>...") and the detector matched
+    inside the think block — manufacturing the very silence it was
+    re-checking. Sentinel detection must only see post-think content."""
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        cache.get_available_commands.return_value = []
+        cache.get_force_tool_calls.return_value = False
+        cache.get_router_decision.return_value = {"used": False}
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_sentinel_quoted_in_think_is_not_an_emission(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": (
+                    "<think>The system said <not_for_me/> but the user "
+                    "clearly asked me directly, so I should answer.</think>\n"
+                    '{"message": "Leo is your golden doodle!", "tool_calls": []}'
+                )},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-tq",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert "golden doodle" in str(result["assistant_message"])
+
+    @pytest.mark.asyncio
+    async def test_sentinel_after_closed_think_still_detected(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        # The real prod emission shape: empty think pair, then the bare
+        # sentinel. Stripping think blocks must not break detection.
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": "<think>\n\n</think>\n\n<not_for_me/>"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-tq2",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "not_for_me"
+
+    @pytest.mark.asyncio
+    async def test_double_check_iteration_gets_thinking_token_budget(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        # 256 tokens truncated the /think pass mid-reasoning in prod. The
+        # iteration right after the double-check injection needs a real
+        # reasoning budget; every other iteration keeps the tight cap.
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        responses = [
+            {
+                "choices": [{
+                    "message": {"content": '{"message": "<not_for_me/>", "tool_calls": []}'},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+            {
+                "choices": [{
+                    "message": {"content": '{"message": "Leo is your dog!", "tool_calls": []}'},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+        ]
+        max_tokens_seen: list = []
+
+        async def _capture(*args, **kwargs):
+            max_tokens_seen.append(kwargs.get("max_tokens"))
+            return responses[len(max_tokens_seen) - 1]
+
+        mock_llm_client.chat_completion.side_effect = _capture
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-tq3",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "set_reminder"}}],
+                max_iterations=3,
+                sentinel_double_check=True,
+            )
+
+        assert max_tokens_seen[0] == 256
+        assert max_tokens_seen[1] >= 1024

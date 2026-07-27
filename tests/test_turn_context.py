@@ -158,3 +158,45 @@ class TestInstructionIntegration:
         # exchange — the model must not read it as a failure to help.
         body = NOT_FOR_ME_INSTRUCTION.lower()
         assert "exchange" in body
+
+
+class TestShouldDoubleCheckSentinel:
+    """Gate for the engine's sentinel double-check: only turns whose
+    acoustics clearly say "directed at Jarvis" qualify — a quiet-room wake
+    or a high-confidence OWW fire. Ambient and middle-band turns don't,
+    so genuine overheard-speech rejections stay single-pass."""
+
+    def test_quiet_room_wake_qualifies(self):
+        from app.core.turn_context import should_double_check_sentinel
+
+        # The 2026-07-27 "who is Leo?" failure: pre_wake=0.00, snap sentinel.
+        assert should_double_check_sentinel(None, None, None, 0.0) is True
+
+    def test_confident_explicit_wake_qualifies(self):
+        from app.core.turn_context import should_double_check_sentinel
+
+        assert should_double_check_sentinel("wake", 0.95, None, None) is True
+
+    def test_middle_band_does_not_qualify(self):
+        from app.core.turn_context import should_double_check_sentinel
+
+        # 2.24s pre-wake speech (the correctly-rejected "We got paid last
+        # year in August") — ambiguous acoustics, no second pass.
+        assert should_double_check_sentinel(None, None, None, 2.24) is False
+
+    def test_low_confidence_wake_does_not_qualify(self):
+        from app.core.turn_context import should_double_check_sentinel
+
+        assert should_double_check_sentinel("wake", 0.4, None, None) is False
+
+    def test_follow_up_never_qualifies(self):
+        from app.core.turn_context import should_double_check_sentinel
+
+        # In the follow-up window silence is the designed ending — never
+        # argue the model out of it.
+        assert should_double_check_sentinel("follow_up", None, 1, 0.0) is False
+
+    def test_no_signal_does_not_qualify(self):
+        from app.core.turn_context import should_double_check_sentinel
+
+        assert should_double_check_sentinel(None, None, None, None) is False

@@ -150,3 +150,15 @@ class TestProvidersDoNotInjectInstruction:
             f"NOT_FOR_ME_INSTRUCTION must only live in core_rules.py + "
             f"conversation_handler. Found in: {offenders}"
         )
+
+
+class TestAboutVsToDistinction:
+    """2026-07-27: "who is Leo?" was silenced because "Leo" is a pet name
+    and rule 1 lists pet names as different-addressee markers. The rule
+    must say explicitly: that means speech TO the person, and speech
+    ABOUT them is a question for Jarvis."""
+
+    def test_rule_distinguishes_about_from_to(self):
+        body = NOT_FOR_ME_INSTRUCTION
+        assert "ABOUT a person" in body
+        assert "TO that person" in body

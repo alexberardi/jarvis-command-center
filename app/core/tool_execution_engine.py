@@ -16,6 +16,21 @@ from typing import Any, Dict, List, Optional
 
 from app.core.conversation_cache import conversation_cache
 from app.core.not_for_me import contains_sentinel
+
+# Reasoning traces must never count as sentinel emissions: the /think
+# double-check pass QUOTES the earlier <not_for_me/> while reasoning about
+# it (2026-07-27 validation run), and matching inside the think block
+# manufactured the very silence being re-checked. An unclosed block
+# (finish_reason=length truncation) is stripped to end-of-text.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.DOTALL | re.IGNORECASE)
+
+
+def _outside_think(text: str | None) -> str | None:
+    """Return ``text`` with <think>...</think> regions removed (an unclosed
+    trailing block is removed to end-of-text). None passes through."""
+    if not text:
+        return text
+    return _THINK_BLOCK_RE.sub("", text)
 from app.services.settings_service import get_settings_service
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.tool_builder import ToolBuilder
@@ -131,6 +146,7 @@ class ToolExecutionEngine:
         max_iterations: int = 10,
         user_utterance: Optional[str] = None,
         agent_context_chars: int = 0,
+        sentinel_double_check: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute the tool loop: call LLM, execute server tools, repeat until done.
@@ -554,11 +570,21 @@ class ToolExecutionEngine:
         # incident: good iter-1 answer popped → forced retry → sentinel →
         # false silence on a directly-addressed question).
         popped_prose: str | None = None
+        # One reasoned second opinion per turn for first-look sentinels on
+        # clearly-directed wakes (see sentinel_double_check).
+        double_checked: bool = False
+        _DC_TAG = "[NOT_FOR_ME_DOUBLE_CHECK]"
+        # Per-iteration completion budget. The double-check pass runs with
+        # /think and needs real reasoning room — 256 truncated it
+        # mid-thought in the 2026-07-27 validation run (finish=length).
+        next_max_tokens: int = 256
 
         # Main execution loop
         for iteration in range(max_iterations):
             logger.info(f"Tool loop iteration {iteration + 1}/{max_iterations}")
             prompt_snapshot = [dict(m) for m in (messages or [])]
+            iter_max_tokens = next_max_tokens
+            next_max_tokens = 256
 
             # Call LLM — dual path: native tools vs text-based
             try:
@@ -573,7 +599,7 @@ class ToolExecutionEngine:
                             tool_choice="auto",
                             include_date_context=True,
                             adapter_settings=adapter_settings,
-                            max_tokens=256,
+                            max_tokens=iter_max_tokens,
                             temperature=0.4,
                         )
                     else:
@@ -590,7 +616,7 @@ class ToolExecutionEngine:
                             response_format=response_format,
                             include_date_context=True,
                             adapter_settings=adapter_settings,
-                            max_tokens=256,
+                            max_tokens=iter_max_tokens,
                             temperature=0.4,
                         )
                 logger.debug(f"LLM call took {(_time.time()-_llm_start)*1000:.0f}ms")
@@ -718,6 +744,16 @@ class ToolExecutionEngine:
                 assistant_msg["tool_calls"] = tool_calls
             messages.append(assistant_msg)
 
+            # The double-check nag is a one-shot steering message — scrub it
+            # from the transcript as soon as the model has replied to it so
+            # it can't poison follow-up turns (same hygiene as
+            # [MUST_CALL_RETRY] removal on restore).
+            if double_checked:
+                messages[:] = [
+                    m for m in messages
+                    if _DC_TAG not in str(m.get("content", ""))
+                ]
+
             # ``<not_for_me/>`` short-circuit. Must run BEFORE the
             # force-tool-calls / must-call retry guards below: those treat
             # ``finish_reason="stop"`` with no tool call as "the model
@@ -727,8 +763,9 @@ class ToolExecutionEngine:
             # <not_for_me/> → "It's okay. How can I assist you?" reach TTS
             # in the 2026-06-02 prod incident. The sentinel is a valid
             # terminal action and outranks every retry guard.
-            if contains_sentinel(raw_content) or contains_sentinel(
-                assistant_message if isinstance(assistant_message, str) else None
+            if contains_sentinel(_outside_think(raw_content)) or contains_sentinel(
+                _outside_think(assistant_message)
+                if isinstance(assistant_message, str) else None
             ):
                 # A sentinel emitted AFTER a retry guard popped a real prose
                 # answer is not an addressing verdict — the model answered
@@ -766,6 +803,44 @@ class ToolExecutionEngine:
                         result["reasoning"] = "\n\n".join(reasoning_parts)
                     return result
 
+                # First-look sentinel on a turn whose acoustics clearly say
+                # "directed at Jarvis" (quiet-room wake / high OWW score):
+                # buy ONE reasoned second opinion before going silent. The
+                # no-think model pattern-matches its way into false silences
+                # ("who is Leo?" → "Leo is a pet name" → different-addressee
+                # rule); /think is the antidote, paid only on this rare path.
+                if (
+                    sentinel_double_check
+                    and not double_checked
+                    and iteration + 1 < max_iterations
+                ):
+                    double_checked = True
+                    messages.pop()  # drop the sentinel reply
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"{_DC_TAG} You dismissed that utterance with "
+                            "<not_for_me/>, but the wake evidence says it was "
+                            "directed at you (wake word fired; the room was "
+                            "quiet). Re-read it and reason it through. "
+                            "Remember: speech ABOUT a person or pet by name — "
+                            "\"who is Leo?\", \"where's mom?\" — is a question "
+                            "FOR you; answer it from the User Profile or the "
+                            "recall tool. Only if you still conclude the "
+                            "speech was not aimed at you, reply with "
+                            "<not_for_me/> alone again. Otherwise answer "
+                            "normally or call the right tool. /think"
+                        ),
+                    })
+                    # The reasoning pass needs room to think AND answer.
+                    next_max_tokens = 1536
+                    logger.info(
+                        "🛟 first-look sentinel on a clearly-directed turn — "
+                        "buying a /think second opinion (iter %d)",
+                        iteration + 1,
+                    )
+                    continue
+
                 logger.info(
                     "🚫 not_for_me sentinel detected at iter %d — short-circuit return",
                     iteration + 1,
@@ -787,7 +862,10 @@ class ToolExecutionEngine:
                 # Allows up to 2 retries before giving up.
                 force_tools = conversation_cache.get_force_tool_calls(conversation_id)
                 retry_count = _must_call_retry_count()
-                if force_tools and retry_count < 2:
+                # A prose answer produced by the double-check rescue is the
+                # rescue — never feed it back into the must-call machinery
+                # that manufactured the corner in the first place.
+                if force_tools and retry_count < 2 and not double_checked:
                     # Stash the answer we're about to discard: if the retry
                     # corners the model into <not_for_me/>, this comes back.
                     if isinstance(assistant_message, str) and assistant_message.strip():
@@ -811,7 +889,7 @@ class ToolExecutionEngine:
                     and router_decision.get("used", False)
                 )
                 must_call_tools = _get_must_call_tools()
-                if must_call_tools and router_matched and retry_count < 1:
+                if must_call_tools and router_matched and retry_count < 1 and not double_checked:
                     # Same stash as the force-tools guard above.
                     if isinstance(assistant_message, str) and assistant_message.strip():
                         popped_prose = assistant_message
