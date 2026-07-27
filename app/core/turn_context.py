@@ -27,6 +27,8 @@ wake; with neither signal we emit nothing and behavior is unchanged.
 
 from __future__ import annotations
 
+from app.core.direction_hint import QUIET_THRESHOLD_S
+
 # OWW detection scores at or above this are treated as a clean, deliberate
 # wake ("the user said your wake word"). Below it, the wake may be a false
 # fire and the transcript itself has to carry the addressing evidence.
@@ -73,6 +75,39 @@ def build_turn_hint(
     if pre_wake_speech_seconds is not None:
         return _wake_hint(None)
     return None
+
+
+def should_double_check_sentinel(
+    turn_source: str | None,
+    wake_confidence: float | None = None,
+    follow_up_iteration: int | None = None,
+    pre_wake_speech_seconds: float | None = None,
+) -> bool:
+    """Should a first-look ``<not_for_me/>`` buy a reasoned second opinion?
+
+    Only when the acoustics clearly say "directed at Jarvis" — a
+    quiet-room wake or a high-confidence OWW fire. On those turns a snap
+    sentinel from the no-think model is more likely a pattern-match miss
+    (2026-07-27: "who is Leo?" silenced because "Leo" is a pet name) than
+    a real addressing verdict, and one /think re-check is cheap next to a
+    false silence. Ambient and middle-band turns stay single-pass so
+    genuine overheard-speech rejections aren't argued with, and the
+    follow-up window never qualifies — silence is its designed ending.
+    """
+    if turn_source == "follow_up":
+        return False
+    if (
+        turn_source == "wake"
+        and wake_confidence is not None
+        and wake_confidence >= WAKE_CONFIDENT_THRESHOLD
+    ):
+        return True
+    # Quiet room right before the wake — the direction hint's "strong
+    # signal this is directed at you" band.
+    return (
+        pre_wake_speech_seconds is not None
+        and pre_wake_speech_seconds < QUIET_THRESHOLD_S
+    )
 
 
 def _wake_hint(wake_confidence: float | None) -> str:

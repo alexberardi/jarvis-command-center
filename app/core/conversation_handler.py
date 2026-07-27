@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Set
 from app.core.conversation_cache import conversation_cache
 from app.core.direction_hint import build_direction_hint
 from app.core.affect_hint import build_affect_hint
-from app.core.turn_context import build_turn_hint
+from app.core.turn_context import build_turn_hint, should_double_check_sentinel
 from app.core.exchange_complete import apply_to_result as apply_exchange_complete
 from app.core.errors import ConversationPreconditionError
 from app.core.not_for_me import contains_sentinel
@@ -749,6 +749,12 @@ class ConversationHandler:
                 user_utterance=voice_command,
                 max_iterations=max_iters,
                 agent_context_chars=len(agent_context) if agent_context else 0,
+                sentinel_double_check=should_double_check_sentinel(
+                    (turn_context or {}).get("source"),
+                    wake_confidence=(turn_context or {}).get("wake_confidence"),
+                    follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
+                    pre_wake_speech_seconds=pre_wake_speech_seconds,
+                ),
             )
 
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Tool execution loop completed")
