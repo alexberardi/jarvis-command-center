@@ -200,3 +200,27 @@ class TestShouldDoubleCheckSentinel:
         from app.core.turn_context import should_double_check_sentinel
 
         assert should_double_check_sentinel(None, None, None, None) is False
+
+
+class TestChatSource:
+    """Typed app messages: no microphone in the loop, so "overheard" is
+    impossible by construction. 2026-07-27: "Who is Leo" typed in the
+    mobile app was snap-sentineled — mobile chat sent no provenance at
+    all, so no hint fired and no double-check gate opened."""
+
+    def test_chat_hint_says_typed_and_kills_not_for_me(self):
+        hint = build_turn_hint("chat")
+        assert hint is not None
+        assert hint.startswith("[turn context:")
+        assert "typed" in hint.lower()
+        assert "<not_for_me/>" in hint
+
+    def test_chat_always_qualifies_for_double_check(self):
+        from app.core.turn_context import should_double_check_sentinel
+
+        assert should_double_check_sentinel("chat") is True
+
+    def test_chat_makes_no_acoustic_claims(self):
+        hint = build_turn_hint("chat")
+        assert "wake" not in hint.lower()
+        assert "confidence" not in hint.lower()
