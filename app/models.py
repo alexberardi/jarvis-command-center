@@ -995,3 +995,44 @@ class PhoneContact(Base):
     __table_args__ = (
         UniqueConstraint('household_id', 'normalized_name', name='uq_phone_contact_household_name'),
     )
+
+
+class ErrandPlan(Base):
+    """A drafted, reviewable errand plan (Errand Runner POC — errand-runner PRD §2-§3).
+
+    "LLM proposes, card disposes": the background planner drafts routine-shaped
+    steps from a natural-language goal, we persist them here as a DRAFT, and the
+    plan card is the trust checkpoint — nothing runs until the user taps Run. CC
+    owns this row exclusively; the node holds no errand state (PRD §2.4). The
+    lifecycle mirrors the phone-call state machine (draft → confirmed → running →
+    done | failed, or cancelled/expired), with `transition()` semantics owned by
+    the callback layer rather than the DB.
+
+    JSON-bearing columns are Text (project convention — see Routine.steps):
+    - steps: JSON array of routine-shaped {command, args:{k:v}, label} dicts (the
+      shape RoutineCommand / execute_routine_on_node consume). Produced by
+      errand_planner.plan_errand(); the planner already validates every command
+      against its menu, so hallucinated steps never reach this column.
+
+    `routine_slug` links to the TRANSIENT routine created at draft time so the
+    target node pre-pulls the steps (the node executes routines by slug). `revision`
+    backs the plan card's stale-approval guard: an approve callback carrying an old
+    revision is rejected, exactly like the phone card refuses a non-draft session.
+    """
+    __tablename__ = 'errand_plans'
+
+    id = Column(String(40), primary_key=True, default=lambda: f"pl_{uuid4().hex}")
+    household_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True)          # initiating speaker; completion-notify target
+    node_id = Column(String, nullable=True)           # target node the transient routine dispatches to
+    goal = Column(Text, nullable=False)               # the user's natural-language errand goal
+    summary = Column(Text, nullable=True)             # planner's one-line plain-English plan
+    steps = Column(Text, nullable=False, default="[]")  # JSON array of routine-shaped steps
+    routine_slug = Column(String(255), nullable=True)   # transient routine created for execution
+    state = Column(String(16), nullable=False, default="draft", index=True)  # draft|confirmed|running|done|failed|cancelled|expired
+    revision = Column(Integer, nullable=False, default=1)  # bumps on edit; stale-approval guard
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    confirmed_at = Column(DateTime, nullable=True)    # when the user tapped Run
+    expires_at = Column(DateTime, nullable=True)      # draft TTL
