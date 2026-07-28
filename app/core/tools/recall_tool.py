@@ -79,6 +79,14 @@ class RecallTool(IServerTool):
         if not household_id:
             return {"error": "no_household", "message": "No household context available"}
 
+        # "general" is the model's "no category opinion" — it reaches for it
+        # whenever the question doesn't map to preference/fact/note (it's in
+        # the enum, so it looks legal). Treating it as a literal filter made
+        # recall("Leo", category="general") miss the fact-categorized pet
+        # memory on BOTH search paths (2026-07-27 prod). It's a wildcard.
+        if category == "general":
+            category = None
+
         # Get settings for recall
         limit, threshold = self._get_recall_settings()
 
