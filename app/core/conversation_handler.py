@@ -314,6 +314,10 @@ class ConversationHandler:
             # hallucinated device control for "Call Tony's Pizzeria"); the
             # tool's execute() speaks an honest refusal when disabled.
             _safe_tool_names.append("make_phone_call")
+            # run_errand: the voice-inline errand launcher. A safe one-shot — it
+            # fires a fire-and-forget plan draft and returns a spoken ack; the
+            # errand only runs after the user taps Run on the plan card.
+            _safe_tool_names.append("run_errand")
             # Outbound-web tools (quick_search live lookups, deep_research) are
             # gated on the per-household web_search.enabled setting (default
             # OFF). When disabled they never enter the tool list — and because

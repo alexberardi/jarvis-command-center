@@ -242,6 +242,64 @@ async def create_errand_plan(
     return row
 
 
+def _post_couldnt_plan_card(
+    household_id: str, goal: str, user_id: int | None, summary: str, body: str
+) -> None:
+    """Best-effort 'couldn't plan that' card so a run_errand user isn't left
+    hanging after the spoken ack. Never raises."""
+    try:
+        post_inbox_item_sync(
+            household_id=household_id,
+            title="🗒️ Couldn't plan that errand",
+            summary=summary,
+            body=body,
+            category=ERRAND_PLAN_CATEGORY,
+            metadata={"household_id": household_id},
+            user_id=user_id,
+            target_type="user" if user_id is not None else "household",
+            push=True,
+        )
+    except Exception:  # noqa: BLE001 — the failure card is itself best-effort
+        logger.warning("Couldn't-plan card failed for goal=%r", goal)
+
+
+async def draft_errand_plan_detached(
+    household_id: str, node_id: str, goal: str, user_id: int | None = None
+) -> None:
+    """Draft an errand plan on a FRESH session — for fire-and-forget callers.
+
+    The ``run_errand`` voice tool fires this detached (it has no request-scoped DB
+    session, and one would be closed by the time the task runs — cf. phone's
+    ``create_call_plan`` opening its own session). Because the tool already spoke
+    "I'll send it to your phone," ANY failure posts a card so the user is never
+    left hanging — the phone stack's never-vanish rule (create_call_plan:543).
+    """
+    from app.db import get_session_local
+
+    db = get_session_local()()
+    try:
+        await create_errand_plan(db, household_id, node_id, goal, user_id=user_id)
+    except ValueError as e:
+        # The planner couldn't turn the goal into usable steps → rephrase hint.
+        logger.info("Errand planning produced no usable plan for goal=%r: %s", goal, e)
+        _post_couldnt_plan_card(
+            household_id, goal, user_id,
+            summary=f'I couldn\'t turn "{goal}" into a plan I can run.',
+            body=f'I couldn\'t turn "{goal}" into a plan I can run — try rephrasing it.',
+        )
+    except Exception:  # noqa: BLE001 — infra failure (planner/LLM proxy down, DB error)
+        # The user was already told a card is coming; surface an honest "try
+        # again" card rather than vanishing.
+        logger.exception("Detached errand draft failed for goal=%r", goal)
+        _post_couldnt_plan_card(
+            household_id, goal, user_id,
+            summary="I hit a snag planning that errand.",
+            body="I hit a snag putting that errand together — try again in a bit.",
+        )
+    finally:
+        db.close()
+
+
 # ── Server-plane callbacks: the plan card's Run / Cancel taps ─────────────────
 #
 # Registered under (command="errand", callback=...) so the card's

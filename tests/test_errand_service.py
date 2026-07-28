@@ -390,3 +390,42 @@ def test_register_errand_callbacks_registers_both_pairs():
     pairs = registered_server_callbacks()
     assert ("errand", "approve_errand_plan") in pairs
     assert ("errand", "discard_errand_plan") in pairs
+
+
+# ── chunk 6: detached draft (for the run_errand voice tool) ──────────────────
+
+
+def test_draft_detached_opens_own_session_and_drafts():
+    db = MagicMock()
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch.object(errand_service, "create_errand_plan", new=AsyncMock()) as create:
+        asyncio.run(errand_service.draft_errand_plan_detached("hh-1", "node-1", "weather", 7))
+    create.assert_awaited_once_with(db, "hh-1", "node-1", "weather", user_id=7)
+    db.close.assert_called_once()  # own session, always closed
+
+
+def test_draft_detached_posts_couldnt_plan_card_on_valueerror():
+    db = MagicMock()
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch.object(errand_service, "create_errand_plan",
+                      new=AsyncMock(side_effect=ValueError("no usable steps"))), \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        asyncio.run(errand_service.draft_errand_plan_detached("hh-1", "node-1", "gibberish", 7))
+    card.assert_called_once()  # user isn't left hanging after the spoken ack
+    assert card.call_args.kwargs["household_id"] == "hh-1"
+    assert card.call_args.kwargs["user_id"] == 7
+    db.close.assert_called_once()
+
+
+def test_draft_detached_posts_card_on_infra_failure():
+    """A non-ValueError (LLM proxy down, DB error) must ALSO surface a card —
+    never vanish after the spoken ack."""
+    db = MagicMock()
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch.object(errand_service, "create_errand_plan",
+                      new=AsyncMock(side_effect=RuntimeError("planner proxy unreachable"))), \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        asyncio.run(errand_service.draft_errand_plan_detached("hh-1", "node-1", "weather", 7))
+    card.assert_called_once()  # infra failure still posts a card
+    assert "snag" in card.call_args.kwargs["summary"].lower()
+    db.close.assert_called_once()
