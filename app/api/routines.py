@@ -454,18 +454,81 @@ def _record_execution(
         db.rollback()
 
 
+# Status → (icon, headline) for the completion card. Honest on EVERY terminal
+# state: a routine you didn't trigger (scheduled/background) must tell you it
+# finished — including when it timed out or partly failed — never stay silent.
+_ROUTINE_STATUS_CARD = {
+    "success": ("✅", "finished"),
+    "partial": ("⚠️", "finished with issues"),
+    "timeout": ("⏱️", "didn't finish"),
+    "failed": ("⚠️", "couldn't run"),
+}
+
+
+def _notify_routine_complete(
+    routine: Routine,
+    household_id: str,
+    result: dict,
+    user_id: int | None = None,
+) -> None:
+    """Post ONE completion card + push for a detached routine run.
+
+    Non-fatal by construction — a notification failure must never abort or fail
+    the run (mirrors phone ``post_outcome_card``). Targets the triggering user
+    when known, else the whole household (a scheduled run has no owner).
+    """
+    try:
+        from app.services.inbox_notification_service import post_inbox_item_sync
+
+        status = str(result.get("status") or "failed")
+        icon, headline = _ROUTINE_STATUS_CARD.get(status, _ROUTINE_STATUS_CARD["failed"])
+        message = result.get("message")
+        if status in ("success", "partial") and message:
+            summary = message
+        elif status == "timeout":
+            summary = "The node didn't respond in time."
+        else:
+            summary = message or result.get("error") or "The routine did not complete."
+
+        post_inbox_item_sync(
+            household_id=household_id,
+            title=f"{icon} '{routine.name}' {headline}",
+            summary=summary,
+            body=summary,
+            category="routine",
+            metadata={
+                "household_id": household_id,
+                "routine_id": routine.id,
+                "status": status,
+            },
+            user_id=user_id,
+            target_type="user" if user_id is not None else "household",
+            push=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — a notification must never fail the run
+        logger.warning("Routine completion notify failed for '%s': %s", routine.slug, exc)
+
+
 async def execute_routine_on_node(
     db: Session,
     household_id: str,
     routine: Routine,
     node_id: str,
     trigger: str,
+    *,
+    notify_on_complete: bool = False,
+    notify_user_id: int | None = None,
 ) -> dict:
     """Publish a 'routine' command to a node, await its result, record the run.
 
     The whole routine runs through the node's RoutineCommand engine (one command,
     not N tool_calls) so cross-step aggregation + the single composed reply are
     preserved. Returns {success, status, message, passed, failed}.
+
+    When ``notify_on_complete`` is set, pushes one completion card on every
+    terminal state (success/partial/timeout/failed) — used by detached runs
+    (scheduler, background voice) where no caller is waiting on the return.
+    ``notify_user_id`` targets that user; ``None`` fans out to the household.
     """
     from app.services.node_command_service import get_node_command_service
 
@@ -486,12 +549,18 @@ async def execute_routine_on_node(
     except Exception as exc:
         logger.error("Run routine publish failed for %s on %s: %s", slug, node_id, exc)
         _record_execution(db, routine, household_id, node_id, trigger, "failed", 0, 0, str(exc), started)
-        return {"success": False, "status": "failed", "message": None, "passed": 0, "failed": 0, "error": str(exc)}
+        result = {"success": False, "status": "failed", "message": None, "passed": 0, "failed": 0, "error": str(exc)}
+        if notify_on_complete:
+            _notify_routine_complete(routine, household_id, result, notify_user_id)
+        return result
 
     result = await _wait_for_result_file(request_id)
     if result is None:
         _record_execution(db, routine, household_id, node_id, trigger, "timeout", 0, 0, "node did not respond", started)
-        return {"success": False, "status": "timeout", "message": None, "passed": 0, "failed": 0}
+        result = {"success": False, "status": "timeout", "message": None, "passed": 0, "failed": 0}
+        if notify_on_complete:
+            _notify_routine_complete(routine, household_id, result, notify_user_id)
+        return result
 
     output = result.get("output", {}) or {}
     passed = int(output.get("passed", 0) or 0)
@@ -500,7 +569,10 @@ async def execute_routine_on_node(
     message = output.get("message")
     status = "failed" if not success else ("partial" if failed > 0 else "success")
     _record_execution(db, routine, household_id, node_id, trigger, status, passed, failed, output.get("error"), started)
-    return {"success": success, "status": status, "message": message, "passed": passed, "failed": failed}
+    result = {"success": success, "status": status, "message": message, "passed": passed, "failed": failed}
+    if notify_on_complete:
+        _notify_routine_complete(routine, household_id, result, notify_user_id)
+    return result
 
 
 @router.post("/households/{household_id}/routines/{routine_id}/run-now")
@@ -520,3 +592,77 @@ async def run_routine_now(
             detail="No node specified and no household primary node configured",
         )
     return await execute_routine_on_node(db, household_id, routine, node_id, "run_now")
+
+
+class RunBackgroundRequest(BaseModel):
+    routine_slug: str
+    speaker_user_id: int | None = None
+
+
+async def _run_routine_background_task(
+    household_id: str, routine_id: str, node_id: str, speaker_user_id: int | None
+) -> None:
+    """Detached background routine run (voice "… in the background").
+
+    Owns its OWN DB session — the request's session is closed by the time this
+    task runs — and always lands a completion card, even if the run raises
+    (anti-vanishing, mirroring the phone-call fire-and-forget rule).
+    """
+    from app.db import get_session_local
+
+    db = get_session_local()()
+    try:
+        routine = db.query(Routine).filter(Routine.id == routine_id).first()
+        if routine is None:
+            return
+        await execute_routine_on_node(
+            db, household_id, routine, node_id, "background",
+            notify_on_complete=True, notify_user_id=speaker_user_id,
+        )
+    except Exception:
+        logger.exception("Background routine run failed for %s", routine_id)
+        try:
+            routine = db.query(Routine).filter(Routine.id == routine_id).first()
+            if routine is not None:
+                _notify_routine_complete(
+                    routine, household_id,
+                    {"status": "failed", "message": None, "error": "the routine could not be started"},
+                    speaker_user_id,
+                )
+        except Exception:  # noqa: BLE001 — the failure card is best-effort
+            logger.warning("Background routine failure-card also failed for %s", routine_id)
+    finally:
+        db.close()
+
+
+@router.post("/routines/run-background")
+async def run_routine_in_background(
+    body: RunBackgroundRequest,
+    node_ctx: NodeContextProvider = Depends(verify_api_key),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Voice "run <routine> in the background" → dispatch a detached run on the
+    calling node and return an instant ack; the completion card lands when done.
+
+    Node-authenticated: household + executing node come from the validated node
+    row, not the payload. The speaker (for notification targeting) is passed by
+    the node; absent → the whole household is notified.
+    """
+    household_id = node_ctx.household_id
+    node = getattr(node_ctx, "node", None)
+    if not household_id or node is None:
+        raise HTTPException(status_code=403, detail="Node is not associated with a household")
+
+    routine = (
+        db.query(Routine)
+        .filter(Routine.slug == body.routine_slug, Routine.household_id == household_id)
+        .first()
+    )
+    if routine is None:
+        raise HTTPException(status_code=404, detail=f"Routine '{body.routine_slug}' not found")
+
+    asyncio.create_task(
+        _run_routine_background_task(household_id, routine.id, node.node_id, body.speaker_user_id)
+    )
+    logger.info("Dispatched background routine '%s' on node %s", routine.slug, node.node_id)
+    return {"status": "dispatched", "routine": routine.name}
