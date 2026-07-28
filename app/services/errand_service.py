@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -29,6 +30,11 @@ from sqlalchemy.orm import Session
 from app.models import ErrandPlan, Routine
 from app.services.errand_planner import plan_errand
 from app.services.inbox_notification_service import post_inbox_item_sync
+from app.services.server_callback_registry import (
+    ServerCallbackContext,
+    ServerCallbackResult,
+    register_server_callback,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -234,3 +240,170 @@ async def create_errand_plan(
         row.id, household_id, node_id, slug, len(node_steps),
     )
     return row
+
+
+# ── Server-plane callbacks: the plan card's Run / Cancel taps ─────────────────
+#
+# Registered under (command="errand", callback=...) so the card's
+# interactive_elements (target:"server") route here via server_callback_registry
+# / app.api.callbacks. Each handler is self-contained (own DB session, no shared
+# state) — the callback dispatcher runs them in a background task.
+
+
+def _delete_transient_routine(db: Session, household_id: str, slug: str | None) -> None:
+    """Remove the single-use transient routine and nudge nodes to drop it.
+
+    Best-effort: cleanup failure must never fail the callback. Deleting the row
+    + re-nudging keeps errand execution-vehicle routines from accumulating in the
+    household routine set (the deferred-cleanup finding from chunk 3's review).
+    """
+    if not slug:
+        return
+    try:
+        deleted = (
+            db.query(Routine)
+            .filter(Routine.slug == slug, Routine.household_id == household_id)
+            .delete()
+        )
+        db.commit()
+        if deleted:
+            from app.api.routines import publish_routines_sync
+
+            publish_routines_sync(household_id, db)
+    except Exception:  # noqa: BLE001 — cleanup must never fail the callback
+        logger.exception("Failed to delete transient errand routine %s", slug)
+        db.rollback()
+
+
+def _revisions_match(card_revision: Any, row_revision: int) -> bool:
+    """True unless the card carries a definitively-older revision.
+
+    A missing/unparseable revision falls through to the state guard rather than
+    hard-rejecting — the JSON round-trip through the mobile client may stringify
+    the int, so compare leniently.
+    """
+    try:
+        return int(card_revision) == row_revision
+    except (TypeError, ValueError):
+        return True
+
+
+async def _handle_approve_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackResult:
+    """Run tap → execute the drafted errand on its node.
+
+    Reuses ``execute_routine_on_node(notify_on_complete=True)`` (the fc936a5
+    detached-run path), which posts the completion card itself — so this handler
+    returns success WITHOUT a second inbox card. Single-use + stale-card guarded.
+    """
+    from app.api.routines import execute_routine_on_node
+    from app.db import get_session_local
+
+    db = get_session_local()()
+    try:
+        plan_id = ctx.data.get("plan_id")
+        if not plan_id:
+            return ServerCallbackResult(success=False, error="Missing plan_id")
+        row = (
+            db.query(ErrandPlan)
+            .filter(ErrandPlan.id == plan_id, ErrandPlan.household_id == ctx.household_id)
+            .first()
+        )
+        if row is None:
+            return ServerCallbackResult(success=False, error="Errand plan not found")
+
+        # Single-use: a second tap on an already-run/cancelled plan is a friendly
+        # no-op card, not an error (mirrors the phone confirm handler).
+        if row.state != "draft":
+            return ServerCallbackResult(
+                success=True,
+                context_data={"inbox": {
+                    "title": "Errand already handled",
+                    "summary": f"This errand is already {row.state}.",
+                    "metadata": {"household_id": ctx.household_id},
+                }},
+            )
+        if not _revisions_match(ctx.data.get("revision"), row.revision):
+            return ServerCallbackResult(
+                success=False,
+                error="This plan was updated — open the latest card to run it.",
+            )
+
+        routine = (
+            db.query(Routine)
+            .filter(Routine.slug == row.routine_slug, Routine.household_id == ctx.household_id)
+            .first()
+        )
+        if routine is None:
+            row.state = "failed"
+            row.error = "transient routine missing"
+            db.commit()
+            return ServerCallbackResult(success=False, error="Errand steps not found — re-plan it.")
+
+        row.state = "running"
+        row.confirmed_at = datetime.utcnow()
+        db.commit()
+
+        # The completion card is posted by execute_routine_on_node itself
+        # (notify_on_complete), so we return no context_data['inbox'] on success
+        # (avoids a double card). A RAISED failure must still leave a terminal
+        # state — never a stuck 'running' (anti-vanishing, cf. phone enqueue_dial).
+        try:
+            result = await execute_routine_on_node(
+                db, ctx.household_id, routine, row.node_id, "errand",
+                notify_on_complete=True, notify_user_id=row.user_id,
+            )
+        except Exception as e:  # noqa: BLE001 — never leave the errand stuck running
+            logger.exception("Errand %s failed to run", row.id)
+            row.state = "failed"
+            row.error = str(e)[:500]
+            db.commit()
+            _delete_transient_routine(db, ctx.household_id, row.routine_slug)  # cleanup on every terminal path
+            return ServerCallbackResult(success=False, error="Couldn't run the errand.")
+
+        status = (result or {}).get("status") or "failed"
+        row.state = "done" if status == "success" else status  # partial|failed|timeout
+        db.commit()
+
+        _delete_transient_routine(db, ctx.household_id, row.routine_slug)
+        logger.info("Errand %s ran on node %s → %s", row.id, row.node_id, row.state)
+        return ServerCallbackResult(success=True)
+    finally:
+        db.close()
+
+
+def _handle_discard_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackResult:
+    """Cancel tap → discard a draft errand and drop its transient routine."""
+    from app.db import get_session_local
+
+    db = get_session_local()()
+    try:
+        plan_id = ctx.data.get("plan_id")
+        row = (
+            db.query(ErrandPlan)
+            .filter(ErrandPlan.id == plan_id, ErrandPlan.household_id == ctx.household_id)
+            .first()
+        )
+        if row is None:
+            return ServerCallbackResult(success=True)  # already gone — idempotent
+        if row.state == "draft":
+            row.state = "cancelled"
+            db.commit()
+            _delete_transient_routine(db, ctx.household_id, row.routine_slug)
+        return ServerCallbackResult(
+            success=True,
+            context_data={"inbox": {
+                "title": "🗑️ Errand discarded",
+                "summary": row.summary or row.goal,
+                "metadata": {"household_id": ctx.household_id},
+            }},
+        )
+    finally:
+        db.close()
+
+
+def register_errand_callbacks() -> None:
+    """Wire the plan card's Run/Cancel taps to their handlers. Call at startup
+    (main.py lifespan) — an unregistered pair 400s at the tap."""
+    register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_APPROVE_CALLBACK, _handle_approve_errand_plan)
+    register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_DISCARD_CALLBACK, _handle_discard_errand_plan)
+    logger.info("🗒️ Errand server callbacks registered")

@@ -23,6 +23,10 @@ from app.deps import get_db, verify_api_key
 from app.main import app
 from app.models import ErrandPlan
 from app.services import errand_service
+from app.services.server_callback_registry import (
+    ServerCallbackContext,
+    registered_server_callbacks,
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -229,3 +233,160 @@ def test_errands_endpoint_403_when_node_has_no_household():
         assert resp.status_code == 403
     finally:
         app.dependency_overrides.clear()
+
+
+def test_errands_endpoint_node_override_404_if_not_in_household():
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None  # node not found
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[verify_api_key] = lambda: _node_ctx(node_id="node-1")
+    try:
+        with patch("app.api.errands.create_errand_plan", new=AsyncMock()) as create:
+            resp = TestClient(app).post(
+                "/api/v0/errands", json={"goal": "weather", "node_id": "ghost-node"}
+            )
+        assert resp.status_code == 404
+        create.assert_not_called()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_errands_endpoint_node_override_targets_validated_node():
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(node_id="dev-node")
+    fake_row = SimpleNamespace(id="pl_a", state="draft", summary="s", routine_slug="e_a", steps="[]")
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[verify_api_key] = lambda: _node_ctx(node_id="node-1")
+    try:
+        with patch("app.api.errands.create_errand_plan", new=AsyncMock(return_value=fake_row)) as create:
+            resp = TestClient(app).post(
+                "/api/v0/errands", json={"goal": "weather", "node_id": "dev-node"}
+            )
+        assert resp.status_code == 200
+        assert create.call_args.args[2] == "dev-node"  # override honored, household-validated
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ── chunk 4: Run / Cancel server callbacks ───────────────────────────────────
+
+
+def _plan_row(state="draft", revision=1):
+    return ErrandPlan(
+        id="pl_x", household_id="hh-1", state=state, revision=revision,
+        routine_slug="errand_x", node_id="node-1", user_id=7, goal="g", summary="Do it",
+    )
+
+
+def _ctx(data):
+    return ServerCallbackContext(job_id="j1", household_id="hh-1", user_id=7, data=data)
+
+
+def _handler_db(first_results):
+    db = MagicMock()
+    q = db.query.return_value.filter.return_value
+    q.first.side_effect = list(first_results)
+    q.delete.return_value = 1
+    return db
+
+
+def test_approve_runs_errand_and_reuses_completion_card():
+    row = _plan_row()
+    routine = SimpleNamespace(slug="errand_x")
+    db = _handler_db([row, routine])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.api.routines.execute_routine_on_node",
+               new=AsyncMock(return_value={"status": "success"})) as ex, \
+         patch("app.api.routines.publish_routines_sync"):
+        res = asyncio.run(errand_service._handle_approve_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1})))
+    assert res.success is True
+    assert res.context_data is None  # no second card — execute posts the completion card
+    ex.assert_awaited_once()
+    args, kwargs = ex.call_args
+    assert args[1] == "hh-1" and args[2] is routine and args[3] == "node-1" and args[4] == "errand"
+    assert kwargs["notify_on_complete"] is True and kwargs["notify_user_id"] == 7
+    assert row.state == "done"
+    db.query.return_value.filter.return_value.delete.assert_called()  # transient routine cleaned up
+    db.close.assert_called_once()
+
+
+def test_approve_reflects_nonsuccess_status():
+    row = _plan_row()
+    db = _handler_db([row, SimpleNamespace(slug="errand_x")])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.api.routines.execute_routine_on_node",
+               new=AsyncMock(return_value={"status": "timeout"})), \
+         patch("app.api.routines.publish_routines_sync"):
+        asyncio.run(errand_service._handle_approve_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1})))
+    assert row.state == "timeout"
+
+
+def test_approve_marks_failed_when_execute_raises():
+    row = _plan_row()
+    db = _handler_db([row, SimpleNamespace(slug="errand_x")])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.api.routines.execute_routine_on_node",
+               new=AsyncMock(side_effect=RuntimeError("mqtt down"))), \
+         patch("app.api.routines.publish_routines_sync"):
+        res = asyncio.run(errand_service._handle_approve_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1})))
+    assert res.success is False
+    assert row.state == "failed"  # never stuck on "running"
+    db.query.return_value.filter.return_value.delete.assert_called()  # routine cleaned up even on failure
+    db.close.assert_called_once()
+
+
+def test_approve_rejects_stale_revision():
+    row = _plan_row(revision=1)
+    db = _handler_db([row])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.api.routines.execute_routine_on_node", new=AsyncMock()) as ex:
+        res = asyncio.run(errand_service._handle_approve_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 2})))  # stale card
+    assert res.success is False and "updated" in res.error
+    ex.assert_not_awaited()
+    assert row.state == "draft"  # untouched
+
+
+def test_approve_noop_when_already_terminal():
+    row = _plan_row(state="done")
+    db = _handler_db([row])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.api.routines.execute_routine_on_node", new=AsyncMock()) as ex:
+        res = asyncio.run(errand_service._handle_approve_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1})))
+    assert res.success is True and res.context_data["inbox"]  # friendly no-op card
+    ex.assert_not_awaited()
+
+
+def test_approve_fails_when_transient_routine_missing():
+    row = _plan_row()
+    db = _handler_db([row, None])  # ErrandPlan found, Routine gone
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.api.routines.execute_routine_on_node", new=AsyncMock()) as ex:
+        res = asyncio.run(errand_service._handle_approve_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1})))
+    assert res.success is False
+    assert row.state == "failed"
+    ex.assert_not_awaited()
+
+
+def test_discard_cancels_draft_and_deletes_routine():
+    row = _plan_row()
+    db = _handler_db([row])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.api.routines.publish_routines_sync") as nudge:
+        res = errand_service._handle_discard_errand_plan(_ctx({"plan_id": "pl_x"}))
+    assert res.success is True
+    assert row.state == "cancelled"
+    db.query.return_value.filter.return_value.delete.assert_called()
+    nudge.assert_called_once()
+
+
+def test_register_errand_callbacks_registers_both_pairs():
+    errand_service.register_errand_callbacks()
+    pairs = registered_server_callbacks()
+    assert ("errand", "approve_errand_plan") in pairs
+    assert ("errand", "discard_errand_plan") in pairs
