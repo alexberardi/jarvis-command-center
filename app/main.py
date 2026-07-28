@@ -705,6 +705,11 @@ app.include_router(node_tools.router, prefix="/api/v0/mobile", tags=["node-tools
 from app.api import routines
 app.include_router(routines.router, prefix="/api/v0", tags=["routines"])
 
+# Errands: POST /errands → plan a goal into a reviewable plan card (Errand Runner
+# POC). Node-authenticated; reuses the routines transient-routine + dispatch path.
+from app.api import errands
+app.include_router(errands.router, prefix="/api/v0", tags=["errands"])
+
 # Include mobile command-data browser router (JWT auth, MQTT round-trip)
 from app.api import mobile_command_data
 app.include_router(mobile_command_data.router, prefix="/api/v0/mobile", tags=["mobile-command-data"])

@@ -1,0 +1,231 @@
+"""Errand Runner POC chunk 3 — create_errand_plan orchestration + POST /errands.
+
+Covers the load-bearing bits of the plan → transient-routine → draft → plan-card
+flow (prds/errand-runner.md §2-§3), all mocked (no DB/MQTT/HTTP/LLM):
+
+- the CRITICAL arg-shape inversion: Routine.steps must be MOBILE-native (args as
+  [{key,value}] pairs) so the node-pull _flatten_args round-trips it, while
+  ErrandPlan.steps stays NODE-native (args-as-object). Two columns, two shapes.
+- the plan card is a SERVER-plane interactive card (interactive_elements with
+  target:"server" → server_callback_registry), NOT node-plane.
+- the endpoint's node-auth identity extraction + planner-ValueError → 422 mapping.
+"""
+
+import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from fastapi.testclient import TestClient
+
+from app.api.routines import _flatten_args
+from app.deps import get_db, verify_api_key
+from app.main import app
+from app.models import ErrandPlan
+from app.services import errand_service
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _fake_llm(summary: str, steps: list[dict]):
+    """An llm_client whose chat_completion returns a planner-shaped response."""
+    content = json.dumps({"summary": summary, "steps": steps})
+    client = MagicMock()
+    client.chat_completion = AsyncMock(
+        return_value={"choices": [{"message": {"content": content}}]}
+    )
+    return client
+
+
+def _mock_db():
+    """A MagicMock Session whose refresh() assigns a PK, as a real flush would."""
+    db = MagicMock()
+
+    def _refresh(obj):
+        if getattr(obj, "id", None) is None:
+            obj.id = "pl_testid"
+
+    db.refresh.side_effect = _refresh
+    return db
+
+
+def _node_ctx(household_id="hh-1", node_id="node-1"):
+    ctx = MagicMock()
+    ctx.household_id = household_id
+    ctx.node = MagicMock()
+    ctx.node.node_id = node_id
+    return ctx
+
+
+# ── the critical arg-shape inversion ─────────────────────────────────────────
+
+
+def test_node_args_to_mobile_round_trips_through_flatten_args():
+    for original in (
+        {"resolved_datetimes": ["today"], "category": "sports"},  # list + scalar
+        {"text": "bring an umbrella", "when": "tomorrow at 9am"},  # scalars
+        {"nested": {"a": 1}},  # dict
+        {},  # empty
+    ):
+        pairs = errand_service._node_args_to_mobile(original)
+        assert all(isinstance(p["value"], str) for p in pairs)  # every value a string
+        assert _flatten_args(pairs) == original  # survives the node-pull boundary
+
+
+# ── the plan card is a server-plane interactive card ─────────────────────────
+
+
+def test_plan_card_metadata_is_server_plane_with_errand_callbacks():
+    row = ErrandPlan(
+        id="pl_abc", household_id="hh-1", goal="g", summary="Do the thing",
+        routine_slug="errand_do_the_thing", revision=2, state="draft",
+    )
+    steps = [{"command": "get_weather", "args": {}, "label": "Weather"}]
+    md = errand_service.build_plan_card_metadata(row, steps, "hh-1")
+
+    # household_id must be present — mobile copies it into the /callbacks body.
+    assert md["household_id"] == "hh-1"
+    assert md["plan_id"] == "pl_abc"
+    assert md["steps"] == steps  # read-only structured steps for render
+
+    els = md["interactive_elements"]
+    assert [e["callback"] for e in els] == ["approve_errand_plan", "discard_errand_plan"]
+    for e in els:
+        assert e["command"] == "errand"
+        assert e["target"] == "server"  # → server_callback_registry, not node plane
+        assert e["data"] == {"plan_id": "pl_abc", "revision": 2}  # stale-approval guard
+
+
+# ── create_errand_plan orchestration ─────────────────────────────────────────
+
+
+def _run_create(db, llm):
+    with patch("app.api.routines._unique_slug", return_value="errand_test"), \
+         patch("app.api.routines.publish_routines_sync") as nudge, \
+         patch.object(errand_service, "post_inbox_item_sync", return_value="inbox-1") as card:
+        row = asyncio.run(
+            errand_service.create_errand_plan(
+                db, "hh-1", "node-1", "check weather and remind me", user_id=7,
+                llm_client=llm,
+            )
+        )
+    return row, nudge, card
+
+
+def test_create_errand_plan_persists_both_step_shapes_and_nudges():
+    db = _mock_db()
+    llm = _fake_llm(
+        "Weather then reminder",
+        [
+            {"command": "get_weather", "args": {"resolved_datetimes": ["today"]}, "label": "Weather"},
+            {"command": "set_reminder", "args": {"text": "umbrella", "when": "9am"}, "label": "Reminder"},
+        ],
+    )
+    row, nudge, card = _run_create(db, llm)
+
+    added = [c.args[0] for c in db.add.call_args_list]
+    routine = next(a for a in added if a.__class__.__name__ == "Routine")
+    plan = next(a for a in added if isinstance(a, ErrandPlan))
+
+    # Routine.steps is MOBILE-native: args are [{key,value}] pairs and round-trip.
+    r_steps = json.loads(routine.steps)
+    assert r_steps[0]["command"] == "get_weather"
+    assert r_steps[0]["args"] == [{"key": "resolved_datetimes", "value": '["today"]'}]
+    assert _flatten_args(r_steps[0]["args"]) == {"resolved_datetimes": ["today"]}
+    assert routine.enabled is True and json.loads(routine.trigger_phrases) == []
+
+    # ErrandPlan.steps is NODE-native: args-as-object (the opposite shape).
+    p_steps = json.loads(plan.steps)
+    assert p_steps[0]["args"] == {"resolved_datetimes": ["today"]}
+    assert plan.state == "draft" and plan.routine_slug == "errand_test"
+    assert plan.user_id == 7 and plan.node_id == "node-1"
+
+    nudge.assert_called_once_with("hh-1", db)  # node pre-pull nudge fired
+    # card pushed to the initiating user with the plan_id assigned on refresh
+    assert card.call_args.kwargs["user_id"] == 7
+    assert card.call_args.kwargs["target_type"] == "user"
+    assert card.call_args.kwargs["metadata"]["plan_id"] == row.id == "pl_testid"
+
+
+def test_create_errand_plan_commits_draft_before_card_is_posted():
+    """The draft must be committed even if the card push later fails."""
+    db = _mock_db()
+    llm = _fake_llm("W", [{"command": "get_weather", "args": {}, "label": "W"}])
+    with patch("app.api.routines._unique_slug", return_value="errand_test"), \
+         patch("app.api.routines.publish_routines_sync"), \
+         patch.object(errand_service, "post_inbox_item_sync", side_effect=RuntimeError("boom")):
+        row = asyncio.run(
+            errand_service.create_errand_plan(db, "hh-1", "node-1", "weather", llm_client=llm)
+        )
+    db.commit.assert_called_once()  # committed once, before the (failing) card
+    assert row.state == "draft"  # errand survives a dead card
+
+
+# ── POST /errands endpoint ───────────────────────────────────────────────────
+
+
+def test_errands_endpoint_happy_path():
+    fake_row = SimpleNamespace(
+        id="pl_xyz", state="draft", summary="Weather", routine_slug="errand_weather",
+        steps='[{"command": "get_weather", "args": {}, "label": "W"}]',
+    )
+    app.dependency_overrides[get_db] = lambda: MagicMock()
+    app.dependency_overrides[verify_api_key] = lambda: _node_ctx(node_id="node-9")
+    try:
+        with patch(
+            "app.api.errands.create_errand_plan",
+            new=AsyncMock(return_value=fake_row),
+        ) as create:
+            resp = TestClient(app).post(
+                "/api/v0/errands", json={"goal": "what's the weather", "user_id": 7}
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["errand_plan_id"] == "pl_xyz"
+        assert body["state"] == "draft"
+        assert body["steps"][0]["command"] == "get_weather"
+        # identity comes from the validated node row, not the payload
+        assert create.call_args.args[1] == "hh-1"  # household_id
+        assert create.call_args.args[2] == "node-9"  # node_id
+        assert create.call_args.kwargs["user_id"] == 7
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_errands_endpoint_empty_goal_422():
+    app.dependency_overrides[get_db] = lambda: MagicMock()
+    app.dependency_overrides[verify_api_key] = lambda: _node_ctx()
+    try:
+        resp = TestClient(app).post("/api/v0/errands", json={"goal": "   "})
+        assert resp.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_errands_endpoint_maps_planner_valueerror_to_422():
+    app.dependency_overrides[get_db] = lambda: MagicMock()
+    app.dependency_overrides[verify_api_key] = lambda: _node_ctx()
+    try:
+        with patch(
+            "app.api.errands.create_errand_plan",
+            new=AsyncMock(side_effect=ValueError("no usable steps")),
+        ):
+            resp = TestClient(app).post("/api/v0/errands", json={"goal": "do a barrel roll"})
+        assert resp.status_code == 422
+        assert "Couldn't plan that" in resp.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_errands_endpoint_403_when_node_has_no_household():
+    ctx = MagicMock()
+    ctx.household_id = ""
+    ctx.node = None
+    app.dependency_overrides[get_db] = lambda: MagicMock()
+    app.dependency_overrides[verify_api_key] = lambda: ctx
+    try:
+        resp = TestClient(app).post("/api/v0/errands", json={"goal": "weather"})
+        assert resp.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
