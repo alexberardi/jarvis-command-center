@@ -18,6 +18,7 @@ from app.core.conversation_cache import conversation_cache
 from app.core.direction_hint import build_direction_hint
 from app.core.affect_hint import build_affect_hint
 from app.core.turn_context import build_turn_hint, should_double_check_sentinel
+from app.core.profile_match import build_profile_match_hint
 from app.core.exchange_complete import apply_to_result as apply_exchange_complete
 from app.core.errors import ConversationPreconditionError
 from app.core.not_for_me import contains_sentinel
@@ -725,6 +726,10 @@ class ConversationHandler:
         if turn_hint:
             logger.info("🧭 Turn hint applied | hint=%s", turn_hint)
             user_content = f"{user_content}\n\n{turn_hint}"
+        profile_hint: str | None = build_profile_match_hint(voice_command, _speaker_msg)
+        if profile_hint:
+            logger.info("📌 Profile match applied | hint=%s", profile_hint)
+            user_content = f"{user_content}\n\n{profile_hint}"
         if agent_context:
             user_content = f"{user_content}\n\n{agent_context}"
         if suffix:
@@ -978,6 +983,10 @@ class ConversationHandler:
         if turn_hint:
             logger.info("🧭 Turn hint applied (stream path) | hint=%s", turn_hint)
             user_content = f"{user_content}\n\n{turn_hint}"
+        profile_hint: str | None = build_profile_match_hint(voice_command, _speaker_msg)
+        if profile_hint:
+            logger.info("📌 Profile match applied (stream path) | hint=%s", profile_hint)
+            user_content = f"{user_content}\n\n{profile_hint}"
         if suffix:
             user_content = f"{user_content}\n{suffix}"
         messages.append({"role": "user", "content": user_content})
@@ -1316,6 +1325,10 @@ class ConversationHandler:
         if turn_hint:
             logger.info("🧭 Turn hint applied (tool-stream path) | hint=%s", turn_hint)
             user_content = f"{user_content}\n\n{turn_hint}"
+        profile_hint: str | None = build_profile_match_hint(voice_command, _speaker_msg)
+        if profile_hint:
+            logger.info("📌 Profile match applied (tool-stream path) | hint=%s", profile_hint)
+            user_content = f"{user_content}\n\n{profile_hint}"
         if suffix:
             user_content = f"{user_content}\n{suffix}"
         messages.append({"role": "user", "content": user_content})

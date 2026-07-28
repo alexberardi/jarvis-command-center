@@ -356,6 +356,11 @@ async def _chat_stream(
             result = await model_service.process_voice_command_with_tools(
                 voice_command=request.message,
                 conversation_id=conversation_id,
+                # Typed in the app by an authenticated user: the speaker is
+                # known, and "overheard speech" is impossible — turn_source
+                # "chat" makes the not_for_me machinery treat it that way.
+                speaker_user_id=user.user_id,
+                turn_context={"source": "chat"},
             )
 
         # Track actions and preview extracted from tool results

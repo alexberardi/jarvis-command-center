@@ -69,6 +69,15 @@ def build_turn_hint(
         return _follow_up_hint(follow_up_iteration)
     if turn_source == "wake":
         return _wake_hint(wake_confidence)
+    if turn_source == "chat":
+        # Typed into the app — there is no microphone in this loop, so
+        # "overheard speech" is impossible by construction.
+        return (
+            "[turn context: typed message — the user wrote this directly "
+            "to you in the app. It cannot be overheard speech; "
+            "<not_for_me/> does not apply. Answer it or call the right "
+            "tool.]"
+        )
     # No (recognized) source: only the wake path measures pre-wake VAD,
     # so a reported value implies a fresh wake. Never claim a confidence
     # we weren't given.
@@ -96,6 +105,10 @@ def should_double_check_sentinel(
     """
     if turn_source == "follow_up":
         return False
+    # A typed app message is directed at Jarvis by construction — any
+    # sentinel on it deserves the reasoned re-check.
+    if turn_source == "chat":
+        return True
     if (
         turn_source == "wake"
         and wake_confidence is not None
