@@ -82,7 +82,7 @@ def test_node_args_to_mobile_round_trips_through_flatten_args():
 
 def test_plan_card_metadata_is_server_plane_with_errand_callbacks():
     row = ErrandPlan(
-        id="pl_abc", household_id="hh-1", goal="g", summary="Do the thing",
+        id="pl_abc", household_id="hh-1", goal="check the weather", summary="Do the thing",
         routine_slug="errand_do_the_thing", revision=2, state="draft",
     )
     steps = [{"command": "get_weather", "args": {}, "label": "Weather"}]
@@ -91,14 +91,29 @@ def test_plan_card_metadata_is_server_plane_with_errand_callbacks():
     # household_id must be present — mobile copies it into the /callbacks body.
     assert md["household_id"] == "hh-1"
     assert md["plan_id"] == "pl_abc"
-    assert md["steps"] == steps  # read-only structured steps for render
+    assert md["steps"] == steps  # structured steps for render
+    # editor_schema must NOT be set (>2 disables buttons in the mobile client)
+    assert "editor_schema" not in md
 
     els = md["interactive_elements"]
-    assert [e["callback"] for e in els] == ["approve_errand_plan", "discard_errand_plan"]
+    assert [e["callback"] for e in els] == [
+        "approve_errand_plan", "replan_errand_plan", "discard_errand_plan",
+    ]
     for e in els:
-        assert e["command"] == "errand"
-        assert e["target"] == "server"  # → server_callback_registry, not node plane
-        assert e["data"] == {"plan_id": "pl_abc", "revision": 2}  # stale-approval guard
+        assert e["command"] == "errand" and e["target"] == "server"
+
+    by_cb = {e["callback"]: e for e in els}
+    # Run/Cancel carry only identity (no "goal" → unaffected by an unsaved edit)
+    assert by_cb["approve_errand_plan"]["data"] == {"plan_id": "pl_abc", "revision": 2}
+    assert by_cb["discard_errand_plan"]["data"] == {"plan_id": "pl_abc", "revision": 2}
+    # Update SEEDS goal so the mobile merges the edited text into it
+    assert by_cb["replan_errand_plan"]["data"] == {
+        "plan_id": "pl_abc", "revision": 2, "goal": "check the weather",
+    }
+    # the editable goal field renders (generic mobile editor)
+    ef = md["editable_fields"]
+    assert ef == [{"label": "Goal", "initial": "check the weather",
+                   "data_key": "goal", "input_type": "text", "required": True}]
 
 
 # ── create_errand_plan orchestration ─────────────────────────────────────────
@@ -385,11 +400,91 @@ def test_discard_cancels_draft_and_deletes_routine():
     nudge.assert_called_once()
 
 
-def test_register_errand_callbacks_registers_both_pairs():
+def test_register_errand_callbacks_registers_all_pairs():
     errand_service.register_errand_callbacks()
     pairs = registered_server_callbacks()
     assert ("errand", "approve_errand_plan") in pairs
+    assert ("errand", "replan_errand_plan") in pairs
     assert ("errand", "discard_errand_plan") in pairs
+
+
+# ── edit / re-plan handler (edit goal → re-plan → refreshed card) ────────────
+
+
+def test_replan_updates_row_and_routine_and_bumps_revision():
+    row = _plan_row(state="draft", revision=1)  # goal="g", summary="Do it"
+    routine = SimpleNamespace(slug="errand_x", steps="[]", name="old")
+    db = _handler_db([row, routine])
+    plan = SimpleNamespace(
+        summary="Sports news",
+        routine_steps=lambda: [{"command": "get_news", "args": {"category": "sports"}, "label": "News"}],
+    )
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.core.llm_proxy_client.LLMProxyClient", return_value=MagicMock()), \
+         patch.object(errand_service, "plan_errand", new=AsyncMock(return_value=plan)), \
+         patch("app.api.routines.publish_routines_sync") as nudge, \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        res = asyncio.run(errand_service._handle_replan_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1, "goal": "get me the sports news"})))
+    assert res.success is True
+    assert row.goal == "get me the sports news"
+    assert row.summary == "Sports news"
+    assert row.revision == 2  # bumped → old card's Run is now stale
+    assert json.loads(row.steps)[0]["command"] == "get_news"  # node-native args-as-object
+    # transient routine updated IN PLACE with mobile-native (args-as-pairs) steps
+    assert json.loads(routine.steps)[0]["args"] == [{"key": "category", "value": "sports"}]
+    nudge.assert_called_once()
+    card.assert_called_once()  # refreshed plan card re-posted
+    md = card.call_args.kwargs["metadata"]
+    assert md["revision"] == 2 and md["editable_fields"][0]["initial"] == "get me the sports news"
+
+
+def test_replan_rejects_empty_goal():
+    db = MagicMock()
+    with patch("app.db.get_session_local", return_value=lambda: db):
+        res = asyncio.run(errand_service._handle_replan_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1, "goal": "   "})))
+    assert res.success is False and "empty" in res.error.lower()
+
+
+def test_replan_rejects_stale_revision():
+    row = _plan_row(revision=3)
+    db = _handler_db([row])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch.object(errand_service, "plan_errand", new=AsyncMock()) as pe:
+        res = asyncio.run(errand_service._handle_replan_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1, "goal": "new goal"})))
+    assert res.success is False and "updated" in res.error
+    pe.assert_not_awaited()
+    assert row.revision == 3  # untouched
+
+
+def test_replan_error_when_planner_fails():
+    row = _plan_row(revision=1)
+    db = _handler_db([row])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.core.llm_proxy_client.LLMProxyClient", return_value=MagicMock()), \
+         patch.object(errand_service, "plan_errand",
+                      new=AsyncMock(side_effect=ValueError("no usable steps"))):
+        res = asyncio.run(errand_service._handle_replan_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1, "goal": "gibberish"})))
+    assert res.success is False and "couldn't" in res.error.lower()
+    assert row.revision == 1 and row.state == "draft"  # unchanged on failure
+
+
+def test_replan_friendly_error_on_infra_failure():
+    """A non-ValueError (LLM proxy down) → friendly retryable message, not a raw
+    exception, and the old plan is left intact."""
+    row = _plan_row(revision=1)
+    db = _handler_db([row])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.core.llm_proxy_client.LLMProxyClient", return_value=MagicMock()), \
+         patch.object(errand_service, "plan_errand",
+                      new=AsyncMock(side_effect=RuntimeError("proxy unreachable"))):
+        res = asyncio.run(errand_service._handle_replan_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1, "goal": "news"})))
+    assert res.success is False and "snag" in res.error.lower()
+    assert row.revision == 1 and row.state == "draft"  # untouched
 
 
 # ── chunk 6: detached draft (for the run_errand voice tool) ──────────────────

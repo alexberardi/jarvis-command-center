@@ -44,6 +44,7 @@ logger = logging.getLogger("uvicorn")
 ERRAND_CALLBACK_COMMAND = "errand"
 ERRAND_APPROVE_CALLBACK = "approve_errand_plan"
 ERRAND_DISCARD_CALLBACK = "discard_errand_plan"
+ERRAND_REPLAN_CALLBACK = "replan_errand_plan"
 
 # Own inbox category so the plan card is filterable and distinct from the
 # routine completion card (category="routine").
@@ -73,13 +74,29 @@ def _node_args_to_mobile(args: dict[str, Any]) -> list[dict[str, str]]:
     return pairs
 
 
+def _build_mobile_steps(node_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Node-native steps → the MOBILE-native shape Routine.steps stores (args as
+    [{key,value}] pairs, so the node-pull _flatten_args boundary round-trips)."""
+    return [
+        {
+            "command": s["command"],
+            "args": _node_args_to_mobile(s.get("args", {})),
+            "label": s.get("label", ""),
+        }
+        for s in node_steps
+    ]
+
+
 def _plan_card_body(summary: str, node_steps: list[dict[str, Any]]) -> str:
-    """Human-readable, read-only plan for the card body (markdown)."""
+    """Human-readable plan for the card body (markdown)."""
     lines = [summary, "", "**Plan:**"]
     for i, step in enumerate(node_steps, start=1):
         lines.append(f"{i}. {step.get('label') or step.get('command')}")
     lines.append("")
-    lines.append("Tap **Run** to start it, or **Cancel** to discard.")
+    lines.append(
+        "Tap **Run** to start it. To change it, edit the goal above and tap "
+        "**Update plan**, or tap **Cancel** to discard."
+    )
     return "\n".join(lines)
 
 
@@ -94,13 +111,29 @@ def build_plan_card_metadata(
     of a node. ``data`` round-trips ``plan_id`` + ``revision`` so chunk 4's
     handler can load the row and reject a stale card.
     """
-    data = {"plan_id": row.id, "revision": row.revision}
+    # Run/Cancel carry only the identity; the edit-goal value is merged by the
+    # mobile ONLY into a button whose data already has the "goal" key — so the
+    # Update button seeds it, and Run/Cancel omit it (a tap on them ignores an
+    # unsaved edit and is never blocked by the required-goal check).
+    ident = {"plan_id": row.id, "revision": row.revision}
+    edit = {**ident, "goal": row.goal}
     return {
         "household_id": household_id,
         "plan_id": row.id,
         "revision": row.revision,
         "routine_slug": row.routine_slug,
-        "steps": node_steps,  # read-only, for a structured render (card v1 = read-only)
+        "steps": node_steps,  # structured read-only view of the steps
+        # An editable free-text goal → "Update plan" re-plans. NB: do NOT set
+        # editor_schema (>2 disables the buttons in the mobile client).
+        "editable_fields": [
+            {
+                "label": "Goal",
+                "initial": row.goal,
+                "data_key": "goal",
+                "input_type": "text",
+                "required": True,
+            },
+        ],
         "interactive_elements": [
             {
                 "id": "run-errand",
@@ -108,7 +141,15 @@ def build_plan_card_metadata(
                 "command": ERRAND_CALLBACK_COMMAND,
                 "callback": ERRAND_APPROVE_CALLBACK,
                 "target": "server",
-                "data": data,
+                "data": ident,
+            },
+            {
+                "id": "update-errand",
+                "label": "Update plan",
+                "command": ERRAND_CALLBACK_COMMAND,
+                "callback": ERRAND_REPLAN_CALLBACK,
+                "target": "server",
+                "data": edit,
             },
             {
                 "id": "cancel-errand",
@@ -116,7 +157,7 @@ def build_plan_card_metadata(
                 "command": ERRAND_CALLBACK_COMMAND,
                 "callback": ERRAND_DISCARD_CALLBACK,
                 "target": "server",
-                "data": data,
+                "data": ident,
             },
         ],
     }
@@ -181,14 +222,7 @@ async def create_errand_plan(
     # Bound the slug source — Routine.slug is String(255) and plan.summary is
     # free-form; a long summary would otherwise overflow the column.
     slug = _unique_slug(db, household_id, f"errand {plan.summary[:100]}")
-    mobile_steps = [
-        {
-            "command": s["command"],
-            "args": _node_args_to_mobile(s.get("args", {})),
-            "label": s.get("label", ""),
-        }
-        for s in node_steps
-    ]
+    mobile_steps = _build_mobile_steps(node_steps)
     routine = Routine(
         id=str(uuid4()),
         household_id=household_id,
@@ -459,9 +493,113 @@ def _handle_discard_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackRes
         db.close()
 
 
+async def _handle_replan_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackResult:
+    """Update-plan tap → re-plan the errand from the edited goal, re-post the card.
+
+    The mobile merges the edited goal into this button's data (data_key "goal").
+    We re-run the planner, update the draft + its transient routine IN PLACE, bump
+    the revision (so the old card's Run is rejected as stale), and post the
+    refreshed plan card for another review pass.
+    """
+    from app.api.routines import publish_routines_sync
+    from app.core.llm_proxy_client import LLMProxyClient
+    from app.db import get_session_local
+
+    db = get_session_local()()
+    try:
+        plan_id = ctx.data.get("plan_id")
+        new_goal = (ctx.data.get("goal") or "").strip()
+        if not plan_id:
+            return ServerCallbackResult(success=False, error="Missing plan_id")
+        if not new_goal:
+            return ServerCallbackResult(success=False, error="The errand goal can't be empty.")
+        row = (
+            db.query(ErrandPlan)
+            .filter(ErrandPlan.id == plan_id, ErrandPlan.household_id == ctx.household_id)
+            .first()
+        )
+        if row is None:
+            return ServerCallbackResult(success=False, error="Errand plan not found")
+        if row.state != "draft":
+            return ServerCallbackResult(
+                success=True,
+                context_data={"inbox": {
+                    "title": "Errand already handled",
+                    "summary": f"This errand is already {row.state} — it can't be edited.",
+                    "metadata": {"household_id": ctx.household_id},
+                }},
+            )
+        if not _revisions_match(ctx.data.get("revision"), row.revision):
+            return ServerCallbackResult(
+                success=False,
+                error="This plan was updated — open the latest card to edit it.",
+            )
+
+        try:
+            plan = await plan_errand(new_goal, LLMProxyClient())
+        except ValueError as e:
+            logger.info("Re-plan produced no usable plan for goal=%r: %s", new_goal, e)
+            return ServerCallbackResult(
+                success=False,
+                error=f'I couldn\'t turn "{new_goal}" into a plan I can run — try rephrasing it.',
+            )
+        except Exception:  # noqa: BLE001 — infra (LLM proxy down/timeout); don't leak the raw error
+            # The row is untouched here (plan_errand runs before any mutation), so
+            # the old plan card stays valid — return a friendly, retryable message.
+            logger.exception("Re-plan planner call failed for goal=%r", new_goal)
+            return ServerCallbackResult(
+                success=False, error="I hit a snag re-planning that — try again in a bit.",
+            )
+
+        node_steps = plan.routine_steps()
+        mobile_steps = _build_mobile_steps(node_steps)
+
+        # Update the transient routine's steps in place (same slug). If the
+        # vehicle somehow vanished, recreate it under the row's slug.
+        routine = (
+            db.query(Routine)
+            .filter(Routine.slug == row.routine_slug, Routine.household_id == ctx.household_id)
+            .first()
+        )
+        if routine is not None:
+            routine.steps = json.dumps(mobile_steps)
+            routine.name = f"Errand: {plan.summary}"[:255]
+        else:
+            db.add(Routine(
+                id=str(uuid4()), household_id=ctx.household_id, slug=row.routine_slug,
+                name=f"Errand: {plan.summary}"[:255], trigger_phrases=json.dumps([]),
+                steps=json.dumps(mobile_steps), response_instruction="",
+                response_length="short", schedule=None, enabled=True,
+            ))
+
+        row.goal = new_goal
+        row.summary = plan.summary
+        row.steps = json.dumps(node_steps)
+        row.revision = row.revision + 1
+        db.commit()
+
+        try:
+            publish_routines_sync(ctx.household_id, db)
+        except Exception:  # noqa: BLE001 — best-effort nudge
+            logger.exception("Re-plan routine-sync nudge failed for %s", row.id)
+
+        # The re-posted plan card (new revision) IS the feedback — no extra card.
+        # Best-effort: the re-plan is already committed, so a card failure (incl. a
+        # post-commit attribute reload) must not flip the callback to FAILED.
+        try:
+            _post_errand_plan_card(row, node_steps, ctx.household_id, row.user_id)
+        except Exception:  # noqa: BLE001 — committed re-plan must survive a dead card
+            logger.exception("Re-plan card re-post failed for %s", row.id)
+        logger.info("Errand %s re-planned (goal=%r rev=%d)", row.id, new_goal, row.revision)
+        return ServerCallbackResult(success=True)
+    finally:
+        db.close()
+
+
 def register_errand_callbacks() -> None:
-    """Wire the plan card's Run/Cancel taps to their handlers. Call at startup
-    (main.py lifespan) — an unregistered pair 400s at the tap."""
+    """Wire the plan card's Run/Update/Cancel taps to their handlers. Call at
+    startup (main.py lifespan) — an unregistered pair 400s at the tap."""
     register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_APPROVE_CALLBACK, _handle_approve_errand_plan)
+    register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_REPLAN_CALLBACK, _handle_replan_errand_plan)
     register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_DISCARD_CALLBACK, _handle_discard_errand_plan)
     logger.info("🗒️ Errand server callbacks registered")
