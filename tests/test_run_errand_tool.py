@@ -40,12 +40,13 @@ def test_run_errand_happy_path_fires_detached_draft():
     ctx = {"household_id": "hh-1", "node_id": "node-1", "speaker_user_id": 7}
     fake_loop = MagicMock()
     with patch.object(conversation_cache, "get_node_context", return_value=ctx), \
+         patch.object(conversation_cache, "get_available_commands", return_value=None), \
          patch("app.core.tools.run_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
          patch("app.services.errand_service.draft_errand_plan_detached") as draft:
         res = RunErrandTool().execute(goal="check the weather", conversation_id="c1")
     assert res["status"] == "accepted" and "plan" in res["message"].lower()
     draft.assert_called_once_with(
-        household_id="hh-1", node_id="node-1", goal="check the weather", user_id=7
+        household_id="hh-1", node_id="node-1", goal="check the weather", user_id=7, menu=None
     )
     fake_loop.create_task.assert_called_once()  # detached, off the request path
 
@@ -54,8 +55,39 @@ def test_run_errand_household_broadcast_when_no_speaker():
     ctx = {"household_id": "hh-1", "node_id": "node-1"}  # no speaker_user_id
     fake_loop = MagicMock()
     with patch.object(conversation_cache, "get_node_context", return_value=ctx), \
+         patch.object(conversation_cache, "get_available_commands", return_value=None), \
          patch("app.core.tools.run_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
          patch("app.services.errand_service.draft_errand_plan_detached") as draft:
         res = RunErrandTool().execute(goal="weather", conversation_id="c1")
     assert res["status"] == "accepted"
     assert draft.call_args.kwargs["user_id"] is None  # → household broadcast downstream
+
+
+def test_run_errand_builds_menu_from_conversation_commands():
+    """The voice path plans over the node's real installed commands (from the live
+    conversation cache), with denied commands filtered out."""
+    ctx = {"household_id": "hh-1", "node_id": "node-1", "speaker_user_id": 7}
+    available = [
+        {"command_name": "get_weather", "description": "w", "parameters": []},
+        {"command_name": "set_timer", "description": "timer", "parameters": []},
+        {"command_name": "chat", "description": "conversation"},  # denied by build_errand_menu
+    ]
+    fake_loop = MagicMock()
+    with patch.object(conversation_cache, "get_node_context", return_value=ctx), \
+         patch.object(conversation_cache, "get_available_commands", return_value=available), \
+         patch("app.core.tools.run_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
+         patch("app.services.errand_service.draft_errand_plan_detached") as draft:
+        RunErrandTool().execute(goal="set a 5 minute timer", conversation_id="c1")
+    menu = draft.call_args.kwargs["menu"]
+    assert {c["command"] for c in menu} == {"get_weather", "set_timer"}  # chat filtered out
+
+
+def test_run_errand_menu_none_when_no_cached_commands():
+    ctx = {"household_id": "hh-1", "node_id": "node-1", "speaker_user_id": 7}
+    fake_loop = MagicMock()
+    with patch.object(conversation_cache, "get_node_context", return_value=ctx), \
+         patch.object(conversation_cache, "get_available_commands", return_value=None), \
+         patch("app.core.tools.run_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
+         patch("app.services.errand_service.draft_errand_plan_detached") as draft:
+        RunErrandTool().execute(goal="weather", conversation_id="c1")
+    assert draft.call_args.kwargs["menu"] is None  # empty → None → downstream fetch/fallback

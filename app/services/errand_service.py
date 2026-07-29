@@ -28,7 +28,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from app.models import ErrandPlan, Routine
-from app.services.errand_planner import plan_errand
+from app.services.errand_planner import build_errand_menu, plan_errand
 from app.services.inbox_notification_service import post_inbox_item_sync
 from app.services.server_callback_registry import (
     ServerCallbackContext,
@@ -72,6 +72,22 @@ def _node_args_to_mobile(args: dict[str, Any]) -> list[dict[str, str]]:
             encoded = str(value)
         pairs.append({"key": key, "value": encoded})
     return pairs
+
+
+async def _resolve_node_menu(node_id: str) -> list[dict[str, Any]] | None:
+    """The target node's live command set as a planner menu (MQTT round-trip), or
+    None on failure → the planner falls back to its built-in default. Used by the
+    non-voice paths (POST /errands, re-plan) that have no cached conversation.
+    """
+    try:
+        from app.api.node_tools import _request_tools_from_node
+
+        report = await _request_tools_from_node(node_id, timeout=10.0)
+        if report and report.get("available_commands"):
+            return build_errand_menu(report["available_commands"])
+    except Exception:  # noqa: BLE001 — sourcing is best-effort; default menu is the fallback
+        logger.warning("Errand: couldn't fetch node %s commands; using the default menu", node_id)
+    return None
 
 
 def _build_mobile_steps(node_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -195,6 +211,7 @@ async def create_errand_plan(
     node_id: str,
     goal: str,
     user_id: int | None = None,
+    menu: list[dict[str, Any]] | None = None,
     llm_client: Any | None = None,
 ) -> ErrandPlan:
     """Plan an errand from a goal, persist it as a DRAFT, and post its plan card.
@@ -212,7 +229,12 @@ async def create_errand_plan(
     # routine_scheduler's convention and avoid an import cycle (routines.py:101).
     from app.api.routines import _unique_slug, publish_routines_sync
 
-    plan = await plan_errand(goal, llm_client)  # raises ValueError on no usable plan
+    # Plan over the node's REAL commands: the voice path passes a menu built from
+    # the live conversation; otherwise source it from the node (MQTT). None → the
+    # planner's built-in default menu.
+    if menu is None:
+        menu = await _resolve_node_menu(node_id)
+    plan = await plan_errand(goal, llm_client, menu=menu)  # raises ValueError on no usable plan
     node_steps = plan.routine_steps()  # [{command, args:{k:v}, label}] — node-native
 
     # 1. Transient routine. The node runs errands BY SLUG from its local store, so
@@ -298,21 +320,23 @@ def _post_couldnt_plan_card(
 
 
 async def draft_errand_plan_detached(
-    household_id: str, node_id: str, goal: str, user_id: int | None = None
+    household_id: str, node_id: str, goal: str, user_id: int | None = None,
+    menu: list[dict[str, Any]] | None = None,
 ) -> None:
     """Draft an errand plan on a FRESH session — for fire-and-forget callers.
 
     The ``run_errand`` voice tool fires this detached (it has no request-scoped DB
     session, and one would be closed by the time the task runs — cf. phone's
-    ``create_call_plan`` opening its own session). Because the tool already spoke
-    "I'll send it to your phone," ANY failure posts a card so the user is never
-    left hanging — the phone stack's never-vanish rule (create_call_plan:543).
+    ``create_call_plan`` opening its own session). It passes ``menu`` built from
+    the live conversation's node commands. Because the tool already spoke "I'll
+    send it to your phone," ANY failure posts a card so the user is never left
+    hanging — the phone stack's never-vanish rule (create_call_plan:543).
     """
     from app.db import get_session_local
 
     db = get_session_local()()
     try:
-        await create_errand_plan(db, household_id, node_id, goal, user_id=user_id)
+        await create_errand_plan(db, household_id, node_id, goal, user_id=user_id, menu=menu)
     except ValueError as e:
         # The planner couldn't turn the goal into usable steps → rephrase hint.
         logger.info("Errand planning produced no usable plan for goal=%r: %s", goal, e)
@@ -535,8 +559,9 @@ async def _handle_replan_errand_plan(ctx: ServerCallbackContext) -> ServerCallba
                 error="This plan was updated — open the latest card to edit it.",
             )
 
+        menu = await _resolve_node_menu(row.node_id)
         try:
-            plan = await plan_errand(new_goal, LLMProxyClient())
+            plan = await plan_errand(new_goal, LLMProxyClient(), menu=menu)
         except ValueError as e:
             logger.info("Re-plan produced no usable plan for goal=%r: %s", new_goal, e)
             return ServerCallbackResult(

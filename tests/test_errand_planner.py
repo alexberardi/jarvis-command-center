@@ -86,7 +86,46 @@ def test_no_menu_command_raises():
 
 
 def test_menu_is_all_known_commands():
-    # Guardrail: the POC menu should only list safe, real command names.
+    # Guardrail: the fallback menu should only list safe, real command names.
     names = {c["command"] for c in errand_planner.COMMAND_MENU}
     assert "get_weather" in names and "set_reminder" in names
     assert "make_phone_call" not in names  # phone step is a later, gated slice
+
+
+# ── build_errand_menu: node's real commands → planner menu ───────────────────
+
+
+def test_build_errand_menu_converts_available_commands():
+    available = [
+        {
+            "command_name": "set_timer",
+            "description": "Start a timer.",
+            "parameters": [
+                {"name": "duration", "description": "how long, e.g. '5 minutes'", "type": "string"},
+                {"name": "label", "type": "string"},  # no description → falls back to type
+            ],
+        },
+    ]
+    menu = errand_planner.build_errand_menu(available)
+    assert menu == [{
+        "command": "set_timer",
+        "description": "Start a timer.",
+        "args": {"duration": "how long, e.g. '5 minutes'", "label": "string"},
+    }]
+
+
+def test_build_errand_menu_filters_deny_and_junk():
+    available = [
+        {"command_name": "get_weather", "description": "w", "parameters": []},
+        {"command_name": "chat", "description": "conversation"},        # denied
+        {"command_name": "act_on_items", "description": "follow-ups"},  # denied
+        {"command_name": "", "description": "blank"},                    # junk
+        {"description": "no name"},                                      # junk
+    ]
+    names = {c["command"] for c in errand_planner.build_errand_menu(available)}
+    assert names == {"get_weather"}
+
+
+def test_build_errand_menu_empty_on_none():
+    assert errand_planner.build_errand_menu(None) == []
+    assert errand_planner.build_errand_menu([]) == []

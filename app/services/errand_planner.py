@@ -18,9 +18,10 @@ from typing import Any
 logger = logging.getLogger("uvicorn")
 
 
-# The commands the planner may compose into steps — the common, safe node
-# commands routines already use. (POC menu; a later slice discovers the target
-# node's actual command set + adds server tools like make_phone_call.)
+# FALLBACK menu — used only when the target node's real command set can't be
+# sourced (offline / MQTT timeout). The live path builds the menu from the node's
+# actually-installed commands via ``build_errand_menu`` (so a node plans over
+# whatever it has, not this fixed list).
 COMMAND_MENU: list[dict[str, Any]] = [
     {"command": "get_weather", "description": "Weather for the user's location on a given day.",
      "args": {"resolved_datetimes": 'list of day keywords, e.g. ["today"]'}},
@@ -35,6 +36,43 @@ COMMAND_MENU: list[dict[str, Any]] = [
     {"command": "control_device", "description": "Act on a smart-home device.",
      "args": {"device_name": "the device's name", "action": "turn_on / turn_off / lock / unlock"}},
 ]
+
+# Node commands that make no sense as a HEADLESS, background errand step —
+# conversational, live-speaker-dependent, or recursive. Filtered out of the
+# node-derived menu (they never appear as errand steps).
+ERRAND_MENU_DENY: frozenset[str] = frozenset({
+    "routine",          # recursion — an errand routine running a "routine" step
+    "chat",             # open-ended conversation
+    "answer_question",  # conversational Q&A, needs a live turn
+    "tell_joke",        # conversational
+    "act_on_items",     # depends on the live conversation's referenced_items
+    "send_link",        # needs a live speaker/device target
+    "control_node",     # live on-device hardware control (volume, etc.)
+})
+
+
+def build_errand_menu(available_commands: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Turn a node's ``available_commands`` (CommandDefinition dicts, as cached at
+    conversation start or returned by ``node_tools._request_tools_from_node``)
+    into the planner-menu shape ``[{command, description, args:{name: desc}}]``,
+    dropping commands unfit for a headless background errand (``ERRAND_MENU_DENY``).
+
+    Sourcing from ``available_commands`` (node-only) means server tools — including
+    ``run_errand`` itself — are excluded by construction. Returns ``[]`` if there's
+    nothing usable; the caller then falls back to ``COMMAND_MENU``.
+    """
+    menu: list[dict[str, Any]] = []
+    for c in available_commands or []:
+        name = (c.get("command_name") or "").strip()
+        if not name or name in ERRAND_MENU_DENY:
+            continue
+        args = {
+            p["name"]: (p.get("description") or p.get("type") or "")
+            for p in (c.get("parameters") or [])
+            if p.get("name")
+        }
+        menu.append({"command": name, "description": c.get("description") or "", "args": args})
+    return menu
 
 
 @dataclass
@@ -71,7 +109,13 @@ def _build_prompt(goal: str, menu: list[dict[str, Any]]) -> str:
         f"User's goal: {goal}\n\n"
         'Return ONLY a JSON object: {"summary": "<one-line plain-English plan>", '
         '"steps": [{"command": "<name>", "args": {...}, "label": "<short label>"}]}. '
-        "No prose, no markdown."
+        "No prose, no markdown.\n\n"
+        # Planning is structured extraction, not reasoning — disable Qwen3's
+        # <think> pass. Without this the model's variable-length reasoning
+        # (~200-1900 tokens) can exhaust max_tokens before the JSON, yielding an
+        # empty/truncated response. /no_think is a soft switch (harmless text to
+        # non-Qwen models). Measured: completion drops to ~79 tokens, reliably.
+        "/no_think"
     )
 
 
@@ -115,7 +159,9 @@ async def plan_errand(
     response = await llm_client.chat_completion(
         messages=[{"role": "user", "content": _build_prompt(goal, menu)}],
         temperature=0,
-        max_tokens=800,
+        # Headroom so a model that ignores /no_think and reasons anyway still has
+        # room for its <think> pass AND the JSON (measured up to ~1900 tokens).
+        max_tokens=2000,
     )
     raw = _extract_content(response)
     if not raw:

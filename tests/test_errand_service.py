@@ -122,6 +122,7 @@ def test_plan_card_metadata_is_server_plane_with_errand_callbacks():
 def _run_create(db, llm):
     with patch("app.api.routines._unique_slug", return_value="errand_test"), \
          patch("app.api.routines.publish_routines_sync") as nudge, \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
          patch.object(errand_service, "post_inbox_item_sync", return_value="inbox-1") as card:
         row = asyncio.run(
             errand_service.create_errand_plan(
@@ -173,6 +174,7 @@ def test_create_errand_plan_commits_draft_before_card_is_posted():
     llm = _fake_llm("W", [{"command": "get_weather", "args": {}, "label": "W"}])
     with patch("app.api.routines._unique_slug", return_value="errand_test"), \
          patch("app.api.routines.publish_routines_sync"), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
          patch.object(errand_service, "post_inbox_item_sync", side_effect=RuntimeError("boom")):
         row = asyncio.run(
             errand_service.create_errand_plan(db, "hh-1", "node-1", "weather", llm_client=llm)
@@ -421,6 +423,7 @@ def test_replan_updates_row_and_routine_and_bumps_revision():
     )
     with patch("app.db.get_session_local", return_value=lambda: db), \
          patch("app.core.llm_proxy_client.LLMProxyClient", return_value=MagicMock()), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
          patch.object(errand_service, "plan_errand", new=AsyncMock(return_value=plan)), \
          patch("app.api.routines.publish_routines_sync") as nudge, \
          patch.object(errand_service, "post_inbox_item_sync") as card:
@@ -464,6 +467,7 @@ def test_replan_error_when_planner_fails():
     db = _handler_db([row])
     with patch("app.db.get_session_local", return_value=lambda: db), \
          patch("app.core.llm_proxy_client.LLMProxyClient", return_value=MagicMock()), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
          patch.object(errand_service, "plan_errand",
                       new=AsyncMock(side_effect=ValueError("no usable steps"))):
         res = asyncio.run(errand_service._handle_replan_errand_plan(
@@ -479,12 +483,55 @@ def test_replan_friendly_error_on_infra_failure():
     db = _handler_db([row])
     with patch("app.db.get_session_local", return_value=lambda: db), \
          patch("app.core.llm_proxy_client.LLMProxyClient", return_value=MagicMock()), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
          patch.object(errand_service, "plan_errand",
                       new=AsyncMock(side_effect=RuntimeError("proxy unreachable"))):
         res = asyncio.run(errand_service._handle_replan_errand_plan(
             _ctx({"plan_id": "pl_x", "revision": 1, "goal": "news"})))
     assert res.success is False and "snag" in res.error.lower()
     assert row.revision == 1 and row.state == "draft"  # untouched
+
+
+# ── dynamic planner menu: plan over the node's REAL commands ─────────────────
+
+
+def test_resolve_node_menu_fetches_and_builds():
+    report = {"available_commands": [
+        {"command_name": "get_weather", "description": "w", "parameters": []},
+        {"command_name": "chat", "description": "c"},  # denied
+    ]}
+    with patch("app.api.node_tools._request_tools_from_node", new=AsyncMock(return_value=report)):
+        menu = asyncio.run(errand_service._resolve_node_menu("node-1"))
+    assert [c["command"] for c in menu] == ["get_weather"]  # filtered to a real usable command
+
+
+def test_resolve_node_menu_none_on_fetch_failure():
+    with patch("app.api.node_tools._request_tools_from_node",
+               new=AsyncMock(side_effect=RuntimeError("mqtt timeout"))):
+        assert asyncio.run(errand_service._resolve_node_menu("node-1")) is None  # → default menu
+
+
+def test_resolve_node_menu_none_when_node_silent():
+    with patch("app.api.node_tools._request_tools_from_node", new=AsyncMock(return_value=None)):
+        assert asyncio.run(errand_service._resolve_node_menu("node-1")) is None
+
+
+def test_create_errand_plan_uses_passed_menu_without_fetching():
+    """The voice path passes a menu built from the live conversation — create must
+    plan over it and NOT do the MQTT fetch."""
+    db = _mock_db()
+    # the planned step's command is ONLY in the custom menu (not COMMAND_MENU)
+    llm = _fake_llm("Custom", [{"command": "brew_coffee", "args": {"strength": "strong"}, "label": "Coffee"}])
+    custom_menu = [{"command": "brew_coffee", "description": "Make coffee", "args": {"strength": "how strong"}}]
+    with patch("app.api.routines._unique_slug", return_value="errand_test"), \
+         patch("app.api.routines.publish_routines_sync"), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock()) as resolve, \
+         patch.object(errand_service, "post_inbox_item_sync"):
+        row = asyncio.run(errand_service.create_errand_plan(
+            db, "hh-1", "node-1", "make me a strong coffee", user_id=1,
+            menu=custom_menu, llm_client=llm))
+    resolve.assert_not_awaited()  # menu supplied → no MQTT round-trip
+    assert json.loads(row.steps)[0]["command"] == "brew_coffee"  # planned over the node's menu
 
 
 # ── chunk 6: detached draft (for the run_errand voice tool) ──────────────────
@@ -495,7 +542,7 @@ def test_draft_detached_opens_own_session_and_drafts():
     with patch("app.db.get_session_local", return_value=lambda: db), \
          patch.object(errand_service, "create_errand_plan", new=AsyncMock()) as create:
         asyncio.run(errand_service.draft_errand_plan_detached("hh-1", "node-1", "weather", 7))
-    create.assert_awaited_once_with(db, "hh-1", "node-1", "weather", user_id=7)
+    create.assert_awaited_once_with(db, "hh-1", "node-1", "weather", user_id=7, menu=None)
     db.close.assert_called_once()  # own session, always closed
 
 
