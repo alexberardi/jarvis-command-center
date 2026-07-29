@@ -28,7 +28,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from app.models import ErrandPlan, Routine
-from app.services.errand_planner import build_errand_menu, plan_errand
+from app.services.errand_planner import build_errand_menu, plan_errand, refine_errand_plan
 from app.services.inbox_notification_service import post_inbox_item_sync
 from app.services.server_callback_registry import (
     ServerCallbackContext,
@@ -45,6 +45,7 @@ ERRAND_CALLBACK_COMMAND = "errand"
 ERRAND_APPROVE_CALLBACK = "approve_errand_plan"
 ERRAND_DISCARD_CALLBACK = "discard_errand_plan"
 ERRAND_REPLAN_CALLBACK = "replan_errand_plan"
+ERRAND_REFINE_CALLBACK = "refine_errand_plan"
 
 # Own inbox category so the plan card is filterable and distinct from the
 # routine completion card (category="routine").
@@ -110,8 +111,8 @@ def _plan_card_body(summary: str, node_steps: list[dict[str, Any]]) -> str:
         lines.append(f"{i}. {step.get('label') or step.get('command')}")
     lines.append("")
     lines.append(
-        "Tap **Run** to start it. To change it, edit the goal above and tap "
-        "**Update plan**, or tap **Cancel** to discard."
+        "Tap **Run** to start it. To change it, tell me what to change above and "
+        "tap **Revise**, or tap **Cancel** to discard."
     )
     return "\n".join(lines)
 
@@ -127,25 +128,25 @@ def build_plan_card_metadata(
     of a node. ``data`` round-trips ``plan_id`` + ``revision`` so chunk 4's
     handler can load the row and reject a stale card.
     """
-    # Run/Cancel carry only the identity; the edit-goal value is merged by the
-    # mobile ONLY into a button whose data already has the "goal" key — so the
-    # Update button seeds it, and Run/Cancel omit it (a tap on them ignores an
-    # unsaved edit and is never blocked by the required-goal check).
+    # Run/Cancel carry only the identity. The mobile merges the typed instruction
+    # ONLY into a button whose data already has the "instruction" key — so the
+    # Revise button seeds it, and Run/Cancel omit it (a tap on them ignores an
+    # unsent instruction and is never blocked by the required-field check).
     ident = {"plan_id": row.id, "revision": row.revision}
-    edit = {**ident, "goal": row.goal}
+    revise = {**ident, "instruction": ""}
     return {
         "household_id": household_id,
         "plan_id": row.id,
         "revision": row.revision,
         "routine_slug": row.routine_slug,
         "steps": node_steps,  # structured read-only view of the steps
-        # An editable free-text goal → "Update plan" re-plans. NB: do NOT set
-        # editor_schema (>2 disables the buttons in the mobile client).
+        # A free-text "tell it what to change" box → Revise re-plans the current
+        # plan conversationally. NB: do NOT set editor_schema (>2 disables buttons).
         "editable_fields": [
             {
-                "label": "Goal",
-                "initial": row.goal,
-                "data_key": "goal",
+                "label": "Tell me what to change",
+                "initial": "",
+                "data_key": "instruction",
                 "input_type": "text",
                 "required": True,
             },
@@ -160,12 +161,12 @@ def build_plan_card_metadata(
                 "data": ident,
             },
             {
-                "id": "update-errand",
-                "label": "Update plan",
+                "id": "revise-errand",
+                "label": "Revise",
                 "command": ERRAND_CALLBACK_COMMAND,
-                "callback": ERRAND_REPLAN_CALLBACK,
+                "callback": ERRAND_REFINE_CALLBACK,
                 "target": "server",
-                "data": edit,
+                "data": revise,
             },
             {
                 "id": "cancel-errand",
@@ -525,7 +526,6 @@ async def _handle_replan_errand_plan(ctx: ServerCallbackContext) -> ServerCallba
     the revision (so the old card's Run is rejected as stale), and post the
     refreshed plan card for another review pass.
     """
-    from app.api.routines import publish_routines_sync
     from app.core.llm_proxy_client import LLMProxyClient
     from app.db import get_session_local
 
@@ -576,55 +576,123 @@ async def _handle_replan_errand_plan(ctx: ServerCallbackContext) -> ServerCallba
                 success=False, error="I hit a snag re-planning that — try again in a bit.",
             )
 
-        node_steps = plan.routine_steps()
-        mobile_steps = _build_mobile_steps(node_steps)
-
-        # Update the transient routine's steps in place (same slug). If the
-        # vehicle somehow vanished, recreate it under the row's slug.
-        routine = (
-            db.query(Routine)
-            .filter(Routine.slug == row.routine_slug, Routine.household_id == ctx.household_id)
-            .first()
-        )
-        if routine is not None:
-            routine.steps = json.dumps(mobile_steps)
-            routine.name = f"Errand: {plan.summary}"[:255]
-        else:
-            db.add(Routine(
-                id=str(uuid4()), household_id=ctx.household_id, slug=row.routine_slug,
-                name=f"Errand: {plan.summary}"[:255], trigger_phrases=json.dumps([]),
-                steps=json.dumps(mobile_steps), response_instruction="",
-                response_length="short", schedule=None, enabled=True,
-            ))
-
-        row.goal = new_goal
-        row.summary = plan.summary
-        row.steps = json.dumps(node_steps)
-        row.revision = row.revision + 1
-        db.commit()
-
-        try:
-            publish_routines_sync(ctx.household_id, db)
-        except Exception:  # noqa: BLE001 — best-effort nudge
-            logger.exception("Re-plan routine-sync nudge failed for %s", row.id)
-
-        # The re-posted plan card (new revision) IS the feedback — no extra card.
-        # Best-effort: the re-plan is already committed, so a card failure (incl. a
-        # post-commit attribute reload) must not flip the callback to FAILED.
-        try:
-            _post_errand_plan_card(row, node_steps, ctx.household_id, row.user_id)
-        except Exception:  # noqa: BLE001 — committed re-plan must survive a dead card
-            logger.exception("Re-plan card re-post failed for %s", row.id)
+        _apply_plan_revision(db, row, plan, ctx.household_id, new_goal=new_goal)
         logger.info("Errand %s re-planned (goal=%r rev=%d)", row.id, new_goal, row.revision)
         return ServerCallbackResult(success=True)
     finally:
         db.close()
 
 
+def _apply_plan_revision(
+    db: Session, row: ErrandPlan, plan: Any, household_id: str, new_goal: str | None = None
+) -> None:
+    """Update the draft + its transient routine IN PLACE from a revised plan, bump
+    the revision (old card's Run → stale), re-nudge, and re-post the plan card.
+    Shared by re-plan (edits the goal) and refine (keeps it). All post-commit side
+    effects are best-effort so a committed revision never flips the callback to
+    FAILED."""
+    from app.api.routines import publish_routines_sync
+
+    node_steps = plan.routine_steps()
+    mobile_steps = _build_mobile_steps(node_steps)
+    routine = (
+        db.query(Routine)
+        .filter(Routine.slug == row.routine_slug, Routine.household_id == household_id)
+        .first()
+    )
+    if routine is not None:
+        routine.steps = json.dumps(mobile_steps)
+        routine.name = f"Errand: {plan.summary}"[:255]
+    else:  # vehicle vanished — recreate under the row's slug
+        db.add(Routine(
+            id=str(uuid4()), household_id=household_id, slug=row.routine_slug,
+            name=f"Errand: {plan.summary}"[:255], trigger_phrases=json.dumps([]),
+            steps=json.dumps(mobile_steps), response_instruction="",
+            response_length="short", schedule=None, enabled=True,
+        ))
+    if new_goal is not None:
+        row.goal = new_goal
+    row.summary = plan.summary
+    row.steps = json.dumps(node_steps)
+    row.revision = row.revision + 1
+    db.commit()
+
+    try:
+        publish_routines_sync(household_id, db)
+    except Exception:  # noqa: BLE001 — best-effort nudge
+        logger.exception("Errand %s routine-sync nudge failed", row.id)
+    try:
+        _post_errand_plan_card(row, node_steps, household_id, row.user_id)
+    except Exception:  # noqa: BLE001 — committed revision must survive a dead card
+        logger.exception("Errand %s card re-post failed", row.id)
+
+
+async def _handle_refine_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackResult:
+    """Revise tap → refine the plan from a natural-language instruction ("call,
+    don't email"). Feeds the planner the CURRENT plan + the instruction (not a
+    fresh goal) and re-posts the refreshed card. Same guards as re-plan."""
+    from app.core.llm_proxy_client import LLMProxyClient
+    from app.db import get_session_local
+
+    db = get_session_local()()
+    try:
+        plan_id = ctx.data.get("plan_id")
+        instruction = (ctx.data.get("instruction") or "").strip()
+        if not plan_id:
+            return ServerCallbackResult(success=False, error="Missing plan_id")
+        if not instruction:
+            return ServerCallbackResult(success=False, error="Tell me what to change first.")
+        row = (
+            db.query(ErrandPlan)
+            .filter(ErrandPlan.id == plan_id, ErrandPlan.household_id == ctx.household_id)
+            .first()
+        )
+        if row is None:
+            return ServerCallbackResult(success=False, error="Errand plan not found")
+        if row.state != "draft":
+            return ServerCallbackResult(
+                success=True,
+                context_data={"inbox": {
+                    "title": "Errand already handled",
+                    "summary": f"This errand is already {row.state} — it can't be changed.",
+                    "metadata": {"household_id": ctx.household_id},
+                }},
+            )
+        if not _revisions_match(ctx.data.get("revision"), row.revision):
+            return ServerCallbackResult(
+                success=False,
+                error="This plan was updated — open the latest card to change it.",
+            )
+
+        current_steps = json.loads(row.steps or "[]")
+        menu = await _resolve_node_menu(row.node_id)
+        try:
+            plan = await refine_errand_plan(
+                row.summary or row.goal, current_steps, instruction, LLMProxyClient(), menu=menu
+            )
+        except ValueError as e:
+            logger.info("Refine produced no usable plan (%r): %s", instruction, e)
+            return ServerCallbackResult(
+                success=False, error="I couldn't apply that change — try saying it differently.",
+            )
+        except Exception:  # noqa: BLE001 — infra; row untouched, old card stays valid
+            logger.exception("Refine planner call failed (%r)", instruction)
+            return ServerCallbackResult(
+                success=False, error="I hit a snag revising that — try again in a bit.",
+            )
+
+        _apply_plan_revision(db, row, plan, ctx.household_id)  # goal unchanged by a refine
+        logger.info("Errand %s refined (%r rev=%d)", row.id, instruction, row.revision)
+        return ServerCallbackResult(success=True)
+    finally:
+        db.close()
+
+
 def register_errand_callbacks() -> None:
-    """Wire the plan card's Run/Update/Cancel taps to their handlers. Call at
+    """Wire the plan card's Run/Revise/Cancel taps to their handlers. Call at
     startup (main.py lifespan) — an unregistered pair 400s at the tap."""
     register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_APPROVE_CALLBACK, _handle_approve_errand_plan)
+    register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_REFINE_CALLBACK, _handle_refine_errand_plan)
     register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_REPLAN_CALLBACK, _handle_replan_errand_plan)
     register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_DISCARD_CALLBACK, _handle_discard_errand_plan)
     logger.info("🗒️ Errand server callbacks registered")

@@ -97,23 +97,23 @@ def test_plan_card_metadata_is_server_plane_with_errand_callbacks():
 
     els = md["interactive_elements"]
     assert [e["callback"] for e in els] == [
-        "approve_errand_plan", "replan_errand_plan", "discard_errand_plan",
+        "approve_errand_plan", "refine_errand_plan", "discard_errand_plan",
     ]
     for e in els:
         assert e["command"] == "errand" and e["target"] == "server"
 
     by_cb = {e["callback"]: e for e in els}
-    # Run/Cancel carry only identity (no "goal" → unaffected by an unsaved edit)
+    # Run/Cancel carry only identity (no "instruction" → unaffected by an unsent edit)
     assert by_cb["approve_errand_plan"]["data"] == {"plan_id": "pl_abc", "revision": 2}
     assert by_cb["discard_errand_plan"]["data"] == {"plan_id": "pl_abc", "revision": 2}
-    # Update SEEDS goal so the mobile merges the edited text into it
-    assert by_cb["replan_errand_plan"]["data"] == {
-        "plan_id": "pl_abc", "revision": 2, "goal": "check the weather",
+    # Revise SEEDS an empty instruction so the mobile merges the typed change into it
+    assert by_cb["refine_errand_plan"]["data"] == {
+        "plan_id": "pl_abc", "revision": 2, "instruction": "",
     }
-    # the editable goal field renders (generic mobile editor)
+    # the "tell it what to change" field renders (generic mobile editor)
     ef = md["editable_fields"]
-    assert ef == [{"label": "Goal", "initial": "check the weather",
-                   "data_key": "goal", "input_type": "text", "required": True}]
+    assert ef == [{"label": "Tell me what to change", "initial": "",
+                   "data_key": "instruction", "input_type": "text", "required": True}]
 
 
 # ── create_errand_plan orchestration ─────────────────────────────────────────
@@ -406,8 +406,77 @@ def test_register_errand_callbacks_registers_all_pairs():
     errand_service.register_errand_callbacks()
     pairs = registered_server_callbacks()
     assert ("errand", "approve_errand_plan") in pairs
+    assert ("errand", "refine_errand_plan") in pairs
     assert ("errand", "replan_errand_plan") in pairs
     assert ("errand", "discard_errand_plan") in pairs
+
+
+# ── refine handler: "tell it what to change" → revised plan ──────────────────
+
+
+def test_refine_updates_plan_from_instruction_and_keeps_goal():
+    row = _plan_row(state="draft", revision=1)  # goal="g", summary="Do it"
+    row.steps = json.dumps([{"command": "get_news", "args": {}, "label": "News"}])
+    routine = SimpleNamespace(slug="errand_x", steps="[]", name="old")
+    db = _handler_db([row, routine])
+    plan = SimpleNamespace(
+        summary="Weather instead",
+        routine_steps=lambda: [{"command": "get_weather", "args": {"resolved_datetimes": ["today"]}, "label": "W"}],
+    )
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.core.llm_proxy_client.LLMProxyClient", return_value=MagicMock()), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
+         patch.object(errand_service, "refine_errand_plan", new=AsyncMock(return_value=plan)) as refine, \
+         patch("app.api.routines.publish_routines_sync") as nudge, \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        res = asyncio.run(errand_service._handle_refine_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1, "instruction": "give me the weather, not the news"})))
+    assert res.success is True
+    assert row.summary == "Weather instead" and row.revision == 2
+    assert row.goal == "g"  # a refine does NOT rewrite the goal
+    assert json.loads(row.steps)[0]["command"] == "get_weather"
+    assert json.loads(routine.steps)[0]["args"] == [{"key": "resolved_datetimes", "value": '["today"]'}]
+    # refine got the CURRENT plan (summary + steps) + the instruction
+    args = refine.call_args.args
+    assert args[0] == "Do it" and args[1] == [{"command": "get_news", "args": {}, "label": "News"}]
+    assert args[2] == "give me the weather, not the news"
+    nudge.assert_called_once()
+    card.assert_called_once()
+
+
+def test_refine_rejects_empty_instruction():
+    db = MagicMock()
+    with patch("app.db.get_session_local", return_value=lambda: db):
+        res = asyncio.run(errand_service._handle_refine_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1, "instruction": "   "})))
+    assert res.success is False and "what to change" in res.error.lower()
+
+
+def test_refine_rejects_stale_revision():
+    row = _plan_row(revision=3)
+    db = _handler_db([row])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch.object(errand_service, "refine_errand_plan", new=AsyncMock()) as refine:
+        res = asyncio.run(errand_service._handle_refine_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1, "instruction": "change it"})))
+    assert res.success is False and "updated" in res.error
+    refine.assert_not_awaited()
+    assert row.revision == 3
+
+
+def test_refine_friendly_error_on_infra_failure():
+    row = _plan_row(revision=1)
+    row.steps = "[]"
+    db = _handler_db([row])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.core.llm_proxy_client.LLMProxyClient", return_value=MagicMock()), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
+         patch.object(errand_service, "refine_errand_plan",
+                      new=AsyncMock(side_effect=RuntimeError("proxy down"))):
+        res = asyncio.run(errand_service._handle_refine_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1, "instruction": "call instead"})))
+    assert res.success is False and "snag" in res.error.lower()
+    assert row.revision == 1  # untouched on failure
 
 
 # ── edit / re-plan handler (edit goal → re-plan → refreshed card) ────────────
@@ -438,8 +507,7 @@ def test_replan_updates_row_and_routine_and_bumps_revision():
     assert json.loads(routine.steps)[0]["args"] == [{"key": "category", "value": "sports"}]
     nudge.assert_called_once()
     card.assert_called_once()  # refreshed plan card re-posted
-    md = card.call_args.kwargs["metadata"]
-    assert md["revision"] == 2 and md["editable_fields"][0]["initial"] == "get me the sports news"
+    assert card.call_args.kwargs["metadata"]["revision"] == 2  # carries the bumped revision
 
 
 def test_replan_rejects_empty_goal():

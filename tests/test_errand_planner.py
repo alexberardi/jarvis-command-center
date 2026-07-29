@@ -119,6 +119,7 @@ def test_build_errand_menu_filters_deny_and_junk():
         {"command_name": "get_weather", "description": "w", "parameters": []},
         {"command_name": "chat", "description": "conversation"},        # denied
         {"command_name": "act_on_items", "description": "follow-ups"},  # denied
+        {"command_name": "email", "description": "send an email"},      # denied (no provenance)
         {"command_name": "", "description": "blank"},                    # junk
         {"description": "no name"},                                      # junk
     ]
@@ -129,3 +130,44 @@ def test_build_errand_menu_filters_deny_and_junk():
 def test_build_errand_menu_empty_on_none():
     assert errand_planner.build_errand_menu(None) == []
     assert errand_planner.build_errand_menu([]) == []
+
+
+# ── refine_errand_plan: revise an existing plan from an instruction ──────────
+
+
+def test_refine_errand_plan_revises_from_instruction():
+    client = _client(_plan({
+        "summary": "Call them instead",
+        "steps": [{"command": "get_weather", "args": {}, "label": "W"}],
+    }))
+    plan = asyncio.run(errand_planner.refine_errand_plan(
+        "Email the office", [{"command": "get_news", "args": {}, "label": "News"}],
+        "call them instead of emailing", client))
+    assert plan.summary == "Call them instead"
+    # the refine prompt carries the CURRENT plan + the instruction (not a fresh goal)
+    sent = client.chat_completion.call_args.kwargs["messages"][0]["content"]
+    assert "Email the office" in sent and "call them instead of emailing" in sent
+
+
+def test_refine_keeps_existing_steps_even_when_menu_degrades():
+    # menu degraded to the 6-command default (no set_timer), but the current plan
+    # HAS set_timer — a refine must not drop it just because the node fetch failed.
+    client = _client(_plan({
+        "summary": "Timer plus weather",
+        "steps": [
+            {"command": "set_timer", "args": {"duration_seconds": "600"}, "label": "Timer"},
+            {"command": "get_weather", "args": {}, "label": "W"},
+        ],
+    }))
+    plan = asyncio.run(errand_planner.refine_errand_plan(
+        "Timer", [{"command": "set_timer", "args": {}, "label": "Timer"}],
+        "also check the weather", client, menu=errand_planner.COMMAND_MENU))
+    cmds = [s.command for s in plan.steps]
+    assert "set_timer" in cmds and "get_weather" in cmds  # existing set_timer survives
+
+
+def test_plan_and_refine_prompts_forbid_fabrication():
+    guard = "Never invent contact details"
+    assert guard in errand_planner._build_prompt("email my doctor", errand_planner.COMMAND_MENU)
+    assert guard in errand_planner._build_refine_prompt(
+        "Email them", [{"command": "get_news"}], "call instead", errand_planner.COMMAND_MENU)

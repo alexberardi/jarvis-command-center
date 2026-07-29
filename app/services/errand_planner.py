@@ -48,6 +48,12 @@ ERRAND_MENU_DENY: frozenset[str] = frozenset({
     "act_on_items",     # depends on the live conversation's referenced_items
     "send_link",        # needs a live speaker/device target
     "control_node",     # live on-device hardware control (volume, etc.)
+    # Outbound-to-a-THIRD-PARTY commands. The errand planner has no provenance'd
+    # contact resolution, so it fabricates recipients (observed: an "email" step
+    # to a made-up address). STRUCTURALLY denied until the gated "contact a
+    # business" capability (resolution + channel choice + escalation) exists — a
+    # prompt guardrail alone doesn't stop the model from inventing a recipient.
+    "email", "send_message", "send_email", "send_text",
 })
 
 
@@ -95,6 +101,17 @@ class ErrandPlan:
         return [s.as_routine_step() for s in self.steps]
 
 
+# Provenance guardrail: the planner must not invent third-party data. This is
+# the "no messages/calls without provenance" rule — a step that needs a recipient
+# or contact the planner wasn't given is left out, not fabricated.
+_FABRICATION_GUARDRAIL = (
+    "Never invent contact details (email addresses, phone numbers, mailing "
+    "addresses) or any specific data you weren't given. If a step would need a "
+    "recipient, contact, or fact you don't have, LEAVE THAT STEP OUT rather than "
+    "guess.\n\n"
+)
+
+
 def _build_prompt(goal: str, menu: list[dict[str, Any]]) -> str:
     menu_text = "\n".join(
         f"- {c['command']}: {c['description']} | args: {json.dumps(c['args'])}" for c in menu
@@ -107,6 +124,7 @@ def _build_prompt(goal: str, menu: list[dict[str, Any]]) -> str:
         "step a short human-readable label.\n\n"
         f"Available commands:\n{menu_text}\n\n"
         f"User's goal: {goal}\n\n"
+        + _FABRICATION_GUARDRAIL +
         'Return ONLY a JSON object: {"summary": "<one-line plain-English plan>", '
         '"steps": [{"command": "<name>", "args": {...}, "label": "<short label>"}]}. '
         "No prose, no markdown.\n\n"
@@ -144,20 +162,37 @@ def _strip_fences(text: str) -> str:
     return text
 
 
-async def plan_errand(
-    goal: str, llm_client: Any, menu: list[dict[str, Any]] | None = None
-) -> ErrandPlan:
-    """Plan an errand from a goal.
+def _build_refine_prompt(
+    summary: str, current_steps: list[dict[str, Any]], instruction: str,
+    menu: list[dict[str, Any]],
+) -> str:
+    """Prompt to REVISE an existing plan given a natural-language instruction —
+    the conversational "tell it what to change" path (not a fresh re-plan)."""
+    menu_text = "\n".join(
+        f"- {c['command']}: {c['description']} | args: {json.dumps(c['args'])}" for c in menu
+    )
+    return (
+        "You are Jarvis's errand planner revising an EXISTING plan. Apply the "
+        "user's change to the current plan, keeping the parts they didn't ask to "
+        "change. Choose ONLY from the available commands and keep the plan "
+        "minimal.\n\n"
+        f"Current plan: {summary}\n"
+        f"Current steps: {json.dumps(current_steps)}\n\n"
+        f"Available commands:\n{menu_text}\n\n"
+        f"The user wants this change: {instruction}\n\n"
+        + _FABRICATION_GUARDRAIL +
+        'Return ONLY the revised JSON object: {"summary": "<one-line plan>", '
+        '"steps": [{"command": "<name>", "args": {...}, "label": "<short label>"}]}. '
+        "No prose, no markdown.\n\n"
+        "/no_think"
+    )
 
-    Raises ``ValueError`` if the LLM output is empty, unparseable, or yields no
-    step drawn from the menu — the caller turns that into a "couldn't plan that"
-    card rather than a broken plan.
-    """
-    menu = menu or COMMAND_MENU
-    allowed = {c["command"] for c in menu}
 
+async def _run_planner(prompt: str, llm_client: Any) -> dict[str, Any]:
+    """Single planner LLM call → parsed JSON dict. Raises ValueError on an empty
+    or unparseable response (see the /no_think + max_tokens notes in _build_prompt)."""
     response = await llm_client.chat_completion(
-        messages=[{"role": "user", "content": _build_prompt(goal, menu)}],
+        messages=[{"role": "user", "content": prompt}],
         temperature=0,
         # Headroom so a model that ignores /no_think and reasons anyway still has
         # room for its <think> pass AND the JSON (measured up to ~1900 tokens).
@@ -167,10 +202,16 @@ async def plan_errand(
     if not raw:
         raise ValueError("planner returned an empty response")
     try:
-        data = json.loads(_strip_fences(raw))
+        return json.loads(_strip_fences(raw))
     except json.JSONDecodeError as e:
         raise ValueError(f"planner returned invalid JSON: {e}") from e
 
+
+def _plan_from_data(
+    data: dict[str, Any], allowed: set[str], fallback_summary: str
+) -> ErrandPlan:
+    """Validate the LLM's steps against the menu, dropping unknown commands.
+    Raises ValueError if nothing usable survives."""
     steps: list[PlanStep] = []
     for s in data.get("steps", []) or []:
         cmd = (s.get("command") or "").strip()
@@ -182,5 +223,36 @@ async def plan_errand(
         )
     if not steps:
         raise ValueError("planner produced no usable steps")
+    return ErrandPlan(summary=(data.get("summary") or fallback_summary).strip(), steps=steps)
 
-    return ErrandPlan(summary=(data.get("summary") or goal).strip(), steps=steps)
+
+async def plan_errand(
+    goal: str, llm_client: Any, menu: list[dict[str, Any]] | None = None
+) -> ErrandPlan:
+    """Plan an errand from a goal.
+
+    Raises ``ValueError`` if the LLM output is empty, unparseable, or yields no
+    step drawn from the menu — the caller turns that into a "couldn't plan that"
+    card rather than a broken plan.
+    """
+    menu = menu or COMMAND_MENU
+    data = await _run_planner(_build_prompt(goal, menu), llm_client)
+    return _plan_from_data(data, {c["command"] for c in menu}, goal)
+
+
+async def refine_errand_plan(
+    summary: str, current_steps: list[dict[str, Any]], instruction: str,
+    llm_client: Any, menu: list[dict[str, Any]] | None = None,
+) -> ErrandPlan:
+    """Revise an existing plan from a natural-language instruction (the "tell it
+    what to change" path). Same failure contract as ``plan_errand``."""
+    menu = menu or COMMAND_MENU
+    data = await _run_planner(
+        _build_refine_prompt(summary, current_steps, instruction, menu), llm_client
+    )
+    # Never let a degraded menu (a transient node-fetch failure falls back to
+    # COMMAND_MENU) strip steps the plan already had — union the menu's commands
+    # with the current plan's, so a refine always preserves what it didn't change.
+    allowed = {c["command"] for c in menu}
+    allowed |= {s["command"] for s in current_steps if s.get("command")}
+    return _plan_from_data(data, allowed, summary)
