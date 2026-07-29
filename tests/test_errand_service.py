@@ -116,6 +116,43 @@ def test_plan_card_metadata_is_server_plane_with_errand_callbacks():
                    "data_key": "instruction", "input_type": "text", "required": True}]
 
 
+# ── plan card: in-place update vs post (so Revise refreshes, not duplicates) ──
+
+_STEPS = [{"command": "get_weather", "args": {}, "label": "W"}]
+
+
+def test_post_card_updates_in_place_when_id_exists():
+    row = _plan_row()
+    row.inbox_item_id = "card-123"
+    with patch.object(errand_service, "update_inbox_item_sync", return_value=True) as upd, \
+         patch.object(errand_service, "post_inbox_item_sync") as post:
+        cid = errand_service._post_errand_plan_card(row, _STEPS, "hh-1", 7)
+    upd.assert_called_once()
+    assert upd.call_args.kwargs["item_id"] == "card-123"
+    post.assert_not_called()  # updated in place, NOT duplicated
+    assert cid == "card-123"
+
+
+def test_post_card_falls_back_to_post_when_update_fails():
+    row = _plan_row()
+    row.inbox_item_id = "gone-card"  # e.g. the user deleted it → 404
+    with patch.object(errand_service, "update_inbox_item_sync", return_value=False), \
+         patch.object(errand_service, "post_inbox_item_sync", return_value="new-card") as post:
+        cid = errand_service._post_errand_plan_card(row, _STEPS, "hh-1", 7)
+    post.assert_called_once()
+    assert cid == "new-card"
+
+
+def test_post_card_posts_new_when_no_id():
+    row = _plan_row()  # inbox_item_id is None on a fresh plan
+    with patch.object(errand_service, "update_inbox_item_sync") as upd, \
+         patch.object(errand_service, "post_inbox_item_sync", return_value="fresh") as post:
+        cid = errand_service._post_errand_plan_card(row, _STEPS, "hh-1", 7)
+    upd.assert_not_called()
+    post.assert_called_once()
+    assert cid == "fresh"
+
+
 # ── create_errand_plan orchestration ─────────────────────────────────────────
 
 

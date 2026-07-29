@@ -264,6 +264,46 @@ def post_inbox_item_sync(
     return inbox_item_id
 
 
+def update_inbox_item_sync(
+    *,
+    item_id: str,
+    household_id: str,
+    title: str,
+    summary: str,
+    body: str,
+    category: str,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
+    """PATCH an existing inbox item's content IN PLACE (same id) — used to refresh
+    a card, e.g. a revised errand plan, so it updates where the user is looking
+    instead of posting a duplicate. Returns True on success; False if the item is
+    gone (404) or the call failed, so the caller can post a fresh card instead."""
+    notifications_url = _get_notifications_url()
+    app_headers = _get_app_headers()
+    payload: dict[str, Any] = {
+        "household_id": household_id,
+        "title": title,
+        "summary": summary,
+        "body": body,
+        "category": category,
+        "metadata": metadata or {},
+    }
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.patch(
+                f"{notifications_url}/api/v0/inbox/{item_id}",
+                json=payload,
+                headers=app_headers,
+            )
+            if resp.status_code == 404:
+                return False
+            resp.raise_for_status()
+            return True
+    except Exception as e:
+        logger.error("Failed to update inbox item %s: %s", item_id, e)
+        return False
+
+
 def send_link_push_sync(
     *,
     household_id: str,

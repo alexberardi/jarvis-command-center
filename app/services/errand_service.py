@@ -29,7 +29,10 @@ from sqlalchemy.orm import Session
 
 from app.models import ErrandPlan, Routine
 from app.services.errand_planner import build_errand_menu, plan_errand, refine_errand_plan
-from app.services.inbox_notification_service import post_inbox_item_sync
+from app.services.inbox_notification_service import (
+    post_inbox_item_sync,
+    update_inbox_item_sync,
+)
 from app.services.server_callback_registry import (
     ServerCallbackContext,
     ServerCallbackResult,
@@ -186,20 +189,34 @@ def _post_errand_plan_card(
     household_id: str,
     user_id: int | None,
 ) -> str | None:
-    """Push the plan card (Run/Cancel) to the initiating user's inbox.
-
-    Best-effort: ``post_inbox_item_sync`` swallows its own failures and returns
-    None, and the draft is already committed — a lost card never fails the errand
-    (mirrors the phone card's fire-and-forget discipline).
+    """Post the plan card, OR — if this plan already has a card (``inbox_item_id``)
+    — UPDATE it IN PLACE so a Revise/re-plan refreshes the card the user is looking
+    at instead of posting a duplicate. Returns the card's inbox item id (unchanged
+    on update, new on create), or None on failure. Best-effort: the draft is
+    already committed, so a lost card never fails the errand.
     """
     summary = row.summary or row.goal
+    title = f"🗒️ Errand plan: {summary}"
+    body = _plan_card_body(summary, node_steps)
+    metadata = build_plan_card_metadata(row, node_steps, household_id)
+
+    if row.inbox_item_id:
+        # In-place update (same card id) — the whole point of storing the id.
+        if update_inbox_item_sync(
+            item_id=row.inbox_item_id, household_id=household_id,
+            title=title, summary=summary, body=body,
+            category=ERRAND_PLAN_CATEGORY, metadata=metadata,
+        ):
+            return row.inbox_item_id
+        # The card was deleted/gone — fall through to post a fresh one.
+
     return post_inbox_item_sync(
         household_id=household_id,
-        title=f"🗒️ Errand plan: {summary}",
+        title=title,
         summary=summary,
-        body=_plan_card_body(summary, node_steps),
+        body=body,
         category=ERRAND_PLAN_CATEGORY,
-        metadata=build_plan_card_metadata(row, node_steps, household_id),
+        metadata=metadata,
         user_id=user_id,
         push=True,
         target_type="user" if user_id is not None else "household",
@@ -286,9 +303,13 @@ async def create_errand_plan(
     except Exception:  # noqa: BLE001 — a failed nudge must not fail the errand
         logger.exception("Errand routine-sync nudge failed for %s", row.id)
 
-    # 4. Plan card — best-effort; the draft is already committed.
+    # 4. Plan card — best-effort; the draft is already committed. Store its inbox
+    #    item id so a later Revise updates THIS card in place.
     try:
-        _post_errand_plan_card(row, node_steps, household_id, user_id)
+        card_id = _post_errand_plan_card(row, node_steps, household_id, user_id)
+        if card_id and card_id != row.inbox_item_id:
+            row.inbox_item_id = card_id
+            db.commit()
     except Exception:  # noqa: BLE001 — a failed card must not fail the errand
         logger.exception("Errand plan card push failed for %s", row.id)
 
@@ -622,7 +643,10 @@ def _apply_plan_revision(
     except Exception:  # noqa: BLE001 — best-effort nudge
         logger.exception("Errand %s routine-sync nudge failed", row.id)
     try:
-        _post_errand_plan_card(row, node_steps, household_id, row.user_id)
+        card_id = _post_errand_plan_card(row, node_steps, household_id, row.user_id)
+        if card_id and card_id != row.inbox_item_id:
+            row.inbox_item_id = card_id
+            db.commit()
     except Exception:  # noqa: BLE001 — committed revision must survive a dead card
         logger.exception("Errand %s card re-post failed", row.id)
 

@@ -1029,6 +1029,7 @@ class ErrandPlan(Base):
     summary = Column(Text, nullable=True)             # planner's one-line plain-English plan
     steps = Column(Text, nullable=False, default="[]")  # JSON array of routine-shaped steps
     routine_slug = Column(String(255), nullable=True)   # transient routine created for execution
+    inbox_item_id = Column(String(64), nullable=True)   # the plan card's inbox item — updated in place on revise
     state = Column(String(16), nullable=False, default="draft", index=True)  # draft|running|done|partial|failed|timeout|cancelled|expired
     revision = Column(Integer, nullable=False, default=1)  # bumps on edit; stale-approval guard
     error = Column(Text, nullable=True)
