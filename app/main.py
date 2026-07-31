@@ -197,6 +197,32 @@ async def startup_event():
 
     asyncio.create_task(_periodic_cleanup())
 
+    # Safety sweep for wait-and-decide errands: resume any errand stuck 'waiting'
+    # whose linked phone call has finished via a path the immediate finalization
+    # hook doesn't cover (declined/expired) or was missed (restart/transient error).
+    async def _periodic_errand_resume() -> None:
+        # Startup recovery FIRST (once): any workflow left 'running' by the previous
+        # process is an orphan (nothing drives it now) — land it terminal with an
+        # honest card. Race-free because no driver exists yet at boot.
+        try:
+            from app.services.errand_service import recover_orphaned_running_workflows
+            await recover_orphaned_running_workflows()
+        except Exception as e:
+            logger.warning("Startup workflow recovery failed: %s", e)
+        while True:
+            await asyncio.sleep(20)
+            try:
+                from app.services.errand_service import (
+                    resume_due_timer_workflows,
+                    resume_waiting_errands,
+                )
+                await resume_waiting_errands()       # phone-outcome wakeup + timeout
+                await resume_due_timer_workflows()   # timer wakeup (wait_for steps)
+            except Exception as e:
+                logger.warning("Workflow resume sweep failed: %s", e)
+
+    asyncio.create_task(_periodic_errand_resume())
+
     # Include settings router (after service_config is initialized so auth URL resolves)
     from jarvis_settings_client import create_settings_router, create_combined_auth, create_superuser_auth
     from app.services.settings_service import get_settings_service

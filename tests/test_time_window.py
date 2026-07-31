@@ -142,3 +142,36 @@ class TestDegradation:
     def test_placeholder_only_envelope_does_not_judge(self):
         r = check_time("Acceptable times: (fill in your availability)", "Thursday at noon")
         assert r.available is None
+
+
+class TestFallOpenHardening:
+    """Realistic envelope shapes that used to fall open to the model (available=None)
+    and let a bad slot through — the live 'booked during a bad Tuesday window' bug."""
+
+    def test_blocked_slot_vetoed_even_when_acceptable_did_not_parse(self):
+        # SAFETY: a freeform 'Acceptable times:' can't be parsed, but a proposed slot
+        # inside a real 'Do not book:' window must still be declined — never fall open.
+        env = "Acceptable times: whenever works for you\nDo not book: Tue 8am-4pm"
+        r = check_time(env, "Can you do Tuesday at noon?")
+        assert r.available is False
+
+    def test_date_stamped_windows_parse(self):
+        env = "Acceptable times: Tue Aug 5 4-8pm\nDo not book: Tue Aug 5 8am-4pm"
+        assert check_time(env, "Tuesday at 1pm?").available is False
+        assert check_time(env, "Tuesday at 6pm?").available is True
+
+    def test_to_separator_and_dotted_meridiem(self):
+        env = ("Acceptable times: Tuesday 4 p.m. to 8 p.m.\n"
+               "Do not book: Tuesday 8 a.m. to 4 p.m.")
+        assert check_time(env, "Tuesday at 10am?").available is False
+        assert check_time(env, "Tuesday at 5pm?").available is True
+
+    def test_good_slot_unaffected_by_the_blocked_veto(self):
+        env = "Acceptable times: Tue 4-8pm\nDo not book: Tue 8am-4pm"
+        assert check_time(env, "How about Tuesday at 6pm?").available is True
+        assert check_time(env, "Tuesday at 6?").available is True  # bare hour -> 6pm
+
+    def test_fully_freeform_still_falls_open(self):
+        # Nothing parseable at all — the model legitimately carries the turn.
+        env = "Acceptable times: Tuesday afternoons\nDo not book: Tuesday mornings"
+        assert check_time(env, "Tuesday at 9am?").available is None

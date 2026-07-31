@@ -9,12 +9,21 @@ Implements a verify-callback pattern:
 
 This prevents forged MQTT messages from triggering actions on nodes.
 """
+import asyncio
 import json
 import logging
+import os
+import tempfile
+import time
 from datetime import datetime, timedelta
 from uuid import uuid4
 
 logger = logging.getLogger("uvicorn")
+
+# The node POSTs a command's result to CC's POST /device-control-results/{request_id},
+# which writes it here. All single-command dispatch paths (mobile chat, errands,
+# device control) share this dir + the request_id-as-filename correlation.
+_RESULT_DIR = os.path.join(tempfile.gettempdir(), "jarvis-device-control")
 
 # Singleton instance
 _service: "NodeCommandService | None" = None
@@ -104,3 +113,84 @@ def get_node_command_service() -> NodeCommandService:
     if _service is None:
         _service = NodeCommandService()
     return _service
+
+
+async def _await_result_file(request_id: str, timeout: float) -> dict | None:
+    """Poll <tmpdir>/jarvis-device-control/{request_id}.json for the node's reply.
+
+    The node POSTs its result to CC's /device-control-results/{request_id}; that
+    handler writes the file. Returns the parsed body (and deletes the file) or
+    None on timeout. Correlation is purely the request_id in the filename.
+    """
+    os.makedirs(_RESULT_DIR, exist_ok=True)
+    result_file = os.path.join(_RESULT_DIR, f"{request_id}.json")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(result_file):
+            try:
+                with open(result_file) as f:
+                    result = json.load(f)
+                os.unlink(result_file)
+                return result
+            except (json.JSONDecodeError, OSError):
+                pass
+        await asyncio.sleep(0.1)
+    try:
+        os.unlink(result_file)
+    except OSError:
+        pass
+    return None
+
+
+async def dispatch_node_command(
+    node_id: str,
+    command_name: str,
+    arguments: dict | None = None,
+    *,
+    user_id: int | None = None,
+    voice_command: str | None = None,
+    tool_call_id: str | None = None,
+    timeout: float = 10.0,
+) -> dict:
+    """Run ONE command on a node headlessly and await its structured output.
+
+    Publishes the ``tool_call`` MQTT verb (the same one mobile chat uses — the
+    node's ``handle_tool_call`` looks the command up in its local registry, runs
+    ``cmd.execute(...)``, and POSTs ``{"output": {...}}`` back) and awaits the
+    result file. This is the per-step primitive the errand executor dispatches a
+    NODE step through — no transient routine, no pre-pull.
+
+    Returns the node's ``output`` dict on success — ``{...context_data, "success":
+    bool, "error"?: str, "message"?: str, "actions"?: [...]}``. On a publish
+    failure or a timeout (node offline / slow) returns a synthetic failure
+    ``{"success": False, "error": ..., "timeout": True?}`` — never raises for
+    those normal cases, so a caller looping over steps always gets a dict.
+    """
+    request_id = str(uuid4())
+    details: dict = {
+        "command_name": command_name,
+        "arguments": arguments or {},
+        "tool_call_id": tool_call_id or request_id,
+        "reply_request_id": request_id,
+        "trusted": True,
+    }
+    if user_id is not None:
+        details["user_id"] = user_id
+    if voice_command:
+        details["voice_command"] = voice_command
+
+    try:
+        get_node_command_service().publish_command_with_id(
+            node_id, "tool_call", details, request_id
+        )
+    except Exception as exc:  # noqa: BLE001 — surface as a failed step, don't crash the loop
+        logger.error("Node command publish failed for %s on %s: %s", command_name, node_id, exc)
+        return {"success": False, "error": f"could not dispatch to node: {exc}"}
+
+    result = await _await_result_file(request_id, timeout)
+    if result is None:
+        return {"success": False, "error": "the node didn't respond in time", "timeout": True}
+    output = result.get("output", result)
+    if not isinstance(output, dict):
+        output = {"success": True, "result": output}
+    return output

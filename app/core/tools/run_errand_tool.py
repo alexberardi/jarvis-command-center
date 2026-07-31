@@ -83,12 +83,18 @@ class RunErrandTool(IServerTool):
         # speaker is OK — the tap is authorized on a JWT device either way.
         speaker_user_id = node_context.get("speaker_user_id")
 
-        # Plan over the node's ACTUAL installed commands — read them from the live
-        # conversation (fresh in the cache during tool execution). Empty → None, so
-        # the draft path sources them from the node (or falls back to the default).
-        from app.services.errand_planner import build_errand_menu
+        # Plan over the node's ACTUAL installed commands UNION the enabled server
+        # tools (phone calls, research, memory…) — the errand's full building-block
+        # set. Node commands come from the live conversation (fresh in the cache
+        # during tool execution); server tools are gated per household exactly like
+        # the voice path gates them. Empty → None, so the draft path re-sources.
+        from app.services.errand_planner import build_full_errand_menu
 
-        menu = build_errand_menu(conversation_cache.get_available_commands(conversation_id)) or None
+        menu = build_full_errand_menu(
+            conversation_cache.get_available_commands(conversation_id),
+            household_id,
+            speaker_user_id,
+        ) or None
 
         try:
             from app.services.errand_service import draft_errand_plan_detached

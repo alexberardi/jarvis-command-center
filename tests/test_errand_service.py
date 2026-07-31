@@ -1,11 +1,11 @@
-"""Errand Runner POC chunk 3 — create_errand_plan orchestration + POST /errands.
+"""Errand Runner — create_errand_plan orchestration + per-step execution + POST /errands.
 
-Covers the load-bearing bits of the plan → transient-routine → draft → plan-card
+Covers the load-bearing bits of the plan → draft → plan-card → per-step-dispatch
 flow (prds/errand-runner.md §2-§3), all mocked (no DB/MQTT/HTTP/LLM):
 
-- the CRITICAL arg-shape inversion: Routine.steps must be MOBILE-native (args as
-  [{key,value}] pairs) so the node-pull _flatten_args round-trips it, while
-  ErrandPlan.steps stays NODE-native (args-as-object). Two columns, two shapes.
+- ErrandPlan.steps is NODE-native (args-as-object) and IS the plan — there is no
+  transient routine; the per-step executor dispatches each step to its plane
+  (node command over MQTT / server tool in-process).
 - the plan card is a SERVER-plane interactive card (interactive_elements with
   target:"server" → server_callback_registry), NOT node-plane.
 - the endpoint's node-auth identity extraction + planner-ValueError → 422 mapping.
@@ -18,10 +18,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from app.api.routines import _flatten_args
 from app.deps import get_db, verify_api_key
 from app.main import app
-from app.models import ErrandPlan
+from app.models import ErrandPlan, Workflow
 from app.services import errand_service
 from app.services.server_callback_registry import (
     ServerCallbackContext,
@@ -30,6 +29,112 @@ from app.services.server_callback_registry import (
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+
+class _FakeQuery:
+    """A model-scoped query over ``_FakeDB``. Filter criteria are ignored (tests
+    hold one row per model); ``first``/``all``/``update`` resolve by model."""
+
+    def __init__(self, db: "_FakeDB", model):
+        self._db = db
+        self._model = model
+
+    def filter(self, *a, **k):
+        return self
+
+    def filter_by(self, **k):
+        return self
+
+    def order_by(self, *a, **k):
+        return self
+
+    def first(self):
+        rows = self._db.rows(self._model)
+        return rows[0] if rows else None
+
+    def all(self):
+        return list(self._db.rows(self._model))
+
+    def update(self, values):
+        rows = self._db.rows(self._model)
+        for r in rows:
+            for key, val in values.items():
+                setattr(r, key, val)
+        return len(rows)
+
+
+class _FakeDB:
+    """A tiny in-memory DB that dispatches queries BY MODEL — the run/instance split
+    means the durable path touches two tables (ErrandPlan draft + Workflow run), so
+    a single-``.first()`` MagicMock no longer suffices. ``flush`` assigns a Workflow
+    id (mimicking the column default) so the run can be loaded back by id."""
+
+    def __init__(self, rows=None):
+        self._store: dict[str, list] = {}
+        for r in rows or []:
+            self._add(r)
+        self.closed = False
+
+    @staticmethod
+    def _key(model_or_obj):
+        m = model_or_obj if isinstance(model_or_obj, type) else type(model_or_obj)
+        return getattr(m, "__name__", str(m))
+
+    def rows(self, model):
+        return self._store.get(self._key(model), [])
+
+    def _add(self, obj):
+        self._store.setdefault(self._key(obj), []).append(obj)
+
+    def query(self, model):
+        return _FakeQuery(self, model)
+
+    def add(self, obj):
+        self._add(obj)
+
+    def flush(self):
+        for lst in self._store.values():
+            for r in lst:
+                if getattr(r, "id", None) is None:
+                    r.id = f"wf_{json.dumps(id(r))}"
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def refresh(self, obj):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def _wf_row(state="running", cursor=0, steps=None, results="[]", household_id="hh-1",
+            user_id=7, node_id="node-1", goal="g", title="Do it", wf_id="wf_1"):
+    return Workflow(
+        id=wf_id, kind="errand", household_id=household_id, user_id=user_id,
+        node_id=node_id, goal=goal, title=title,
+        steps=json.dumps(steps or [{"command": "get_weather", "args": {}, "label": "W"}]),
+        cursor=cursor, results_json=results, state=state,
+    )
+
+
+def _sqlite_sessionmaker():
+    """A real in-memory SQLite sessionmaker (shared connection) so the durable-path
+    tests exercise the ACTUAL SQL WHERE clauses — the atomic claim guard, the sweep
+    correlations — which the criteria-ignoring _FakeDB can't."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.models import Base
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)
 
 
 def _fake_llm(summary: str, steps: list[dict]):
@@ -60,21 +165,6 @@ def _node_ctx(household_id="hh-1", node_id="node-1"):
     ctx.node = MagicMock()
     ctx.node.node_id = node_id
     return ctx
-
-
-# ── the critical arg-shape inversion ─────────────────────────────────────────
-
-
-def test_node_args_to_mobile_round_trips_through_flatten_args():
-    for original in (
-        {"resolved_datetimes": ["today"], "category": "sports"},  # list + scalar
-        {"text": "bring an umbrella", "when": "tomorrow at 9am"},  # scalars
-        {"nested": {"a": 1}},  # dict
-        {},  # empty
-    ):
-        pairs = errand_service._node_args_to_mobile(original)
-        assert all(isinstance(p["value"], str) for p in pairs)  # every value a string
-        assert _flatten_args(pairs) == original  # survives the node-pull boundary
 
 
 # ── the plan card is a server-plane interactive card ─────────────────────────
@@ -157,9 +247,7 @@ def test_post_card_posts_new_when_no_id():
 
 
 def _run_create(db, llm):
-    with patch("app.api.routines._unique_slug", return_value="errand_test"), \
-         patch("app.api.routines.publish_routines_sync") as nudge, \
-         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
+    with patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
          patch.object(errand_service, "post_inbox_item_sync", return_value="inbox-1") as card:
         row = asyncio.run(
             errand_service.create_errand_plan(
@@ -167,10 +255,10 @@ def _run_create(db, llm):
                 llm_client=llm,
             )
         )
-    return row, nudge, card
+    return row, card
 
 
-def test_create_errand_plan_persists_both_step_shapes_and_nudges():
+def test_create_errand_plan_persists_draft_and_posts_card():
     db = _mock_db()
     llm = _fake_llm(
         "Weather then reminder",
@@ -179,26 +267,20 @@ def test_create_errand_plan_persists_both_step_shapes_and_nudges():
             {"command": "set_reminder", "args": {"text": "umbrella", "when": "9am"}, "label": "Reminder"},
         ],
     )
-    row, nudge, card = _run_create(db, llm)
+    row, card = _run_create(db, llm)
 
     added = [c.args[0] for c in db.add.call_args_list]
-    routine = next(a for a in added if a.__class__.__name__ == "Routine")
+    # No transient Routine any more — only the ErrandPlan draft is persisted.
+    assert all(a.__class__.__name__ != "Routine" for a in added)
     plan = next(a for a in added if isinstance(a, ErrandPlan))
 
-    # Routine.steps is MOBILE-native: args are [{key,value}] pairs and round-trip.
-    r_steps = json.loads(routine.steps)
-    assert r_steps[0]["command"] == "get_weather"
-    assert r_steps[0]["args"] == [{"key": "resolved_datetimes", "value": '["today"]'}]
-    assert _flatten_args(r_steps[0]["args"]) == {"resolved_datetimes": ["today"]}
-    assert routine.enabled is True and json.loads(routine.trigger_phrases) == []
-
-    # ErrandPlan.steps is NODE-native: args-as-object (the opposite shape).
+    # ErrandPlan.steps is NODE-native (args-as-object) — the single execution source.
     p_steps = json.loads(plan.steps)
+    assert p_steps[0]["command"] == "get_weather"
     assert p_steps[0]["args"] == {"resolved_datetimes": ["today"]}
-    assert plan.state == "draft" and plan.routine_slug == "errand_test"
+    assert plan.state == "draft"
     assert plan.user_id == 7 and plan.node_id == "node-1"
 
-    nudge.assert_called_once_with("hh-1", db)  # node pre-pull nudge fired
     # card pushed to the initiating user with the plan_id assigned on refresh
     assert card.call_args.kwargs["user_id"] == 7
     assert card.call_args.kwargs["target_type"] == "user"
@@ -209,9 +291,7 @@ def test_create_errand_plan_commits_draft_before_card_is_posted():
     """The draft must be committed even if the card push later fails."""
     db = _mock_db()
     llm = _fake_llm("W", [{"command": "get_weather", "args": {}, "label": "W"}])
-    with patch("app.api.routines._unique_slug", return_value="errand_test"), \
-         patch("app.api.routines.publish_routines_sync"), \
-         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
+    with patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
          patch.object(errand_service, "post_inbox_item_sync", side_effect=RuntimeError("boom")):
         row = asyncio.run(
             errand_service.create_errand_plan(db, "hh-1", "node-1", "weather", llm_client=llm)
@@ -344,59 +424,75 @@ def _handler_db(first_results):
     return db
 
 
-def test_approve_runs_errand_and_reuses_completion_card():
+def _ok_result(status="success", message="Sunny."):
+    return {"status": status, "message": message, "passed": 1, "failed": 0, "results": []}
+
+
+def test_approve_spawns_workflow_run_and_posts_completion_card():
+    """Run tap → a Workflow RUN is spawned from the draft (run/instance split), the
+    draft is 'launched' + linked, and the engine drives the run to a completion card."""
     row = _plan_row()
-    routine = SimpleNamespace(slug="errand_x")
-    db = _handler_db([row, routine])
+    row.steps = json.dumps([{"command": "get_weather", "args": {}, "label": "W"}])
+    db = _FakeDB([row])
     with patch("app.db.get_session_local", return_value=lambda: db), \
-         patch("app.api.routines.execute_routine_on_node",
-               new=AsyncMock(return_value={"status": "success"})) as ex, \
-         patch("app.api.routines.publish_routines_sync"):
+         patch("app.services.errand_executor.execute_errand",
+               new=AsyncMock(return_value=_ok_result())) as ex, \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
         res = asyncio.run(errand_service._handle_approve_errand_plan(
             _ctx({"plan_id": "pl_x", "revision": 1})))
     assert res.success is True
-    assert res.context_data is None  # no second card — execute posts the completion card
+    # draft → launched, linked to the spawned run
+    assert row.state == "launched" and row.workflow_id
+    wf = db.rows(Workflow)[0]
+    assert wf.id == row.workflow_id and wf.kind == "errand"
+    # the engine ran the plan on the run
     ex.assert_awaited_once()
     args, kwargs = ex.call_args
-    assert args[1] == "hh-1" and args[2] is routine and args[3] == "node-1" and args[4] == "errand"
-    assert kwargs["notify_on_complete"] is True and kwargs["notify_user_id"] == 7
-    assert row.state == "done"
-    db.query.return_value.filter.return_value.delete.assert_called()  # transient routine cleaned up
-    db.close.assert_called_once()
+    assert args[0] == "hh-1" and args[1] == "node-1"  # household, node
+    assert args[2] == [{"command": "get_weather", "args": {}, "label": "W"}]  # steps threaded through
+    assert kwargs["user_id"] == 7 and kwargs["errand_id"] == wf.id  # linked to the RUN, not the draft
+    assert wf.state == "done"  # run state lives on the workflow now
+    card.assert_called_once()  # exactly one completion card
+    assert card.call_args.kwargs["category"] == "errand"
+    assert card.call_args.kwargs["user_id"] == 7
 
 
-def test_approve_reflects_nonsuccess_status():
+def test_approve_reflects_partial_status_on_the_run():
     row = _plan_row()
-    db = _handler_db([row, SimpleNamespace(slug="errand_x")])
+    row.steps = json.dumps([{"command": "get_weather", "args": {}, "label": "W"}])
+    db = _FakeDB([row])
     with patch("app.db.get_session_local", return_value=lambda: db), \
-         patch("app.api.routines.execute_routine_on_node",
-               new=AsyncMock(return_value={"status": "timeout"})), \
-         patch("app.api.routines.publish_routines_sync"):
+         patch("app.services.errand_executor.execute_errand",
+               new=AsyncMock(return_value=_ok_result("partial", "one step failed"))), \
+         patch.object(errand_service, "post_inbox_item_sync"):
         asyncio.run(errand_service._handle_approve_errand_plan(
             _ctx({"plan_id": "pl_x", "revision": 1})))
-    assert row.state == "timeout"
+    assert row.state == "launched"          # the draft is launched
+    assert db.rows(Workflow)[0].state == "partial"  # honest non-success terminal on the run
 
 
-def test_approve_marks_failed_when_execute_raises():
+def test_approve_marks_run_failed_and_cards_when_execute_raises():
     row = _plan_row()
-    db = _handler_db([row, SimpleNamespace(slug="errand_x")])
+    row.steps = json.dumps([{"command": "get_weather", "args": {}, "label": "W"}])
+    db = _FakeDB([row])
     with patch("app.db.get_session_local", return_value=lambda: db), \
-         patch("app.api.routines.execute_routine_on_node",
-               new=AsyncMock(side_effect=RuntimeError("mqtt down"))), \
-         patch("app.api.routines.publish_routines_sync"):
+         patch("app.services.errand_executor.execute_errand",
+               new=AsyncMock(side_effect=RuntimeError("boom"))), \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
         res = asyncio.run(errand_service._handle_approve_errand_plan(
             _ctx({"plan_id": "pl_x", "revision": 1})))
-    assert res.success is False
-    assert row.state == "failed"  # never stuck on "running"
-    db.query.return_value.filter.return_value.delete.assert_called()  # routine cleaned up even on failure
-    db.close.assert_called_once()
+    # the tap SUCCEEDED in launching the errand; the run's failure is on its own card
+    assert res.success is True
+    assert row.state == "launched"
+    assert db.rows(Workflow)[0].state == "failed"  # run never stuck on "running"
+    card.assert_called_once()  # anti-vanishing: a failure card even on a raised error
 
 
 def test_approve_rejects_stale_revision():
     row = _plan_row(revision=1)
     db = _handler_db([row])
     with patch("app.db.get_session_local", return_value=lambda: db), \
-         patch("app.api.routines.execute_routine_on_node", new=AsyncMock()) as ex:
+         patch("app.services.errand_executor.execute_errand", new=AsyncMock()) as ex:
         res = asyncio.run(errand_service._handle_approve_errand_plan(
             _ctx({"plan_id": "pl_x", "revision": 2})))  # stale card
     assert res.success is False and "updated" in res.error
@@ -408,35 +504,33 @@ def test_approve_noop_when_already_terminal():
     row = _plan_row(state="done")
     db = _handler_db([row])
     with patch("app.db.get_session_local", return_value=lambda: db), \
-         patch("app.api.routines.execute_routine_on_node", new=AsyncMock()) as ex:
+         patch("app.services.errand_executor.execute_errand", new=AsyncMock()) as ex:
         res = asyncio.run(errand_service._handle_approve_errand_plan(
             _ctx({"plan_id": "pl_x", "revision": 1})))
     assert res.success is True and res.context_data["inbox"]  # friendly no-op card
     ex.assert_not_awaited()
 
 
-def test_approve_fails_when_transient_routine_missing():
+def test_approve_fails_when_no_steps():
     row = _plan_row()
-    db = _handler_db([row, None])  # ErrandPlan found, Routine gone
+    row.steps = "[]"  # nothing to run
+    db = _handler_db([row])
     with patch("app.db.get_session_local", return_value=lambda: db), \
-         patch("app.api.routines.execute_routine_on_node", new=AsyncMock()) as ex:
+         patch("app.services.errand_executor.execute_errand", new=AsyncMock()) as ex:
         res = asyncio.run(errand_service._handle_approve_errand_plan(
             _ctx({"plan_id": "pl_x", "revision": 1})))
-    assert res.success is False
-    assert row.state == "failed"
+    assert res.success is False and row.state == "failed"
     ex.assert_not_awaited()
 
 
-def test_discard_cancels_draft_and_deletes_routine():
+def test_discard_cancels_draft():
     row = _plan_row()
     db = _handler_db([row])
-    with patch("app.db.get_session_local", return_value=lambda: db), \
-         patch("app.api.routines.publish_routines_sync") as nudge:
+    with patch("app.db.get_session_local", return_value=lambda: db):
         res = errand_service._handle_discard_errand_plan(_ctx({"plan_id": "pl_x"}))
     assert res.success is True
     assert row.state == "cancelled"
-    db.query.return_value.filter.return_value.delete.assert_called()
-    nudge.assert_called_once()
+    assert res.context_data["inbox"]["title"].startswith("🗑️")
 
 
 def test_register_errand_callbacks_registers_all_pairs():
@@ -454,8 +548,7 @@ def test_register_errand_callbacks_registers_all_pairs():
 def test_refine_updates_plan_from_instruction_and_keeps_goal():
     row = _plan_row(state="draft", revision=1)  # goal="g", summary="Do it"
     row.steps = json.dumps([{"command": "get_news", "args": {}, "label": "News"}])
-    routine = SimpleNamespace(slug="errand_x", steps="[]", name="old")
-    db = _handler_db([row, routine])
+    db = _handler_db([row])
     plan = SimpleNamespace(
         summary="Weather instead",
         routine_steps=lambda: [{"command": "get_weather", "args": {"resolved_datetimes": ["today"]}, "label": "W"}],
@@ -464,21 +557,20 @@ def test_refine_updates_plan_from_instruction_and_keeps_goal():
          patch("app.core.llm_proxy_client.LLMProxyClient", return_value=MagicMock()), \
          patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
          patch.object(errand_service, "refine_errand_plan", new=AsyncMock(return_value=plan)) as refine, \
-         patch("app.api.routines.publish_routines_sync") as nudge, \
          patch.object(errand_service, "post_inbox_item_sync") as card:
         res = asyncio.run(errand_service._handle_refine_errand_plan(
             _ctx({"plan_id": "pl_x", "revision": 1, "instruction": "give me the weather, not the news"})))
     assert res.success is True
     assert row.summary == "Weather instead" and row.revision == 2
     assert row.goal == "g"  # a refine does NOT rewrite the goal
+    # ErrandPlan.steps updated in place, NODE-native (args-as-object) — the exec source.
     assert json.loads(row.steps)[0]["command"] == "get_weather"
-    assert json.loads(routine.steps)[0]["args"] == [{"key": "resolved_datetimes", "value": '["today"]'}]
+    assert json.loads(row.steps)[0]["args"] == {"resolved_datetimes": ["today"]}
     # refine got the CURRENT plan (summary + steps) + the instruction
     args = refine.call_args.args
     assert args[0] == "Do it" and args[1] == [{"command": "get_news", "args": {}, "label": "News"}]
     assert args[2] == "give me the weather, not the news"
-    nudge.assert_called_once()
-    card.assert_called_once()
+    card.assert_called_once()  # refreshed plan card re-posted (no routine, no nudge)
 
 
 def test_refine_rejects_empty_instruction():
@@ -519,10 +611,9 @@ def test_refine_friendly_error_on_infra_failure():
 # ── edit / re-plan handler (edit goal → re-plan → refreshed card) ────────────
 
 
-def test_replan_updates_row_and_routine_and_bumps_revision():
+def test_replan_updates_row_and_bumps_revision():
     row = _plan_row(state="draft", revision=1)  # goal="g", summary="Do it"
-    routine = SimpleNamespace(slug="errand_x", steps="[]", name="old")
-    db = _handler_db([row, routine])
+    db = _handler_db([row])
     plan = SimpleNamespace(
         summary="Sports news",
         routine_steps=lambda: [{"command": "get_news", "args": {"category": "sports"}, "label": "News"}],
@@ -531,7 +622,6 @@ def test_replan_updates_row_and_routine_and_bumps_revision():
          patch("app.core.llm_proxy_client.LLMProxyClient", return_value=MagicMock()), \
          patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=None)), \
          patch.object(errand_service, "plan_errand", new=AsyncMock(return_value=plan)), \
-         patch("app.api.routines.publish_routines_sync") as nudge, \
          patch.object(errand_service, "post_inbox_item_sync") as card:
         res = asyncio.run(errand_service._handle_replan_errand_plan(
             _ctx({"plan_id": "pl_x", "revision": 1, "goal": "get me the sports news"})))
@@ -539,10 +629,9 @@ def test_replan_updates_row_and_routine_and_bumps_revision():
     assert row.goal == "get me the sports news"
     assert row.summary == "Sports news"
     assert row.revision == 2  # bumped → old card's Run is now stale
-    assert json.loads(row.steps)[0]["command"] == "get_news"  # node-native args-as-object
-    # transient routine updated IN PLACE with mobile-native (args-as-pairs) steps
-    assert json.loads(routine.steps)[0]["args"] == [{"key": "category", "value": "sports"}]
-    nudge.assert_called_once()
+    # ErrandPlan.steps updated in place, node-native (args-as-object).
+    assert json.loads(row.steps)[0]["command"] == "get_news"
+    assert json.loads(row.steps)[0]["args"] == {"category": "sports"}
     card.assert_called_once()  # refreshed plan card re-posted
     assert card.call_args.kwargs["metadata"]["revision"] == 2  # carries the bumped revision
 
@@ -600,25 +689,34 @@ def test_replan_friendly_error_on_infra_failure():
 # ── dynamic planner menu: plan over the node's REAL commands ─────────────────
 
 
-def test_resolve_node_menu_fetches_and_builds():
+def test_resolve_node_menu_unions_node_and_server():
     report = {"available_commands": [
         {"command_name": "get_weather", "description": "w", "parameters": []},
         {"command_name": "chat", "description": "c"},  # denied
     ]}
-    with patch("app.api.node_tools._request_tools_from_node", new=AsyncMock(return_value=report)):
-        menu = asyncio.run(errand_service._resolve_node_menu("node-1"))
-    assert [c["command"] for c in menu] == ["get_weather"]  # filtered to a real usable command
+    with patch("app.api.node_tools._request_tools_from_node", new=AsyncMock(return_value=report)), \
+         patch("app.services.errand_planner.build_server_tool_menu",
+               return_value=[{"command": "make_phone_call", "description": "call", "args": {}}]):
+        menu = asyncio.run(errand_service._resolve_node_menu("node-1", "hh-1", 7))
+    cmds = {c["command"] for c in menu}
+    assert cmds == {"get_weather", "make_phone_call"}  # node command ∪ server tool, chat denied
 
 
-def test_resolve_node_menu_none_on_fetch_failure():
+def test_resolve_node_menu_server_only_when_node_offline():
+    # Node fetch fails, but server tools run in CC — they must still be offered so a
+    # phone-call errand plans even when the node is unreachable.
     with patch("app.api.node_tools._request_tools_from_node",
-               new=AsyncMock(side_effect=RuntimeError("mqtt timeout"))):
-        assert asyncio.run(errand_service._resolve_node_menu("node-1")) is None  # → default menu
+               new=AsyncMock(side_effect=RuntimeError("mqtt timeout"))), \
+         patch("app.services.errand_planner.build_server_tool_menu",
+               return_value=[{"command": "make_phone_call", "description": "call", "args": {}}]):
+        menu = asyncio.run(errand_service._resolve_node_menu("node-1", "hh-1", 7))
+    assert [c["command"] for c in menu] == ["make_phone_call"]
 
 
-def test_resolve_node_menu_none_when_node_silent():
-    with patch("app.api.node_tools._request_tools_from_node", new=AsyncMock(return_value=None)):
-        assert asyncio.run(errand_service._resolve_node_menu("node-1")) is None
+def test_resolve_node_menu_none_when_nothing_available():
+    with patch("app.api.node_tools._request_tools_from_node", new=AsyncMock(return_value=None)), \
+         patch("app.services.errand_planner.build_server_tool_menu", return_value=[]):
+        assert asyncio.run(errand_service._resolve_node_menu("node-1", "hh-1", None)) is None
 
 
 def test_create_errand_plan_uses_passed_menu_without_fetching():
@@ -628,9 +726,7 @@ def test_create_errand_plan_uses_passed_menu_without_fetching():
     # the planned step's command is ONLY in the custom menu (not COMMAND_MENU)
     llm = _fake_llm("Custom", [{"command": "brew_coffee", "args": {"strength": "strong"}, "label": "Coffee"}])
     custom_menu = [{"command": "brew_coffee", "description": "Make coffee", "args": {"strength": "how strong"}}]
-    with patch("app.api.routines._unique_slug", return_value="errand_test"), \
-         patch("app.api.routines.publish_routines_sync"), \
-         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock()) as resolve, \
+    with patch.object(errand_service, "_resolve_node_menu", new=AsyncMock()) as resolve, \
          patch.object(errand_service, "post_inbox_item_sync"):
         row = asyncio.run(errand_service.create_errand_plan(
             db, "hh-1", "node-1", "make me a strong coffee", user_id=1,
@@ -676,3 +772,333 @@ def test_draft_detached_posts_card_on_infra_failure():
     card.assert_called_once()  # infra failure still posts a card
     assert "snag" in card.call_args.kwargs["summary"].lower()
     db.close.assert_called_once()
+
+
+# ── wait-and-decide: suspend on a phone step, resume on the call's outcome ────
+
+
+def _fake_call_session(state="done", errand_id="wf_1", step=0, goal_achieved=None):
+    # errand_id holds the WORKFLOW run id after the run/instance split. goal_achieved
+    # gates the fail-fast: a 'done' call only continues the errand if it's True.
+    return SimpleNamespace(
+        id="sess-1", errand_id=errand_id, errand_step=step, state=state,
+        contact_name="CVS", error_message=None, household_id="hh-1", user_id=7,
+        goal_achieved=goal_achieved, outcome_json=None,
+    )
+
+
+def test_approve_suspends_the_run_on_a_phone_step():
+    """A phone step SUSPENDS the RUN (Workflow state=waiting), no completion card —
+    the phone confirm/outcome cards are the live feedback. The draft is launched."""
+    from app.services.errand_executor import Suspended
+
+    row = _plan_row()
+    row.steps = json.dumps([{"command": "make_phone_call",
+                             "args": {"business": "CVS", "goal": "refill"}, "label": "Call"}])
+    db = _FakeDB([row])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.services.errand_executor.execute_errand",
+               new=AsyncMock(return_value=Suspended(cursor=1, session_id="sess-1", results=[]))), \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        res = asyncio.run(errand_service._handle_approve_errand_plan(
+            _ctx({"plan_id": "pl_x", "revision": 1})))
+    assert res.success is True
+    assert row.state == "launched"
+    wf = db.rows(Workflow)[0]
+    assert wf.state == "waiting" and wf.cursor == 1  # the RUN carries wait state
+    card.assert_not_called()  # no completion card while waiting on the call
+
+
+def test_resume_continues_from_cursor_on_call_done():
+    wf = _wf_row(state="waiting", cursor=1, steps=[
+        {"command": "make_phone_call", "args": {}, "label": "Call"},
+        {"command": "get_weather", "args": {}, "label": "W"}])
+    db = _FakeDB([wf])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.services.errand_executor.execute_errand",
+               new=AsyncMock(return_value={"status": "success", "message": "all done",
+                                           "passed": 2, "failed": 0, "results": []})) as ex, \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        asyncio.run(errand_service.resume_errand_after_call(
+            _fake_call_session(state="done", errand_id=wf.id, step=0, goal_achieved=True)))
+    ex.assert_awaited_once()
+    assert ex.await_args.kwargs["start_index"] == 1  # resume from the cursor
+    assert wf.state == "done"
+    card.assert_called_once()  # completion card on final complete
+
+
+def test_resume_fail_fast_on_call_failed():
+    wf = _wf_row(state="waiting", cursor=1, steps=[
+        {"command": "make_phone_call", "args": {}, "label": "Call CVS"},
+        {"command": "make_phone_call", "args": {}, "label": "Call Dr"}])
+    db = _FakeDB([wf])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.services.errand_executor.execute_errand", new=AsyncMock()) as ex, \
+         patch("app.services.errand_executor.aggregate_and_compose",
+               new=AsyncMock(return_value={"status": "failed", "message": "the pharmacy call didn't go through",
+                                           "passed": 0, "failed": 1, "results": []})), \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        asyncio.run(errand_service.resume_errand_after_call(
+            _fake_call_session(state="failed", errand_id=wf.id, step=0)))
+    ex.assert_not_awaited()  # fail-fast: the 2nd call is NEVER placed
+    card.assert_called_once()  # honest completion card
+    assert wf.state in ("failed", "partial")
+
+
+def test_resume_fail_fast_when_call_connected_but_goal_not_achieved():
+    """Regression (live 2026-07-30): the pharmacy call reached 'done' but its goal
+    was NOT achieved, yet the errand still dialed Total Patient Care. A 'done' call
+    STATE ≠ goal achieved — the next call must only be placed on an explicit success,
+    so goal_achieved=False (and None) fail-fasts."""
+    wf = _wf_row(state="waiting", cursor=1, steps=[
+        {"command": "make_phone_call", "args": {}, "label": "Call pharmacy"},
+        {"command": "make_phone_call", "args": {}, "label": "Call Total Patient Care"}])
+    db = _FakeDB([wf])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.services.errand_executor.execute_errand", new=AsyncMock()) as ex, \
+         patch("app.services.errand_executor.aggregate_and_compose",
+               new=AsyncMock(return_value={"status": "failed",
+                                           "message": "reached the pharmacy but the goal wasn't achieved",
+                                           "passed": 0, "failed": 1, "results": []})), \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        asyncio.run(errand_service.resume_errand_after_call(
+            _fake_call_session(state="done", errand_id=wf.id, step=0, goal_achieved=False)))
+    ex.assert_not_awaited()  # THE FIX: the 2nd call (Total Patient Care) is NOT placed
+    card.assert_called_once()
+    assert wf.state in ("failed", "partial")
+
+
+def test_resume_noop_when_run_not_waiting():
+    wf = _wf_row(state="done")  # already terminal
+    db = _FakeDB([wf])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch("app.services.errand_executor.execute_errand", new=AsyncMock()) as ex:
+        asyncio.run(errand_service.resume_errand_after_call(
+            _fake_call_session(state="done", errand_id=wf.id, step=0)))
+    ex.assert_not_awaited()  # not waiting → nothing to resume
+
+
+def test_resume_ignores_unlinked_or_nonterminal_session():
+    with patch("app.db.get_session_local", return_value=lambda: MagicMock()), \
+         patch("app.services.errand_executor.execute_errand", new=AsyncMock()) as ex:
+        asyncio.run(errand_service.resume_errand_after_call(_fake_call_session(errand_id=None)))
+        asyncio.run(errand_service.resume_errand_after_call(_fake_call_session(state="dialing")))
+    ex.assert_not_awaited()
+
+
+# ── the TIMER wakeup (wait_for) sweep — real SQLite so the WHERE filter is real ──
+
+
+def test_timer_sweep_fires_only_due_timer_waits():
+    """resume_due_timer_workflows resumes ONLY runs waiting on a timer whose wake_at
+    has passed — not future timers, not phone waits. Uses a real in-memory DB so the
+    SQL filter (and the real _WorkflowRunStore) are genuinely exercised."""
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.models import Base
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    now = datetime.utcnow()
+    two_step = json.dumps([{"command": "wait_for", "label": "Wait"},
+                           {"command": "get_weather", "args": {}, "label": "W"}])
+    seed = Session()
+    seed.add_all([
+        Workflow(id="wf_due", kind="errand", household_id="hh", goal="g", steps=two_step,
+                 state="waiting", waiting_on="timer", wake_at=now - timedelta(seconds=10), cursor=1),
+        Workflow(id="wf_future", kind="errand", household_id="hh", goal="g", steps="[]",
+                 state="waiting", waiting_on="timer", wake_at=now + timedelta(hours=1), cursor=1),
+        Workflow(id="wf_phone", kind="errand", household_id="hh", goal="g", steps="[]",
+                 state="waiting", waiting_on="phone_call", wake_at=None, cursor=1),
+    ])
+    seed.commit()
+    seed.close()
+
+    with patch("app.db.get_session_local", return_value=Session), \
+         patch("app.services.errand_executor.execute_errand",
+               new=AsyncMock(return_value={"status": "success", "message": "done",
+                                           "passed": 2, "failed": 0, "results": []})) as ex, \
+         patch.object(errand_service, "post_inbox_item_sync"):
+        fired = asyncio.run(errand_service.resume_due_timer_workflows())
+
+    assert fired == 1                              # only the due timer wait
+    ex.assert_awaited_once()
+    assert ex.await_args.kwargs["start_index"] == 1  # resumed from the wait_for's cursor
+    check = Session()
+    try:
+        assert check.query(Workflow).filter(Workflow.id == "wf_due").first().state == "done"
+        assert check.query(Workflow).filter(Workflow.id == "wf_future").first().state == "waiting"
+        assert check.query(Workflow).filter(Workflow.id == "wf_phone").first().state == "waiting"
+    finally:
+        check.close()
+
+
+# ── discard on a mid-call (waiting) errand: actually cancel, don't falsely report ──
+
+
+def test_discard_waiting_run_cancels_and_declines_call():
+    """Cancel on a LAUNCHED errand whose RUN is mid-call (waiting) genuinely cancels
+    the Workflow AND declines the pending call."""
+    plan = _plan_row(state="launched")
+    plan.workflow_id = "wf_1"
+    wf = _wf_row(state="waiting", wf_id="wf_1")
+    db = _FakeDB([plan, wf])
+    with patch("app.db.get_session_local", return_value=lambda: db), \
+         patch.object(errand_service, "_decline_pending_workflow_calls", return_value=True) as decline:
+        res = errand_service._handle_discard_errand_plan(_ctx({"plan_id": "pl_x"}))
+    assert res.success is True
+    assert plan.state == "cancelled" and wf.state == "cancelled"  # both cancelled, not left running
+    decline.assert_called_once()  # the pending call is declined so it won't dial
+    assert decline.call_args.args[1] == "wf_1"  # declines by the RUN id
+    assert "cancelled" in res.context_data["inbox"]["title"].lower()
+
+
+def test_discard_finished_run_is_honest_noop():
+    plan = _plan_row(state="launched")
+    plan.workflow_id = "wf_1"
+    wf = _wf_row(state="done", wf_id="wf_1")
+    db = _FakeDB([plan, wf])
+    with patch("app.db.get_session_local", return_value=lambda: db):
+        res = errand_service._handle_discard_errand_plan(_ctx({"plan_id": "pl_x"}))
+    assert res.success is True
+    assert plan.state == "launched"  # untouched — the run already finished
+    assert "already" in res.context_data["inbox"]["summary"].lower()  # honest, not "discarded"
+    assert "done" in res.context_data["inbox"]["summary"].lower()
+    assert wf.state == "done"  # the run is untouched
+
+
+# ── durable-path coverage the adversarial review flagged (real SQLite = real WHERE) ──
+
+
+def test_workflow_store_claim_is_atomic():
+    """The atomic waiting→running claim (the SOLE serialization between the phone
+    hook and the sweep). Two stores both load a 'waiting' run; the first claim wins
+    (WHERE state='waiting' matches), the second loses (matches nothing). This
+    genuinely exercises the WHERE guard, not just the pre-check."""
+    Session = _sqlite_sessionmaker()
+    seed = Session()
+    seed.add(_wf_row(state="waiting", cursor=1, wf_id="wf_c"))
+    seed.commit()
+    seed.close()
+
+    store1 = errand_service._WorkflowRunStore(Session())
+    store2 = errand_service._WorkflowRunStore(Session())
+    try:
+        assert store1.load("wf_c").state == "waiting"
+        assert store2.load("wf_c").state == "waiting"   # both observe 'waiting' first
+        assert store1.claim_running("wf_c") is True      # first flips waiting→running
+        assert store2.claim_running("wf_c") is False     # second: WHERE state='waiting' → 0 rows
+    finally:
+        store1.close()
+        store2.close()
+    check = Session()
+    try:
+        assert check.query(Workflow).filter(Workflow.id == "wf_c").first().state == "running"
+    finally:
+        check.close()
+
+
+def test_phone_sweep_resumes_run_whose_call_is_terminal():
+    """resume_waiting_errands job 1: a run 'waiting' whose linked call reached a
+    terminal state (here 'declined', which skips the immediate hook) is resumed and
+    fail-fasts with a completion card. Exercises the real PhoneCallSession correlation
+    (errand_id==workflow.id AND errand_step==cursor-1)."""
+    from datetime import datetime
+
+    from app.models import PhoneCallSession
+
+    Session = _sqlite_sessionmaker()
+    seed = Session()
+    seed.add(_wf_row(state="waiting", cursor=1, wf_id="wf_p", steps=[
+        {"command": "make_phone_call", "args": {}, "label": "Call"},
+        {"command": "make_phone_call", "args": {}, "label": "Call 2"}]))
+    seed.add(PhoneCallSession(id="s1", household_id="hh-1", user_id=7, goal="g",
+                             errand_id="wf_p", errand_step=0, state="declined",
+                             created_at=datetime.utcnow()))
+    seed.commit()
+    seed.close()
+
+    with patch("app.db.get_session_local", return_value=Session), \
+         patch("app.services.errand_executor.execute_errand", new=AsyncMock()) as ex, \
+         patch("app.services.errand_executor.aggregate_and_compose",
+               new=AsyncMock(return_value={"status": "failed", "message": "the call was declined",
+                                           "passed": 0, "failed": 1, "results": []})), \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        resumed = asyncio.run(errand_service.resume_waiting_errands())
+
+    assert resumed == 1
+    ex.assert_not_awaited()          # fail-fast: the 2nd call is never placed
+    card.assert_called_once()        # honest completion card
+    check = Session()
+    try:
+        assert check.query(Workflow).filter(Workflow.id == "wf_p").first().state in ("failed", "partial")
+    finally:
+        check.close()
+
+
+def test_phone_sweep_times_out_stuck_waiting_run():
+    """resume_waiting_errands job 2: a run 'waiting' on a call that never terminates
+    (confirmed-but-never-dialed) past the 60-min deadline is timed out (synthesized
+    failure → fail-fast) so it never hangs forever."""
+    from datetime import datetime, timedelta
+
+    from app.models import PhoneCallSession
+
+    Session = _sqlite_sessionmaker()
+    seed = Session()
+    seed.add(_wf_row(state="waiting", cursor=1, wf_id="wf_t", steps=[
+        {"command": "make_phone_call", "args": {}, "label": "Call"}]))
+    seed.add(PhoneCallSession(id="s2", household_id="hh-1", user_id=7, goal="g",
+                             errand_id="wf_t", errand_step=0, state="confirmed",
+                             created_at=datetime.utcnow() - timedelta(minutes=61)))
+    seed.commit()
+    seed.close()
+
+    with patch("app.db.get_session_local", return_value=Session), \
+         patch("app.services.errand_executor.aggregate_and_compose",
+               new=AsyncMock(return_value={"status": "failed", "message": "the call wasn't completed in time",
+                                           "passed": 0, "failed": 1, "results": []})), \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        resumed = asyncio.run(errand_service.resume_waiting_errands())
+
+    assert resumed == 1
+    card.assert_called_once()
+    check = Session()
+    try:
+        assert check.query(Workflow).filter(Workflow.id == "wf_t").first().state in ("failed", "partial")
+    finally:
+        check.close()
+
+
+def test_startup_recovery_fails_orphaned_running_only():
+    """recover_orphaned_running_workflows lands orphaned 'running' runs terminal with
+    an honest card (kind-agnostic: covers timer, initial-run, and phone orphans), and
+    leaves 'waiting' runs (parked on a signal) untouched."""
+    Session = _sqlite_sessionmaker()
+    seed = Session()
+    # orphaned running, one step already succeeded → 'partial'
+    seed.add(_wf_row(state="running", cursor=1, wf_id="wf_run",
+                     results=json.dumps([{"command": "get_weather", "label": "W", "success": True}])))
+    # a parked wait — must NOT be touched
+    seed.add(_wf_row(state="waiting", cursor=1, wf_id="wf_wait"))
+    seed.commit()
+    seed.close()
+
+    with patch("app.db.get_session_local", return_value=Session), \
+         patch.object(errand_service, "post_inbox_item_sync") as card:
+        n = asyncio.run(errand_service.recover_orphaned_running_workflows())
+
+    assert n == 1
+    card.assert_called_once()  # exactly one honest 'interrupted' card
+    check = Session()
+    try:
+        assert check.query(Workflow).filter(Workflow.id == "wf_run").first().state == "partial"
+        assert check.query(Workflow).filter(Workflow.id == "wf_wait").first().state == "waiting"  # untouched
+    finally:
+        check.close()

@@ -6,7 +6,8 @@ row; the speaker (the completion-notify target) is passed in the body, exactly
 like ``/routines/run-background``. Orchestration lives in ``errand_service``.
 
 Nothing runs from this endpoint — it drafts a plan and posts a plan card with
-Run/Cancel. Chunk 4 wires **Run** to execute the transient routine on the node.
+Run/Revise/Cancel. **Run** dispatches the plan step-by-step via the errand
+executor (node commands over MQTT + server tools in-process).
 """
 
 from __future__ import annotations
@@ -87,6 +88,5 @@ async def create_errand(
         "errand_plan_id": row.id,
         "state": row.state,
         "summary": row.summary,
-        "routine_slug": row.routine_slug,
         "steps": json.loads(row.steps or "[]"),
     }

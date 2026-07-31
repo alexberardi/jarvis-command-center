@@ -7,9 +7,6 @@ Tool calls for client tools are routed to the selected node via MQTT.
 import asyncio
 import json
 import logging
-import os
-import tempfile as _tempfile
-import time
 from typing import Any, AsyncGenerator
 from uuid import uuid4
 
@@ -29,7 +26,6 @@ logger = logging.getLogger("uvicorn")
 router = APIRouter(tags=["mobile-chat"])
 
 MAX_TOOL_ITERATIONS = 5
-_RESULT_DIR = os.path.join(_tempfile.gettempdir(), "jarvis-device-control")
 
 
 # ─── Request/Response Models ─────────────────────────────────────────────────
@@ -244,27 +240,6 @@ async def _do_warmup(
 # ─── MQTT Tool Call Routing ───────────────────────────────────────────────────
 
 
-async def _wait_for_result_file(request_id: str, timeout: float = 10.0) -> dict[str, Any] | None:
-    """Poll for a result file written by the node callback. Non-blocking."""
-    result_file = os.path.join(_RESULT_DIR, f"{request_id}.json")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if os.path.exists(result_file):
-            try:
-                with open(result_file) as f:
-                    result = json.load(f)
-                os.unlink(result_file)
-                return result
-            except (json.JSONDecodeError, OSError):
-                pass
-        await asyncio.sleep(0.1)
-    try:
-        os.unlink(result_file)
-    except OSError:
-        pass
-    return None
-
-
 async def _route_tool_call_to_node(
     node_id: str, tool_call: dict[str, Any],
     user_id: int | None = None,
@@ -272,45 +247,27 @@ async def _route_tool_call_to_node(
 ) -> dict[str, Any]:
     """Route a single tool call to a node via MQTT and wait for the result.
 
+    Thin wrapper over the shared ``dispatch_node_command`` (node_command_service)
+    so mobile chat and the errand executor drive node commands through ONE path.
+
     ``voice_command`` is the user's original utterance (from mobile chat,
     that's the text they typed). The node forwards it into
     ``RequestInformation`` so commands can inspect the raw phrase — used by
     e.g. the spotify command's playlist-intent detection.
     """
-    from app.services.node_command_service import get_node_command_service
+    from app.services.node_command_service import dispatch_node_command
 
     func = tool_call.get("function", {})
     tool_call_id = tool_call.get("id", str(uuid4()))
-
-    request_id = str(uuid4())
-    os.makedirs(_RESULT_DIR, exist_ok=True)
-
-    details: dict[str, Any] = {
-        "command_name": func.get("name"),
-        "arguments": func.get("arguments", {}),
-        "tool_call_id": tool_call_id,
-        "reply_request_id": request_id,
-        "trusted": True,
-    }
-    if user_id is not None:
-        details["user_id"] = user_id
-    if voice_command:
-        details["voice_command"] = voice_command
-
-    service = get_node_command_service()
-    service.publish_command_with_id(node_id, "tool_call", details, request_id)
-
-    result = await _wait_for_result_file(request_id)
-    if result is None:
-        return {
-            "tool_call_id": tool_call_id,
-            "output": {"error": "Node timed out executing command"},
-        }
-
-    return {
-        "tool_call_id": tool_call_id,
-        "output": result.get("output", result),
-    }
+    output = await dispatch_node_command(
+        node_id,
+        func.get("name"),
+        func.get("arguments", {}),
+        user_id=user_id,
+        voice_command=voice_command,
+        tool_call_id=tool_call_id,
+    )
+    return {"tool_call_id": tool_call_id, "output": output}
 
 
 # ─── SSE Chat Stream ─────────────────────────────────────────────────────────

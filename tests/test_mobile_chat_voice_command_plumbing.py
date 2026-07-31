@@ -10,7 +10,7 @@ catalog search, picking a track instead of a playlist. We now include
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -24,8 +24,10 @@ async def test_route_tool_call_includes_voice_command_in_details() -> None:
         "function": {"name": "spotify", "arguments": {"action": "play", "query": "jungle night"}},
     }
 
+    # _route_tool_call_to_node now delegates to node_command_service.dispatch_node_command,
+    # which fetches the service and awaits the result file there.
     with patch("app.services.node_command_service.get_node_command_service") as svc_factory, \
-         patch("app.api.mobile_chat._wait_for_result_file", return_value=None):
+         patch("app.services.node_command_service._await_result_file", new=AsyncMock(return_value=None)):
         svc = MagicMock()
         svc_factory.return_value = svc
 
@@ -36,7 +38,9 @@ async def test_route_tool_call_includes_voice_command_in_details() -> None:
 
         svc.publish_command_with_id.assert_called_once()
         # publish_command_with_id(node_id, command, details, request_id)
+        command = svc.publish_command_with_id.call_args.args[1]
         details = svc.publish_command_with_id.call_args.args[2]
+        assert command == "tool_call"
         assert details["command_name"] == "spotify"
         assert details["voice_command"] == "play my jungle night playlist"
         assert details["user_id"] == 42
@@ -54,7 +58,7 @@ async def test_route_tool_call_omits_voice_command_when_unset() -> None:
     }
 
     with patch("app.services.node_command_service.get_node_command_service") as svc_factory, \
-         patch("app.api.mobile_chat._wait_for_result_file", return_value=None):
+         patch("app.services.node_command_service._await_result_file", new=AsyncMock(return_value=None)):
         svc = MagicMock()
         svc_factory.return_value = svc
 

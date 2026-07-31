@@ -21,12 +21,34 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from types import SimpleNamespace
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.deps import get_db, require_app_auth
 from app.models import PhoneCallSession
+
+
+def _schedule_errand_resume(background_tasks: BackgroundTasks, s: PhoneCallSession) -> None:
+    """If this call was placed by a wait-and-decide errand, resume that errand once
+    the call is terminal (continue on done, fail-fast otherwise). Snapshots the
+    fields the resume needs — the request DB session detaches after the response —
+    and runs it async (idempotent; a safety sweep also catches missed events)."""
+    if not getattr(s, "errand_id", None):
+        return
+    snap = SimpleNamespace(
+        id=s.id, errand_id=s.errand_id, errand_step=s.errand_step, state=s.state,
+        contact_name=s.contact_name, error_message=s.error_message,
+        household_id=s.household_id, user_id=s.user_id,
+        # Carry the outcome so the errand's fail-fast can read goal_achieved — a
+        # 'done' call that didn't achieve the goal must NOT chain the next call.
+        outcome_json=s.outcome_json,
+    )
+    from app.services.errand_service import resume_errand_after_call
+
+    background_tasks.add_task(resume_errand_after_call, snap)
 from app.services.phone_call_service import (
     ACTIVE_STATES,
     TERMINAL_STATES,
@@ -188,6 +210,7 @@ def check_session_time(
 def post_phone_session_event(
     session_id: str,
     body: SessionEventBody,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> dict:
     s = _get_session_or_404(db, session_id)
@@ -252,6 +275,8 @@ def post_phone_session_event(
                 body="",
                 metadata={"household_id": s.household_id, "session_id": s.id},
             )
+        if s.state in TERMINAL_STATES:
+            _schedule_errand_resume(background_tasks, s)  # fail-fast a waiting errand
         return {"status": "ok", "state": s.state}
 
     if body.type == "turn":
@@ -317,6 +342,7 @@ def post_phone_session_event(
             logger.warning("Phonebook auto-save failed for %s: %s", s.id[:8], e)
             db.rollback()
         post_outcome_card(s)
+        _schedule_errand_resume(background_tasks, s)  # continue a waiting errand
         return {"status": "ok", "state": s.state}
 
     raise HTTPException(status_code=400, detail=f"Unknown event type {body.type!r}")

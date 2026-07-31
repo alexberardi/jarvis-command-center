@@ -327,19 +327,23 @@ def build_context_block(fields: list[ContextField]) -> str | None:
     on 5/5 openings against the box model — it collapsed "calling on behalf of
     Alex" into "I'm Alex". Two fixes, together taking that to 0/6:
 
-    - ``full_name`` is dropped entirely: it is already conveyed by the
-      disclosure and the "on behalf of {name}" system line, and repeating it
-      as a caller detail is exactly what triggered the identity collapse.
+    - ``full_name`` is never PROACTIVELY stated: with it in the "you may state
+      these" block the model opened "Hi, I'm Alex Berardi" (5/5). But it IS
+      needed for identity-heavy calls (a pharmacy authorization needs the
+      patient's full legal name), so it is routed to the give-WHEN-ASKED section
+      — the model provides it reactively if the callee asks, never in the
+      opening — under the on-behalf-of framing below.
     - the block opens by stating whose details these are and that the model is
       the caller's ASSISTANT, not the caller.
 
     Returns None when there is nothing to say, so the brief gains no empty
     scaffolding.
     """
-    # full_name is redundant (see above) and the worst identity offender.
-    fields = [f for f in fields if f.key != "full_name"]
-    statable = [f for f in fields if f.tier == STATE]
-    private = [f for f in fields if f.tier == IF_ASKED]
+    # full_name is the worst identity offender ONLY when stated proactively, so it
+    # is forced out of the "state freely" group and into give-when-asked (regardless
+    # of its configured tier); everything else follows its own tier.
+    statable = [f for f in fields if f.tier == STATE and f.key != "full_name"]
+    private = [f for f in fields if f.tier == IF_ASKED or f.key == "full_name"]
     if not statable and not private:
         return None
 

@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app.services import errand_planner
 from app.services.errand_planner import plan_errand
@@ -117,19 +117,76 @@ def test_build_errand_menu_converts_available_commands():
 def test_build_errand_menu_filters_deny_and_junk():
     available = [
         {"command_name": "get_weather", "description": "w", "parameters": []},
-        {"command_name": "chat", "description": "conversation"},        # denied
+        {"command_name": "chat", "description": "conversation"},        # denied (headless-unfit)
         {"command_name": "act_on_items", "description": "follow-ups"},  # denied
-        {"command_name": "email", "description": "send an email"},      # denied (no provenance)
+        {"command_name": "email", "description": "send an email"},      # ALLOWED now — real execution + plan-card review
+        {"command_name": "run_errand", "description": "recursion"},     # denied (recursion)
         {"command_name": "", "description": "blank"},                    # junk
         {"description": "no name"},                                      # junk
     ]
     names = {c["command"] for c in errand_planner.build_errand_menu(available)}
-    assert names == {"get_weather"}
+    assert names == {"get_weather", "email"}  # email is no longer structurally denied
 
 
 def test_build_errand_menu_empty_on_none():
     assert errand_planner.build_errand_menu(None) == []
     assert errand_planner.build_errand_menu([]) == []
+
+
+# ── server-tool menu union: node commands ∪ enabled server tools ─────────────
+
+
+def _bool_setting(mapping: dict):
+    """A fake ``_errand_bool_setting`` driven by a {key: value} map (default arg)."""
+    def _impl(key, household_id, default):
+        return mapping.get(key, default)
+    return _impl
+
+
+def test_enabled_server_tools_gates_like_the_voice_path():
+    # phone on, web_search on, memory on, speaker present → the full offered set.
+    with patch.object(errand_planner, "_errand_bool_setting",
+                      new=_bool_setting({"web_search.enabled": True, "memory.enabled": True,
+                                         "memory.recall_enabled": True})), \
+         patch("app.services.phone_call_service.phone_calls_enabled", return_value=True):
+        names = errand_planner.enabled_errand_server_tools("hh-1", speaker_user_id=7)
+    assert set(names) == {"make_phone_call", "deep_research", "quick_search",
+                          "remember", "forget", "recall"}
+    assert "run_errand" not in names  # recursion — never offered as an errand step
+
+
+def test_enabled_server_tools_respect_gates_and_speaker():
+    # phone OFF, web_search OFF, memory ON but NO speaker → nothing (memory needs a speaker).
+    with patch.object(errand_planner, "_errand_bool_setting",
+                      new=_bool_setting({"web_search.enabled": False, "memory.enabled": True})), \
+         patch("app.services.phone_call_service.phone_calls_enabled", return_value=False):
+        assert errand_planner.enabled_errand_server_tools("hh-1", speaker_user_id=None) == []
+
+
+def test_build_server_tool_menu_normalizes_and_excludes_run_errand():
+    # make_phone_call is a real registered server tool → normalized to {command, description, args}.
+    with patch.object(errand_planner, "enabled_errand_server_tools",
+                      return_value=["make_phone_call"]):
+        menu = errand_planner.build_server_tool_menu("hh-1", 7)
+    assert len(menu) == 1
+    entry = menu[0]
+    assert entry["command"] == "make_phone_call"
+    assert entry["description"] and set(entry["args"]) == {"business", "goal"}  # from the JSON schema
+
+
+def test_build_full_errand_menu_unions_and_dedups_server_precedence():
+    node_cmds = [
+        {"command_name": "get_weather", "description": "w", "parameters": []},
+        {"command_name": "make_phone_call", "description": "a NODE cmd shadowed by the server tool",
+         "parameters": []},
+    ]
+    with patch.object(errand_planner, "build_server_tool_menu",
+                      return_value=[{"command": "make_phone_call", "description": "SERVER", "args": {}}]):
+        menu = errand_planner.build_full_errand_menu(node_cmds, "hh-1", 7)
+    by_cmd = {c["command"]: c for c in menu}
+    assert set(by_cmd) == {"get_weather", "make_phone_call"}
+    # collision resolves to the SERVER entry (matches has_tool dispatch at run time)
+    assert by_cmd["make_phone_call"]["description"] == "SERVER"
 
 
 # ── refine_errand_plan: revise an existing plan from an instruction ──────────
@@ -166,8 +223,14 @@ def test_refine_keeps_existing_steps_even_when_menu_degrades():
     assert "set_timer" in cmds and "get_weather" in cmds  # existing set_timer survives
 
 
-def test_plan_and_refine_prompts_forbid_fabrication():
-    guard = "Never invent contact details"
-    assert guard in errand_planner._build_prompt("email my doctor", errand_planner.COMMAND_MENU)
-    assert guard in errand_planner._build_refine_prompt(
+def test_plan_and_refine_prompts_include_guardrail_and_decomposition():
+    plan_prompt = errand_planner._build_prompt("email my doctor", errand_planner.COMMAND_MENU)
+    refine_prompt = errand_planner._build_refine_prompt(
         "Email them", [{"command": "get_news"}], "call instead", errand_planner.COMMAND_MENU)
+    for prompt in (plan_prompt, refine_prompt):
+        # still forbids inventing specific contact data...
+        assert errand_planner._FABRICATION_GUARDRAIL in prompt
+        assert "invent specific data" in prompt.lower()
+        # ...but now every action becomes its own step (fixes dropped-clause plans)
+        assert errand_planner._DECOMPOSITION_RULE in prompt
+        assert "separate step for each" in prompt.lower()

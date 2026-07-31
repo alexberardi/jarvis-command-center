@@ -41,6 +41,7 @@ def test_run_errand_happy_path_fires_detached_draft():
     fake_loop = MagicMock()
     with patch.object(conversation_cache, "get_node_context", return_value=ctx), \
          patch.object(conversation_cache, "get_available_commands", return_value=None), \
+         patch("app.services.errand_planner.build_server_tool_menu", return_value=[]), \
          patch("app.core.tools.run_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
          patch("app.services.errand_service.draft_errand_plan_detached") as draft:
         res = RunErrandTool().execute(goal="check the weather", conversation_id="c1")
@@ -56,6 +57,7 @@ def test_run_errand_household_broadcast_when_no_speaker():
     fake_loop = MagicMock()
     with patch.object(conversation_cache, "get_node_context", return_value=ctx), \
          patch.object(conversation_cache, "get_available_commands", return_value=None), \
+         patch("app.services.errand_planner.build_server_tool_menu", return_value=[]), \
          patch("app.core.tools.run_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
          patch("app.services.errand_service.draft_errand_plan_detached") as draft:
         res = RunErrandTool().execute(goal="weather", conversation_id="c1")
@@ -65,7 +67,8 @@ def test_run_errand_household_broadcast_when_no_speaker():
 
 def test_run_errand_builds_menu_from_conversation_commands():
     """The voice path plans over the node's real installed commands (from the live
-    conversation cache), with denied commands filtered out."""
+    conversation cache), with denied commands filtered out. (Server tools mocked
+    to [] here to isolate the node-command half — see the union test below.)"""
     ctx = {"household_id": "hh-1", "node_id": "node-1", "speaker_user_id": 7}
     available = [
         {"command_name": "get_weather", "description": "w", "parameters": []},
@@ -75,6 +78,7 @@ def test_run_errand_builds_menu_from_conversation_commands():
     fake_loop = MagicMock()
     with patch.object(conversation_cache, "get_node_context", return_value=ctx), \
          patch.object(conversation_cache, "get_available_commands", return_value=available), \
+         patch("app.services.errand_planner.build_server_tool_menu", return_value=[]), \
          patch("app.core.tools.run_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
          patch("app.services.errand_service.draft_errand_plan_detached") as draft:
         RunErrandTool().execute(goal="set a 5 minute timer", conversation_id="c1")
@@ -82,11 +86,30 @@ def test_run_errand_builds_menu_from_conversation_commands():
     assert {c["command"] for c in menu} == {"get_weather", "set_timer"}  # chat filtered out
 
 
-def test_run_errand_menu_none_when_no_cached_commands():
+def test_run_errand_unions_server_tools_into_menu():
+    """The voice-path menu includes ENABLED server tools (phone calls, research…)
+    alongside the node's installed commands — the whole point of the rearchitecture."""
+    ctx = {"household_id": "hh-1", "node_id": "node-1", "speaker_user_id": 7}
+    available = [{"command_name": "get_weather", "description": "w", "parameters": []}]
+    fake_loop = MagicMock()
+    with patch.object(conversation_cache, "get_node_context", return_value=ctx), \
+         patch.object(conversation_cache, "get_available_commands", return_value=available), \
+         patch("app.services.errand_planner.build_server_tool_menu",
+               return_value=[{"command": "make_phone_call", "description": "call a business",
+                              "args": {"business": "", "goal": ""}}]), \
+         patch("app.core.tools.run_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
+         patch("app.services.errand_service.draft_errand_plan_detached") as draft:
+        RunErrandTool().execute(goal="call the pizzeria and check the weather", conversation_id="c1")
+    cmds = {c["command"] for c in draft.call_args.kwargs["menu"]}
+    assert "get_weather" in cmds and "make_phone_call" in cmds  # node cmd ∪ server tool
+
+
+def test_run_errand_menu_none_when_no_commands_or_server_tools():
     ctx = {"household_id": "hh-1", "node_id": "node-1", "speaker_user_id": 7}
     fake_loop = MagicMock()
     with patch.object(conversation_cache, "get_node_context", return_value=ctx), \
          patch.object(conversation_cache, "get_available_commands", return_value=None), \
+         patch("app.services.errand_planner.build_server_tool_menu", return_value=[]), \
          patch("app.core.tools.run_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
          patch("app.services.errand_service.draft_errand_plan_detached") as draft:
         RunErrandTool().execute(goal="weather", conversation_id="c1")

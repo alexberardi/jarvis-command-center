@@ -194,13 +194,15 @@ def _parse_range(text: str) -> tuple[int, int] | None:
     start_raw, end_raw = parts[0].strip(), parts[1].strip()
 
     def face(s: str) -> tuple[int, int, str | None] | None:
-        mm = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", s, re.IGNORECASE)
+        mm = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?", s.strip(),
+                          re.IGNORECASE)
         if not mm:
             return None
+        mer = mm.group(3)
         return (
             int(mm.group(1)),
             int(mm.group(2)) if mm.group(2) else 0,
-            mm.group(3).lower() if mm.group(3) else None,
+            ("am" if mer[0].lower() == "a" else "pm") if mer else None,
         )
 
     s_face, e_face = face(start_raw), face(end_raw)
@@ -214,8 +216,22 @@ def _parse_range(text: str) -> tuple[int, int] | None:
     return start, end
 
 
+# A time RANGE anywhere in an entry, so "Tue Aug 5 4-8pm" or "Tuesday 4pm to 8pm"
+# parse — not just the strict "Tue 4-8pm". Tolerates -, en/em dash, or "to".
+_RANGE_RE = re.compile(
+    r"(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?)\s*(?:-|–|—|to)\s*"
+    r"(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?)",
+    re.IGNORECASE,
+)
+
+
 def _parse_entries(line_body: str) -> list[Interval]:
-    """"Tue 4-8pm; Wed 5-8pm; ..." -> intervals. Bad entries drop silently."""
+    """"Tue 4-8pm; Wed 5-8pm; ..." -> intervals. Bad entries drop silently.
+
+    The day must be present, but the time range may sit anywhere after it — a
+    calendar can emit "Tue Aug 5 4-8pm" or "Tuesday 4pm to 8pm", not only the
+    canonical "Tue 4-8pm".
+    """
     out: list[Interval] = []
     for chunk in line_body.split(";"):
         chunk = chunk.strip()
@@ -227,7 +243,10 @@ def _parse_entries(line_body: str) -> list[Interval]:
         if not dm:
             continue
         day = _DAYS[dm.group(1).lower()]
-        rng = _parse_range(chunk[dm.end():].strip())
+        mrange = _RANGE_RE.search(chunk[dm.end():])
+        if not mrange:
+            continue
+        rng = _parse_range(f"{mrange.group(1).strip()}-{mrange.group(2).strip()}")
         if rng is None:
             continue
         out.append(Interval(day, rng[0], rng[1]))
@@ -269,8 +288,22 @@ def check_time(envelope: str | None, utterance: str) -> CheckResult:
 
     windows = parse_windows(envelope)
     summary = _acceptable_summary(envelope)
+
+    # A slot that lands in an explicit Do-not-book window is unavailable, PERIOD —
+    # even if the Acceptable line didn't parse (e.g. a freeform "Acceptable times:
+    # whenever works"). This is the safety-critical direction: a blocked slot must
+    # never fall through to the model, which cannot do the interval math. Any plausible
+    # reading of an ambiguous bare hour ("2" -> 2am/2pm) landing blocked vetoes it.
+    in_blocked = any(
+        b.contains(proposed.day, minute)
+        for b in windows.blocked for minute in proposed.minutes
+    )
+    if in_blocked:
+        return CheckResult(True, False, proposed.label, summary)
+
     if not windows.acceptable:
-        # Nothing to check against — a verdict here would be a guess.
+        # No acceptable windows to check against and not explicitly blocked — a
+        # positive verdict here would be a guess, so let the model carry the turn.
         return CheckResult(True, None, proposed.label, summary)
 
     # Any candidate reading that lands open wins: it is the one the speaker

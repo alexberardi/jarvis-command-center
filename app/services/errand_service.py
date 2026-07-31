@@ -1,34 +1,39 @@
-"""Errand service — turn a goal into a reviewable plan card (Errand Runner POC).
+"""Errand service — turn a goal into a reviewable plan card, then run it.
 
-Chunk 3 of the planner + plan-card POC (prds/errand-runner.md §2-§3). The flow:
+The Errand Runner (prds/errand-runner.md §2-§3). The flow:
 
-    plan_errand(goal)  →  transient Routine (so the node pre-pulls the steps by
-    slug)  →  persist a DRAFT ErrandPlan  →  push a plan card with Run/Cancel.
+    plan_errand(goal)  →  persist a DRAFT ErrandPlan (its ``steps`` ARE the plan)
+    →  push a plan card with Run/Revise/Cancel.
 
-"LLM proposes, card disposes": nothing runs until the user taps **Run** on the
-card. Chunk 4 wires that tap to a server-plane callback that executes the
-transient routine via ``execute_routine_on_node`` (the fc936a5 detached-run
-path) and pushes the completion card.
+"LLM proposes, card disposes": nothing runs until the user taps **Run**, which a
+server-plane callback wires to ``errand_executor.execute_errand`` — the per-step
+dispatcher that routes each step to its plane (node command → the node over MQTT;
+server tool → in-process) and pushes ONE completion card.
+
+An errand is NOT a node routine: the plan can mix the node's installed commands
+with enabled server tools (phone calls, research, memory…) as building blocks, and
+each step is dispatched to the right plane at run time. There is no transient
+routine — ``ErrandPlan.steps`` is the single source of truth for what runs.
 
 The card is a first-party interactive inbox item built exactly like the phone
 call-plan card (``phone_call_service.create_call_plan``): ``metadata`` carries
 ``interactive_elements`` with ``target: "server"`` so the taps route to the
-``server_callback_registry`` (CC plane), NOT the node plane. Chunk 4 registers
-``("errand", "approve_errand_plan")`` / ``("errand", "discard_errand_plan")``.
+``server_callback_registry`` (CC plane), NOT the node plane. ``register_errand_callbacks``
+wires ``("errand", "approve_errand_plan")`` / ``…refine…`` / ``…discard…``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from app.models import ErrandPlan, Routine
-from app.services.errand_planner import build_errand_menu, plan_errand, refine_errand_plan
+from app.models import ErrandPlan, Workflow
+from app.services.errand_planner import build_full_errand_menu, plan_errand, refine_errand_plan
 from app.services.inbox_notification_service import (
     post_inbox_item_sync,
     update_inbox_item_sync,
@@ -37,6 +42,16 @@ from app.services.server_callback_registry import (
     ServerCallbackContext,
     ServerCallbackResult,
     register_server_callback,
+)
+from app.services.workflow_engine import (
+    ProgressEmitter,
+    ProgressEvent,
+    WorkflowConsumer,
+    WorkflowRun,
+    WorkflowStore,
+    deliver_signal,
+    register_consumer,
+    register_workflow_store,
 )
 
 logger = logging.getLogger("uvicorn")
@@ -55,56 +70,27 @@ ERRAND_REFINE_CALLBACK = "refine_errand_plan"
 ERRAND_PLAN_CATEGORY = "errand_plan"
 
 
-def _node_args_to_mobile(args: dict[str, Any]) -> list[dict[str, str]]:
-    """Invert ``routines._flatten_args``: node-native ``{k: v}`` → mobile-native
-    ``[{key, value}]`` pairs, the shape ``Routine.steps`` stores.
-
-    Every value becomes a string; a list/dict is JSON-encoded so that
-    ``_flatten_args`` (which ``json.loads`` any value beginning with ``[`` or
-    ``{``) round-trips it back to the real type at the node-pull boundary.
-    Storing the flat dict directly would make ``_flatten_args`` iterate the dict
-    KEYS and silently drop every arg — the node would then run each step with
-    empty args, with no error. See ``app/api/routines.py:124``.
+async def _resolve_node_menu(
+    node_id: str, household_id: str, speaker_user_id: int | None
+) -> list[dict[str, Any]] | None:
+    """The full errand menu for a non-voice path (POST /errands, re-plan, refine):
+    the target node's live commands (MQTT round-trip) UNION the enabled server
+    tools. Server tools are included even if the node can't be reached — they run
+    in CC, so a phone-call errand still plans when the node is offline. Returns
+    None only when NOTHING is available → the planner falls back to its built-in
+    default menu.
     """
-    pairs: list[dict[str, str]] = []
-    for key, value in args.items():
-        if isinstance(value, str):
-            encoded = value
-        elif isinstance(value, (list, dict)):
-            encoded = json.dumps(value)
-        else:
-            encoded = str(value)
-        pairs.append({"key": key, "value": encoded})
-    return pairs
-
-
-async def _resolve_node_menu(node_id: str) -> list[dict[str, Any]] | None:
-    """The target node's live command set as a planner menu (MQTT round-trip), or
-    None on failure → the planner falls back to its built-in default. Used by the
-    non-voice paths (POST /errands, re-plan) that have no cached conversation.
-    """
+    available: list[dict[str, Any]] | None = None
     try:
         from app.api.node_tools import _request_tools_from_node
 
         report = await _request_tools_from_node(node_id, timeout=10.0)
-        if report and report.get("available_commands"):
-            return build_errand_menu(report["available_commands"])
-    except Exception:  # noqa: BLE001 — sourcing is best-effort; default menu is the fallback
-        logger.warning("Errand: couldn't fetch node %s commands; using the default menu", node_id)
-    return None
-
-
-def _build_mobile_steps(node_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Node-native steps → the MOBILE-native shape Routine.steps stores (args as
-    [{key,value}] pairs, so the node-pull _flatten_args boundary round-trips)."""
-    return [
-        {
-            "command": s["command"],
-            "args": _node_args_to_mobile(s.get("args", {})),
-            "label": s.get("label", ""),
-        }
-        for s in node_steps
-    ]
+        if report:
+            available = report.get("available_commands")
+    except Exception:  # noqa: BLE001 — node sourcing is best-effort; server tools still apply
+        logger.warning("Errand: couldn't fetch node %s commands; server tools only", node_id)
+    menu = build_full_errand_menu(available, household_id, speaker_user_id)
+    return menu or None
 
 
 def _plan_card_body(summary: str, node_steps: list[dict[str, Any]]) -> str:
@@ -141,7 +127,6 @@ def build_plan_card_metadata(
         "household_id": household_id,
         "plan_id": row.id,
         "revision": row.revision,
-        "routine_slug": row.routine_slug,
         "steps": node_steps,  # structured read-only view of the steps
         # A free-text "tell it what to change" box → Revise re-plans the current
         # plan conversationally. NB: do NOT set editor_schema (>2 disables buttons).
@@ -243,42 +228,18 @@ async def create_errand_plan(
 
         llm_client = LLMProxyClient()
 
-    # Routine helpers live in the routines API module — lazy-import them to match
-    # routine_scheduler's convention and avoid an import cycle (routines.py:101).
-    from app.api.routines import _unique_slug, publish_routines_sync
-
-    # Plan over the node's REAL commands: the voice path passes a menu built from
-    # the live conversation; otherwise source it from the node (MQTT). None → the
-    # planner's built-in default menu.
+    # Plan over the errand's full building-block set: the voice path passes a menu
+    # built from the live conversation (node commands ∪ server tools); otherwise
+    # source it here (node MQTT round-trip ∪ server tools). None → the planner's
+    # built-in default menu.
     if menu is None:
-        menu = await _resolve_node_menu(node_id)
+        menu = await _resolve_node_menu(node_id, household_id, user_id)
     plan = await plan_errand(goal, llm_client, menu=menu)  # raises ValueError on no usable plan
-    node_steps = plan.routine_steps()  # [{command, args:{k:v}, label}] — node-native
+    node_steps = plan.routine_steps()  # [{command, args:{k:v}, label}] — the execution source
 
-    # 1. Transient routine. The node runs errands BY SLUG from its local store, so
-    #    the steps must live in a Routine it can pull. Routine.steps is stored
-    #    MOBILE-native (args as [{key,value}] pairs) — the node-pull endpoint
-    #    flattens it back; the ErrandPlan row below stores the opposite shape.
-    # Bound the slug source — Routine.slug is String(255) and plan.summary is
-    # free-form; a long summary would otherwise overflow the column.
-    slug = _unique_slug(db, household_id, f"errand {plan.summary[:100]}")
-    mobile_steps = _build_mobile_steps(node_steps)
-    routine = Routine(
-        id=str(uuid4()),
-        household_id=household_id,
-        slug=slug,
-        name=f"Errand: {plan.summary}"[:255],
-        trigger_phrases=json.dumps([]),  # no voice trigger
-        steps=json.dumps(mobile_steps),
-        response_instruction="",
-        response_length="short",
-        schedule=None,
-        enabled=True,  # must be True or the node-pull endpoint skips it
-    )
-    db.add(routine)
-
-    # 2. Persist the DRAFT plan. steps here are NODE-native (args-as-object) per
-    #    the ErrandPlan model contract — the opposite shape from Routine.steps.
+    # Persist the DRAFT plan. ``steps`` IS the plan — the per-step executor
+    # dispatches each one to its plane (node command / server tool) at Run time;
+    # there is no transient routine to pull.
     row = ErrandPlan(
         household_id=household_id,
         user_id=user_id,
@@ -286,7 +247,6 @@ async def create_errand_plan(
         goal=goal,
         summary=plan.summary,
         steps=json.dumps(node_steps),
-        routine_slug=slug,
         state="draft",
         revision=1,
     )
@@ -294,17 +254,8 @@ async def create_errand_plan(
     db.commit()
     db.refresh(row)
 
-    # 3. Nudge the household's active nodes to pre-pull the transient routine now,
-    #    so the target node has it in its local store before the user taps Run.
-    #    Best-effort — the draft is already committed, so a failed nudge (like a
-    #    failed card below) must not turn a successful errand into a 500.
-    try:
-        publish_routines_sync(household_id, db)
-    except Exception:  # noqa: BLE001 — a failed nudge must not fail the errand
-        logger.exception("Errand routine-sync nudge failed for %s", row.id)
-
-    # 4. Plan card — best-effort; the draft is already committed. Store its inbox
-    #    item id so a later Revise updates THIS card in place.
+    # Plan card — best-effort; the draft is already committed. Store its inbox
+    # item id so a later Revise updates THIS card in place.
     try:
         card_id = _post_errand_plan_card(row, node_steps, household_id, user_id)
         if card_id and card_id != row.inbox_item_id:
@@ -314,8 +265,8 @@ async def create_errand_plan(
         logger.exception("Errand plan card push failed for %s", row.id)
 
     logger.info(
-        "Errand plan %s drafted (household=%s node=%s slug=%s steps=%d)",
-        row.id, household_id, node_id, slug, len(node_steps),
+        "Errand plan %s drafted (household=%s node=%s steps=%d)",
+        row.id, household_id, node_id, len(node_steps),
     )
     return row
 
@@ -388,29 +339,44 @@ async def draft_errand_plan_detached(
 # state) — the callback dispatcher runs them in a background task.
 
 
-def _delete_transient_routine(db: Session, household_id: str, slug: str | None) -> None:
-    """Remove the single-use transient routine and nudge nodes to drop it.
+# Status → (icon, headline) for the errand completion card. Honest on EVERY
+# terminal state — an errand you tapped Run on must tell you how it finished,
+# including partial/failed, never stay silent.
+_ERRAND_STATUS_CARD = {
+    "success": ("✅", "done"),
+    "partial": ("⚠️", "finished with issues"),
+    "failed": ("⚠️", "couldn't finish"),
+    "timeout": ("⏱️", "didn't finish"),
+}
 
-    Best-effort: cleanup failure must never fail the callback. Deleting the row
-    + re-nudging keeps errand execution-vehicle routines from accumulating in the
-    household routine set (the deferred-cleanup finding from chunk 3's review).
+
+def _post_errand_completion_card(
+    household_id: str, title_summary: str, result: dict[str, Any], user_id: int | None
+) -> None:
+    """Post ONE completion card for a run errand (headless feedback channel).
+
+    Best-effort — a notification failure must never crash the callback (mirrors
+    routines' ``_notify_routine_complete``). Targets the initiating speaker when
+    known, else the whole household. ``result`` is the ``execute_errand`` aggregate
+    (``{status, message, ...}``); ``message`` is the plain-English step roll-up.
     """
-    if not slug:
-        return
     try:
-        deleted = (
-            db.query(Routine)
-            .filter(Routine.slug == slug, Routine.household_id == household_id)
-            .delete()
+        status = str(result.get("status") or "failed")
+        icon, headline = _ERRAND_STATUS_CARD.get(status, _ERRAND_STATUS_CARD["failed"])
+        summary = result.get("message") or "The errand finished."
+        post_inbox_item_sync(
+            household_id=household_id,
+            title=f"{icon} Errand {headline}: {title_summary}",
+            summary=summary,
+            body=summary,
+            category="errand",
+            metadata={"household_id": household_id, "status": status},
+            user_id=user_id,
+            target_type="user" if user_id is not None else "household",
+            push=True,
         )
-        db.commit()
-        if deleted:
-            from app.api.routines import publish_routines_sync
-
-            publish_routines_sync(household_id, db)
-    except Exception:  # noqa: BLE001 — cleanup must never fail the callback
-        logger.exception("Failed to delete transient errand routine %s", slug)
-        db.rollback()
+    except Exception:  # noqa: BLE001 — a completion card must never fail the run
+        logger.warning("Errand completion card failed for household %s", household_id)
 
 
 def _revisions_match(card_revision: Any, row_revision: int) -> bool:
@@ -427,14 +393,18 @@ def _revisions_match(card_revision: Any, row_revision: int) -> bool:
 
 
 async def _handle_approve_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackResult:
-    """Run tap → execute the drafted errand on its node.
+    """Run tap → spawn a durable Workflow RUN from the draft and drive it.
 
-    Reuses ``execute_routine_on_node(notify_on_complete=True)`` (the fc936a5
-    detached-run path), which posts the completion card itself — so this handler
-    returns success WITHOUT a second inbox card. Single-use + stale-card guarded.
+    The run/instance split: the ``ErrandPlan`` is the DRAFT/DEFINITION; tapping Run
+    creates a ``Workflow`` (the RUN), links it back (``workflow_id``), marks the
+    draft ``launched``, and hands the run to the engine (``run_workflow``). The
+    engine owns every terminal path — it dispatches each step to its plane, SUSPENDS
+    on a phone step (state ``waiting`` on the Workflow, no completion card yet), and
+    on completion posts exactly one card via the errand progress emitter (SEAM 3).
+    Single-use + stale-card guarded on the DRAFT. Anti-vanishing lives in the engine.
     """
-    from app.api.routines import execute_routine_on_node
     from app.db import get_session_local
+    from app.services.workflow_engine import run_workflow
 
     db = get_session_local()()
     try:
@@ -449,8 +419,8 @@ async def _handle_approve_errand_plan(ctx: ServerCallbackContext) -> ServerCallb
         if row is None:
             return ServerCallbackResult(success=False, error="Errand plan not found")
 
-        # Single-use: a second tap on an already-run/cancelled plan is a friendly
-        # no-op card, not an error (mirrors the phone confirm handler).
+        # Single-use: a second tap on an already-launched/cancelled plan is a
+        # friendly no-op card, not an error (mirrors the phone confirm handler).
         if row.state != "draft":
             return ServerCallbackResult(
                 success=True,
@@ -466,51 +436,231 @@ async def _handle_approve_errand_plan(ctx: ServerCallbackContext) -> ServerCallb
                 error="This plan was updated — open the latest card to run it.",
             )
 
-        routine = (
-            db.query(Routine)
-            .filter(Routine.slug == row.routine_slug, Routine.household_id == ctx.household_id)
-            .first()
-        )
-        if routine is None:
+        node_steps = json.loads(row.steps or "[]")
+        if not node_steps:
             row.state = "failed"
-            row.error = "transient routine missing"
+            row.error = "no steps to run"
             db.commit()
-            return ServerCallbackResult(success=False, error="Errand steps not found — re-plan it.")
+            return ServerCallbackResult(success=False, error="This errand has no steps to run.")
 
-        row.state = "running"
+        # Spawn the RUN (Workflow) from this draft and link it. The workflow carries
+        # the execution state (running/waiting/…); the draft just points at it.
+        workflow = Workflow(
+            kind="errand",
+            household_id=ctx.household_id,
+            user_id=row.user_id,
+            node_id=row.node_id,
+            goal=row.goal or row.summary or "",
+            title=row.summary or row.goal,
+            steps=row.steps,
+            cursor=0,
+            results_json="[]",
+            state="running",
+        )
+        db.add(workflow)
+        db.flush()  # assign workflow.id before we link + run
+        row.workflow_id = workflow.id
+        row.state = "launched"
         row.confirmed_at = datetime.utcnow()
         db.commit()
+        workflow_id = workflow.id
 
-        # The completion card is posted by execute_routine_on_node itself
-        # (notify_on_complete), so we return no context_data['inbox'] on success
-        # (avoids a double card). A RAISED failure must still leave a terminal
-        # state — never a stuck 'running' (anti-vanishing, cf. phone enqueue_dial).
-        try:
-            result = await execute_routine_on_node(
-                db, ctx.household_id, routine, row.node_id, "errand",
-                notify_on_complete=True, notify_user_id=row.user_id,
-            )
-        except Exception as e:  # noqa: BLE001 — never leave the errand stuck running
-            logger.exception("Errand %s failed to run", row.id)
-            row.state = "failed"
-            row.error = str(e)[:500]
-            db.commit()
-            _delete_transient_routine(db, ctx.household_id, row.routine_slug)  # cleanup on every terminal path
-            return ServerCallbackResult(success=False, error="Couldn't run the errand.")
-
-        status = (result or {}).get("status") or "failed"
-        row.state = "done" if status == "success" else status  # partial|failed|timeout
-        db.commit()
-
-        _delete_transient_routine(db, ctx.household_id, row.routine_slug)
-        logger.info("Errand %s ran on node %s → %s", row.id, row.node_id, row.state)
+        # Drive the run via the engine. It owns suspend/complete + the completion
+        # card (SEAM 3) and never raises — a crash lands the run terminal with an
+        # honest card, so a tap on Run never vanishes.
+        await run_workflow(workflow_id)
+        logger.info("Errand %s launched workflow %s", row.id, workflow_id)
         return ServerCallbackResult(success=True)
     finally:
         db.close()
 
 
+async def resume_errand_after_call(session: Any) -> None:
+    """A phone call linked to an errand reached a terminal state — resume the errand.
+
+    This is the errand's binding of the engine's SIGNAL primitive: a terminal phone
+    call is one external event, so it becomes ``deliver_signal(errand_id, step,
+    "phone_call", session)``. The engine loads the run, atomically claims it, asks
+    the phone handler to interpret the outcome (``done`` → continue from the cursor;
+    ``failed``/``declined``/``expired`` → fail-fast), and reports via the errand's
+    progress emitter. Idempotent (called from the phone finalization hook AND the
+    safety sweep) — the atomic claim serializes the two.
+    """
+    errand_id = getattr(session, "errand_id", None)
+    if not errand_id or session.state not in ("done", "failed", "declined", "expired"):
+        return
+    step = session.errand_step if session.errand_step is not None else 0
+    await deliver_signal(errand_id, step, "phone_call", session)
+
+
+# A wait-and-decide errand parks in 'waiting' until its call finishes. If the call
+# NEVER reaches a terminal state (gateway dropped a confirmed dial job, worker down),
+# the errand would hang forever — so after this long we give up and fail-fast it.
+_ERRAND_WAIT_DEADLINE = timedelta(minutes=60)
+_TERMINAL_CALL_STATES = ("done", "failed", "declined", "expired")
+
+
+async def recover_orphaned_running_workflows() -> int:
+    """STARTUP recovery (run ONCE from the app lifespan, before the periodic sweep).
+
+    Any Workflow still in 'running' at boot was orphaned by the previous process — a
+    crash or deploy mid-drive — and nothing is driving it now (CC is single-instance).
+    Land it terminal with an honest 'interrupted' card rather than leaving it stuck
+    forever with no feedback. This is the general, kind-AGNOSTIC orphan recovery (it
+    covers phone waits, timer waits, and a crash during a run's very first drive).
+
+    Doing this at STARTUP is what makes it correct and race-free: a runtime recover
+    can't tell a dead driver from a merely slow one (no heartbeat) and would re-drive
+    a live resume, double-executing steps. At boot there is no live driver, so failing
+    every 'running' run is unambiguous. A run genuinely 'waiting' on a signal survives
+    a restart untouched and resumes via its signal/timer — only actively-driving runs
+    are orphans. (Multi-instance CC would need a lease instead; single-instance today.)
+    """
+    from app.db import get_session_local
+    from app.services.workflow_engine import (
+        ProgressEvent,
+        WorkflowRun,
+        emit_progress,
+        terminal_state,
+    )
+
+    db = get_session_local()()
+    try:
+        stuck = db.query(Workflow).filter(Workflow.state == "running").all()
+        for wf in stuck:
+            results = json.loads(wf.results_json or "[]")
+            passed = sum(1 for r in results if r.get("success"))
+            result = {
+                "status": "partial" if passed else "failed",
+                "passed": passed,
+                "failed": max(len(results) - passed, 0),
+                "message": "This errand was interrupted by a restart and couldn't be finished.",
+                "results": results,
+            }
+            run = WorkflowRun(
+                id=wf.id, kind=wf.kind, household_id=wf.household_id, node_id=wf.node_id,
+                user_id=wf.user_id, goal=wf.goal or "", title=wf.title or wf.goal or "your errand",
+                steps=[], cursor=wf.cursor, results=results, state=wf.state,
+            )
+            emit_progress(run, ProgressEvent("complete", result))  # honest card via the consumer
+            wf.state = terminal_state(result)  # partial | failed
+            wf.error = "interrupted by a restart"
+        db.commit()
+        if stuck:
+            logger.warning("Startup recovery: failed %d orphaned 'running' workflow(s)", len(stuck))
+        return len(stuck)
+    except Exception:  # noqa: BLE001 — recovery is best-effort; don't block startup
+        logger.exception("Startup workflow recovery failed")
+        db.rollback()
+        return 0
+    finally:
+        db.close()
+
+
+async def resume_waiting_errands() -> int:
+    """Safety sweep (runs every 20s from the app lifespan). Operates on WORKFLOW RUNS
+    waiting on a PHONE call. Two jobs, idempotent (the atomic waiting→running claim in
+    ``deliver_signal`` serializes with the immediate phone hook, so nothing double-runs):
+
+    1. RESUME 'waiting' runs whose linked call reached a terminal state (also the
+       'declined'/'expired' paths that skip post_phone_session_event).
+    2. TIME OUT 'waiting' runs whose call never terminates (confirmed-but-never-
+       dialed, etc.) past the deadline — fail-fast so the run never hangs forever.
+
+    Orphaned-'running' recovery is NOT here — it's race-free STARTUP recovery
+    (``recover_orphaned_running_workflows``); a runtime recover would re-drive a slow
+    live resume. Timer waits are resumed by ``resume_due_timer_workflows``. The phone
+    session links to the WORKFLOW id (``PhoneCallSession.errand_id`` holds the run id)
+    at the run's current cursor step.
+    """
+    from app.db import get_session_local
+    from app.models import PhoneCallSession
+
+    now = datetime.utcnow()
+
+    # Scan 'waiting' runs.
+    scan_db = get_session_local()()
+    try:
+        waiting = scan_db.query(Workflow).filter(Workflow.state == "waiting").all()
+    finally:
+        scan_db.close()
+
+    resumed = 0
+    for row in waiting:
+        look = get_session_local()()
+        try:
+            session = (
+                look.query(PhoneCallSession)
+                .filter(PhoneCallSession.errand_id == row.id,
+                        PhoneCallSession.errand_step == max(row.cursor - 1, 0))
+                .order_by(PhoneCallSession.created_at.desc())
+                .first()
+            )
+            trigger = None
+            if session is not None and session.state in _TERMINAL_CALL_STATES:
+                trigger = session  # loaded ORM row — resume reads its columns
+            elif (session is not None and session.created_at is not None
+                  and session.created_at < now - _ERRAND_WAIT_DEADLINE):
+                # The call never finished — synthesize a failure so the run gives up.
+                trigger = SimpleNamespace(
+                    id=session.id, errand_id=session.errand_id, errand_step=session.errand_step,
+                    state="failed", contact_name=session.contact_name,
+                    error_message="the call wasn't completed in time",
+                    household_id=session.household_id, user_id=session.user_id,
+                )
+        finally:
+            look.close()
+        if trigger is not None:
+            await resume_errand_after_call(trigger)
+            resumed += 1
+    if resumed:
+        logger.info("Workflow resume sweep: resumed %d waiting run(s)", resumed)
+    return resumed
+
+
+async def resume_due_timer_workflows() -> int:
+    """Timer wakeup sweep (runs alongside the phone sweep from the app lifespan).
+    Resumes any run WAITING on a ``wait_for`` timer whose ``wake_at`` has passed —
+    through the SAME ``deliver_signal`` primitive the phone outcome uses. This is the
+    engine's SECOND signal source (errand-runner PRD §2.5): the timer wakeup that
+    proves the engine is general, not phone-specific. Idempotent (the atomic
+    waiting→running claim serializes it)."""
+    from app.db import get_session_local
+
+    now = datetime.utcnow()
+    scan = get_session_local()()
+    try:
+        due = (
+            scan.query(Workflow)
+            .filter(
+                Workflow.state == "waiting",
+                Workflow.waiting_on == "timer",
+                Workflow.wake_at.isnot(None),
+                Workflow.wake_at <= now,
+            )
+            .all()
+        )
+        # Snapshot (id, cursor) so we don't hold the scan session while resuming.
+        pending = [(w.id, w.cursor) for w in due]
+    finally:
+        scan.close()
+
+    fired = 0
+    for wf_id, cursor in pending:
+        step = max(cursor - 1, 0)
+        # The timer has no external session; a bare marker is enough — the timer
+        # handler's interpret_signal ignores it and returns a plain "wait finished".
+        await deliver_signal(wf_id, step, "timer", SimpleNamespace(state="fired"))
+        fired += 1
+    if fired:
+        logger.info("Workflow timer sweep: fired %d due wait(s)", fired)
+    return fired
+
+
 def _handle_discard_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackResult:
-    """Cancel tap → discard a draft errand and drop its transient routine."""
+    """Cancel tap → discard the errand. A DRAFT is simply marked cancelled; a
+    LAUNCHED errand whose RUN is mid-call (the Workflow is ``waiting``) is genuinely
+    cancelled AND its pending call declined so it never dials."""
     from app.db import get_session_local
 
     db = get_session_local()()
@@ -526,12 +676,48 @@ def _handle_discard_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackRes
         if row.state == "draft":
             row.state = "cancelled"
             db.commit()
-            _delete_transient_routine(db, ctx.household_id, row.routine_slug)
+            return ServerCallbackResult(
+                success=True,
+                context_data={"inbox": {
+                    "title": "🗑️ Errand discarded",
+                    "summary": row.summary or row.goal,
+                    "metadata": {"household_id": ctx.household_id},
+                }},
+            )
+        if row.state == "launched" and row.workflow_id:
+            # The RUN carries the execution state now. Only a WAITING run is safe to
+            # cancel: it's parked (no active _drive_run), so setting 'cancelled'
+            # sticks and the next deliver_signal can't claim it (claim is from
+            # 'waiting' only). A 'running' run is actively executing in another
+            # session whose save_terminal would overwrite a cancel — so we DON'T
+            # cancel it here (a stuck 'running' is recovered→'waiting' by the sweep,
+            # then cancellable). Anything else already finished.
+            wf = db.query(Workflow).filter(Workflow.id == row.workflow_id).first()
+            if wf is not None and wf.state == "waiting":
+                wf.state = "cancelled"
+                row.state = "cancelled"
+                db.commit()
+                declined = _decline_pending_workflow_calls(db, wf.id)
+                note = (" I won't place the remaining call(s)." if declined
+                        else " A call already in progress may still finish.")
+                return ServerCallbackResult(
+                    success=True,
+                    context_data={"inbox": {
+                        "title": "🗑️ Errand cancelled",
+                        "summary": (row.summary or row.goal) + note,
+                        "metadata": {"household_id": ctx.household_id},
+                    }},
+                )
+            # Running (actively executing) or already terminal → honest no-op.
+            state_word = wf.state if wf is not None else "done"
+        else:
+            # A plan directly in cancelled/expired (never launched): honest no-op.
+            state_word = row.state
         return ServerCallbackResult(
             success=True,
             context_data={"inbox": {
-                "title": "🗑️ Errand discarded",
-                "summary": row.summary or row.goal,
+                "title": "Errand already handled",
+                "summary": f"This errand is already {state_word} — nothing to discard.",
                 "metadata": {"household_id": ctx.household_id},
             }},
         )
@@ -539,13 +725,42 @@ def _handle_discard_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackRes
         db.close()
 
 
+def _decline_pending_workflow_calls(db: Session, workflow_id: str) -> bool:
+    """Decline any not-yet-dialed call this workflow placed (draft/confirmed
+    sessions), so cancelling the run actually stops the call before it rings. A call
+    already dialing can't be un-dialed here, but the run is now 'cancelled' so
+    ``deliver_signal`` won't continue it either. Best-effort; returns True if it
+    declined at least one pending session."""
+    try:
+        from app.models import PhoneCallSession
+        from app.services.phone_call_service import transition
+
+        sessions = (
+            db.query(PhoneCallSession)
+            .filter(PhoneCallSession.errand_id == workflow_id,
+                    PhoneCallSession.state.in_(("draft", "confirmed")))
+            .all()
+        )
+        declined_any = False
+        for s in sessions:
+            if transition(s, "declined"):  # legal only from draft
+                s.error_message = "errand cancelled"
+                declined_any = True
+        db.commit()
+        return declined_any
+    except Exception:  # noqa: BLE001 — cancel must not fail on a cleanup blip
+        logger.exception("Workflow %s: couldn't decline pending calls on cancel", workflow_id)
+        db.rollback()
+        return False
+
+
 async def _handle_replan_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackResult:
     """Update-plan tap → re-plan the errand from the edited goal, re-post the card.
 
     The mobile merges the edited goal into this button's data (data_key "goal").
-    We re-run the planner, update the draft + its transient routine IN PLACE, bump
-    the revision (so the old card's Run is rejected as stale), and post the
-    refreshed plan card for another review pass.
+    We re-run the planner, update the draft's steps IN PLACE, bump the revision
+    (so the old card's Run is rejected as stale), and post the refreshed plan card
+    for another review pass.
     """
     from app.core.llm_proxy_client import LLMProxyClient
     from app.db import get_session_local
@@ -580,7 +795,7 @@ async def _handle_replan_errand_plan(ctx: ServerCallbackContext) -> ServerCallba
                 error="This plan was updated — open the latest card to edit it.",
             )
 
-        menu = await _resolve_node_menu(row.node_id)
+        menu = await _resolve_node_menu(row.node_id, ctx.household_id, row.user_id)
         try:
             plan = await plan_errand(new_goal, LLMProxyClient(), menu=menu)
         except ValueError as e:
@@ -607,30 +822,11 @@ async def _handle_replan_errand_plan(ctx: ServerCallbackContext) -> ServerCallba
 def _apply_plan_revision(
     db: Session, row: ErrandPlan, plan: Any, household_id: str, new_goal: str | None = None
 ) -> None:
-    """Update the draft + its transient routine IN PLACE from a revised plan, bump
-    the revision (old card's Run → stale), re-nudge, and re-post the plan card.
-    Shared by re-plan (edits the goal) and refine (keeps it). All post-commit side
-    effects are best-effort so a committed revision never flips the callback to
-    FAILED."""
-    from app.api.routines import publish_routines_sync
-
+    """Update the draft's steps IN PLACE from a revised plan, bump the revision
+    (old card's Run → stale), and re-post the plan card. Shared by re-plan (edits
+    the goal) and refine (keeps it). The card re-post is best-effort so a committed
+    revision never flips the callback to FAILED."""
     node_steps = plan.routine_steps()
-    mobile_steps = _build_mobile_steps(node_steps)
-    routine = (
-        db.query(Routine)
-        .filter(Routine.slug == row.routine_slug, Routine.household_id == household_id)
-        .first()
-    )
-    if routine is not None:
-        routine.steps = json.dumps(mobile_steps)
-        routine.name = f"Errand: {plan.summary}"[:255]
-    else:  # vehicle vanished — recreate under the row's slug
-        db.add(Routine(
-            id=str(uuid4()), household_id=household_id, slug=row.routine_slug,
-            name=f"Errand: {plan.summary}"[:255], trigger_phrases=json.dumps([]),
-            steps=json.dumps(mobile_steps), response_instruction="",
-            response_length="short", schedule=None, enabled=True,
-        ))
     if new_goal is not None:
         row.goal = new_goal
     row.summary = plan.summary
@@ -638,10 +834,6 @@ def _apply_plan_revision(
     row.revision = row.revision + 1
     db.commit()
 
-    try:
-        publish_routines_sync(household_id, db)
-    except Exception:  # noqa: BLE001 — best-effort nudge
-        logger.exception("Errand %s routine-sync nudge failed", row.id)
     try:
         card_id = _post_errand_plan_card(row, node_steps, household_id, row.user_id)
         if card_id and card_id != row.inbox_item_id:
@@ -689,7 +881,7 @@ async def _handle_refine_errand_plan(ctx: ServerCallbackContext) -> ServerCallba
             )
 
         current_steps = json.loads(row.steps or "[]")
-        menu = await _resolve_node_menu(row.node_id)
+        menu = await _resolve_node_menu(row.node_id, ctx.household_id, row.user_id)
         try:
             plan = await refine_errand_plan(
                 row.summary or row.goal, current_steps, instruction, LLMProxyClient(), menu=menu
@@ -712,6 +904,137 @@ async def _handle_refine_errand_plan(ctx: ServerCallbackContext) -> ServerCallba
         db.close()
 
 
+# ── The errand as a workflow-engine CONSUMER (SEAM 1 + SEAM 3 wiring) ─────────
+#
+# Errands are the engine's first consumer. After the run/instance split the durable
+# RUN is a ``Workflow`` row (NOT the ``ErrandPlan`` draft): the store maps a Workflow
+# onto the engine's ``WorkflowRun`` and persists resume state in place; the progress
+# emitter renders the completion inbox card; ``run_fn``/``finalize_fn`` late-bind the
+# executor so tests can patch them. The store is kind-AGNOSTIC — it serves every
+# workflow kind (the Workflow row carries ``kind``); only the consumer is per-kind.
+
+
+class _WorkflowRunStore(WorkflowStore):
+    """A ``WorkflowStore`` unit of work over one ``Workflow`` (RUN) row. Loads the
+    row once and mutates it in place on save (rather than a bulk UPDATE) so the
+    run's ORM object stays authoritative for the rest of the call — the atomic claim
+    is still a bulk ``waiting→running`` UPDATE (the real serialization point)."""
+
+    def __init__(self, db: Session):
+        self._db = db
+        self._row: Workflow | None = None
+
+    def load(self, workflow_id: str) -> WorkflowRun | None:
+        row = self._db.query(Workflow).filter(Workflow.id == workflow_id).first()
+        self._row = row
+        if row is None:
+            return None
+        return WorkflowRun(
+            id=row.id,
+            kind=row.kind,
+            household_id=row.household_id,
+            node_id=row.node_id,
+            user_id=row.user_id,
+            goal=row.goal or "",
+            title=row.title or row.goal or "your errand",
+            steps=json.loads(row.steps or "[]"),
+            cursor=row.cursor,
+            results=json.loads(row.results_json or "[]"),
+            state=row.state,
+        )
+
+    def claim_running(self, workflow_id: str) -> bool:
+        claimed = (
+            self._db.query(Workflow)
+            .filter(Workflow.id == workflow_id, Workflow.state == "waiting")
+            .update({"state": "running"})
+        )
+        self._db.commit()
+        if claimed and self._row is not None:
+            self._row.state = "running"
+        return bool(claimed)
+
+    def save_waiting(
+        self, run: WorkflowRun, cursor: int, results: list[dict[str, Any]],
+        *, signal_kind: str = "phone_call", wake_at: Any = None,
+    ) -> None:
+        try:
+            if self._row is not None:
+                self._row.state = "waiting"
+                self._row.cursor = cursor
+                self._row.results_json = json.dumps(results)
+                self._row.waiting_on = signal_kind  # phone_call | timer
+                self._row.wake_at = wake_at          # set only for a timer wait
+            self._db.commit()
+        except Exception:  # noqa: BLE001 — the phone cards are the live feedback
+            logger.exception("Workflow %s: couldn't persist waiting state", run.id)
+            self._db.rollback()
+
+    def save_terminal(self, run: WorkflowRun, state: str, error: str | None) -> None:
+        # The completion card is posted independently (SEAM 3), so a commit blip here
+        # must not crash the callback — anti-vanishing over bookkeeping.
+        try:
+            if self._row is not None:
+                self._row.state = state
+                self._row.error = error
+            self._db.commit()
+        except Exception:  # noqa: BLE001 — the card already went out; don't fail the callback
+            logger.exception("Workflow %s: couldn't persist terminal state %s", run.id, state)
+            self._db.rollback()
+
+    def close(self) -> None:
+        self._db.close()
+
+
+def _workflow_store_factory() -> _WorkflowRunStore:
+    """Open a fresh Workflow-backed store (its own DB session). ``get_session_local``
+    is imported lazily so tests can patch it."""
+    from app.db import get_session_local
+
+    return _WorkflowRunStore(get_session_local()())
+
+
+class _ErrandProgressEmitter(ProgressEmitter):
+    """SEAM 3 for errands: render engine progress as inbox cards. Today only the
+    terminal ``complete`` event surfaces (the headless completion card); the phone
+    confirm/outcome cards are the live feedback while a call is in flight."""
+
+    def emit(self, run: WorkflowRun, event: ProgressEvent) -> None:
+        if event.type == "complete" and event.result is not None:
+            _post_errand_completion_card(run.household_id, run.title, event.result, run.user_id)
+
+
+async def _errand_run_fn(*args: Any, **kwargs: Any) -> Any:
+    """Late-bind the executor so ``deliver_signal`` picks up a patched
+    ``errand_executor.execute_errand`` in tests."""
+    from app.services.errand_executor import execute_errand
+
+    return await execute_errand(*args, **kwargs)
+
+
+async def _errand_finalize_fn(goal: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Late-bind the aggregator/composer (same reason as ``_errand_run_fn``)."""
+    from app.services.errand_executor import aggregate_and_compose
+
+    return await aggregate_and_compose(goal, results)
+
+
+def register_errand_workflow() -> None:
+    """Register the errand as a workflow-engine consumer (store + run/finalize +
+    progress). Idempotent; called at import so the durable resume path works even
+    when the app lifespan hasn't run (tests import this module directly). The store
+    is kind-agnostic (installed once); the consumer is keyed by the ``errand`` kind."""
+    register_workflow_store(_workflow_store_factory)
+    register_consumer(
+        "errand",
+        WorkflowConsumer(
+            run_fn=_errand_run_fn,
+            finalize_fn=_errand_finalize_fn,
+            progress=_ErrandProgressEmitter(),
+        ),
+    )
+
+
 def register_errand_callbacks() -> None:
     """Wire the plan card's Run/Revise/Cancel taps to their handlers. Call at
     startup (main.py lifespan) — an unregistered pair 400s at the tap."""
@@ -720,3 +1043,8 @@ def register_errand_callbacks() -> None:
     register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_REPLAN_CALLBACK, _handle_replan_errand_plan)
     register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_DISCARD_CALLBACK, _handle_discard_errand_plan)
     logger.info("🗒️ Errand server callbacks registered")
+
+
+# Register the errand consumer at import — the durable resume primitive
+# (deliver_signal) needs the store + consumer available even without the lifespan.
+register_errand_workflow()
