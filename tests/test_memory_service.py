@@ -1,6 +1,7 @@
 """Tests for MemoryService."""
 import pytest
 from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -193,3 +194,65 @@ class TestCleanupExpired:
 
         count = service.cleanup_expired()
         assert count == 0
+
+
+class TestEmbedMissing:
+    """The sweep that makes any unembedded memory (passive extraction, agent
+    contributions, a failed remember-embed) recallable — semantic recall filters
+    embedding IS NOT NULL, so an unembedded memory is invisible to it."""
+
+    def test_embeds_pending_and_returns_count(self, service, db):
+        service.save_memory(1, "h1", "likes tea", key="k1")
+        service.save_memory(1, "h1", "lives in Denver", key="k2")
+        assert len(service.get_memories_without_embeddings()) == 2
+
+        fake = MagicMock()
+        fake.create_embeddings_sync.return_value = [[0.1] * 384, [0.2] * 384]
+        with patch("app.core.llm_proxy_client.LLMProxyClient", return_value=fake):
+            n = service.embed_missing()
+
+        assert n == 2
+        fake.create_embeddings_sync.assert_called_once()  # one batched call, not N
+        assert service.get_memories_without_embeddings() == []
+
+    def test_noop_when_nothing_pending(self, service, db):
+        with patch("app.core.llm_proxy_client.LLMProxyClient") as cls:
+            assert service.embed_missing() == 0
+            cls.assert_not_called()  # don't even construct the client with no work
+
+    def test_skips_rows_whose_embedding_failed(self, service, db):
+        service.save_memory(1, "h1", "keep", key="k1")
+        service.save_memory(1, "h1", "retry-me", key="k2")
+        fake = MagicMock()
+        fake.create_embeddings_sync.return_value = [[0.1] * 384, []]  # 2nd came back empty
+        with patch("app.core.llm_proxy_client.LLMProxyClient", return_value=fake):
+            n = service.embed_missing()
+
+        assert n == 1
+        remaining = service.get_memories_without_embeddings()
+        assert [m.content for m in remaining] == ["retry-me"]  # still pending for next sweep
+
+
+class TestEmbeddingInvalidationOnUpdate:
+    """A3: when an upsert changes the text, the stale vector must be dropped so
+    recall can't keep matching the OLD content; the sweep re-embeds it."""
+
+    def _row(self, db, mem_id):
+        return db.query(UserMemory).filter(UserMemory.id == mem_id).first()
+
+    def test_content_change_nulls_the_embedding(self, service, db):
+        m = service.save_memory(1, "h1", "likes tea", key="k1")
+        service.update_embedding(m.id, [0.1] * 384)
+        db.expire_all()
+        assert self._row(db, m.id).embedding is not None
+
+        service.save_memory(1, "h1", "likes green tea", key="k1")  # same key, new text
+        db.expire_all()
+        assert self._row(db, m.id).embedding is None
+
+    def test_same_content_keeps_the_embedding(self, service, db):
+        m = service.save_memory(1, "h1", "likes tea", key="k1")
+        service.update_embedding(m.id, [0.1] * 384)
+        service.save_memory(1, "h1", "likes tea", key="k1")  # identical upsert
+        db.expire_all()
+        assert self._row(db, m.id).embedding is not None

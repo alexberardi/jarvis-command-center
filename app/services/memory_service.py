@@ -126,6 +126,10 @@ class MemoryService:
             existing = self.db.query(UserMemory).filter(*filters).first()
 
             if existing:
+                # If the text changed, drop the stale vector so recall can't match
+                # the OLD content — the embedding sweep re-embeds it off the hot path.
+                if existing.content != content:
+                    existing.embedding = None
                 existing.content = content
                 existing.category = category
                 existing.source = source
@@ -165,6 +169,28 @@ class MemoryService:
             {"emb": str(embedding), "mid": memory_id},
         )
         self.db.commit()
+
+    def embed_missing(self, limit: int = 100) -> int:
+        """Embed active memories that have no vector yet, from ANY write path —
+        passive extraction, agent contributions, or a ``remember`` embed that
+        failed. Semantic recall filters ``embedding IS NOT NULL``, so an unembedded
+        memory is invisible to recall; this is the sweep that guarantees everything
+        Jarvis learns becomes recallable. Runs OFF the hot path (periodic task in a
+        thread). One batched embedding call for all pending rows. Returns the count
+        embedded."""
+        pending = self.get_memories_without_embeddings(limit=limit)
+        if not pending:
+            return 0
+
+        from app.core.llm_proxy_client import LLMProxyClient
+
+        vectors = LLMProxyClient().create_embeddings_sync([m.content for m in pending])
+        embedded = 0
+        for mem, vec in zip(pending, vectors or []):
+            if vec:
+                self.update_embedding(mem.id, vec)
+                embedded += 1
+        return embedded
 
     def forget_memory(
         self,

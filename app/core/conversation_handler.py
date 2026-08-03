@@ -2881,6 +2881,22 @@ class ConversationHandler:
         memories = ctx.get("user_memories", "") or ""
         block = build_speaker_block(name, memories)
 
+        # Observability (B7): make the identity decision measurable. `source` tells us
+        # whether the memory context is grounded in THIS turn's confident STT id or a
+        # fallback (session warmup / 30s stickiness) — the fallback is the cross-user
+        # misattribution vector. One line/turn lets us quantify how often it fires
+        # before we gate writes on it.
+        decision_source = (
+            "stt" if speaker_user_id is not None
+            else "session" if warmup_speaker is not None
+            else "none"
+        )
+        logger.info(
+            "🪪 identity-decision turn_speaker=%s warmup_speaker=%s effective=%s "
+            "source=%s has_memories=%s",
+            speaker_user_id, warmup_speaker, effective, decision_source, bool(memories),
+        )
+
         logger.info(
             "[TURN cid=%s] [SPEAKER] resolved_user_id=%s source=%s name=%r "
             "memories_chars=%d block=%s",

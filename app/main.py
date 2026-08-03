@@ -256,6 +256,39 @@ async def startup_event():
 
     asyncio.create_task(_periodic_memory_extraction())
 
+    # Schedule memory embedding sweep. Semantic recall filters `embedding IS NOT NULL`,
+    # but passive extraction (and agent contributions) write memories with a NULL vector
+    # and never embed them — only a MANUAL backfill script did, so passively-learned
+    # facts were effectively unrecallable. This sweep embeds any pending rows off the hot
+    # path (blocking embed call runs in a thread so it never touches the event loop).
+    async def _periodic_memory_embedding() -> None:
+        while True:
+            try:
+                interval = int(settings_service.get("memory.embedding_interval_seconds") or 60)
+            except (TypeError, ValueError):
+                interval = 60
+            await asyncio.sleep(interval)
+            try:
+                enabled = settings_service.get("memory.embedding_enabled")
+                if enabled is False or str(enabled).lower() in ("false", "0", "no"):
+                    continue
+
+                def _embed_pending() -> int:
+                    from app.services.memory_service import MemoryService
+                    db = SessionLocal()
+                    try:
+                        return MemoryService(db).embed_missing(limit=100)
+                    finally:
+                        db.close()
+
+                embedded = await asyncio.to_thread(_embed_pending)
+                if embedded:
+                    logger.info("🔢 Memory embedding sweep embedded %d memories", embedded)
+            except Exception as e:
+                logger.warning("Memory embedding sweep failed: %s", e)
+
+    asyncio.create_task(_periodic_memory_embedding())
+
     # Schedule background characterization synthesis (the evolving per-person view).
     # Off by default; enqueues background-model jobs whose results land via
     # /characterization-synthesis/callback. Kept off the hot path, mirrors the
