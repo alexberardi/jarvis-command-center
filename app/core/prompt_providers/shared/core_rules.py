@@ -319,6 +319,37 @@ def build_personality_block(persona_text: str | None) -> str:
     )
 
 
+def build_ambient_context_block(ambient_text: str | None) -> str:
+    """Return the household ``<ambient_context>`` block for the cached identity header.
+
+    A SNAPSHOT of the household's situational context (current time, weather, today's
+    calendar) assembled ONCE at conversation warmup and frozen byte-stable for the whole
+    conversation, so the model can weave it into any reply WITHOUT a tool call. It's
+    household-wide (not per-speaker), so — like room/style/persona — it rides the cached
+    prefix and stays byte-identical across speakers and turns. Injected in
+    :meth:`IJarvisPromptProvider.build_context_header` after the personality block.
+
+    INVARIANT: no live/relative timestamps may reach this string — a value that changes
+    per turn would break the llama.cpp prefix cache (see
+    ``ConversationHandler._assemble_ambient_bundle``, which quantizes the clock). Returns
+    ``""`` for empty input → byte-identical to the pre-feature header (the safe fallback).
+    """
+    ambient_text = (ambient_text or "").strip()
+    if not ambient_text:
+        return ""
+    return (
+        "<ambient_context>\n"
+        "Live context about the user's day. Use these facts whenever they're relevant to "
+        "what the user asks — how their day looks, the weather, what's coming up — and weave "
+        "them into a natural, helpful reply. If something here is actionable (a due reminder, "
+        "a refill, a task), proactively OFFER to take care of it. Never invent details that "
+        "aren't here — if the user asks about something you weren't given (like live traffic "
+        "or prices), say you don't have that information rather than guessing:\n"
+        f"{ambient_text}\n"
+        "</ambient_context>"
+    )
+
+
 def build_personality_reminder(persona_text: str | None) -> str:
     """Return the END-OF-PROMPT voice reminder that restates the household voice.
 

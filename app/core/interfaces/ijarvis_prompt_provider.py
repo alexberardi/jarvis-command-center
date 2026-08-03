@@ -60,6 +60,7 @@ class IJarvisPromptProvider(ABC):
             </personality>
         """
         from app.core.prompt_providers.shared.core_rules import (
+            build_ambient_context_block,
             build_identity_header,
             build_personality_block,
         )
@@ -72,6 +73,13 @@ class IJarvisPromptProvider(ABC):
         personality = build_personality_block(ctx.get("household_persona", ""))
         if personality:
             header = f"{header}\n\n{personality}"
+
+        # Household ambient situational snapshot (time/weather/calendar), frozen at
+        # warmup so it rides the cached prefix byte-stable. Household-wide → speaker-
+        # agnostic, safe here. Empty → header byte-identical to pre-feature.
+        ambient = build_ambient_context_block(ctx.get("ambient_context", ""))
+        if ambient:
+            header = f"{header}\n\n{ambient}"
         return header
 
     def build_speaker_context(self, node_context: Dict[str, Any]) -> str:

@@ -269,6 +269,20 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         default=0.25,
         description="Minimum cosine similarity for agent context vector search (0-1)",
     ),
+    SettingDefinition(
+        key="ambient_context.enabled",
+        category="memory",
+        value_type="bool",
+        default=False,
+        description=(
+            "Inject an always-on ambient situational block (current time, weather, "
+            "today's calendar) into the CACHED prompt prefix — snapshotted once at "
+            "conversation start — so the assistant can answer 'how's today looking?' "
+            "proactively without a tool call. Opt-in; when on, consider turning "
+            "memory.agent_context_enabled off for this household to avoid double-"
+            "injecting weather/calendar."
+        ),
+    ),
 
     # Web search settings
     SettingDefinition(

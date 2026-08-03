@@ -3,3 +3,4 @@
 extraction_eval_*.json
 recall_eval_*.json
 ex_t0*.json
+ambient_eval_*.json

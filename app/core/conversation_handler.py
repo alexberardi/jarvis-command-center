@@ -436,6 +436,17 @@ class ConversationHandler:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to load characterization: {e}")
 
+        # Assemble the household's ambient situational snapshot (time + weather +
+        # today's calendar) ONCE at warmup and freeze it onto node_context so it rides
+        # the cached prefix byte-stable across the conversation (see
+        # build_ambient_context_block). Opt-in per household (default off → no prefix
+        # change for anyone).
+        if household_id and _memory_enabled and self._get_ambient_context_enabled():
+            ambient = self._assemble_ambient_bundle(household_id, timezone)
+            if ambient:
+                node_context["ambient_context"] = ambient
+                logger.info("🌤️ Ambient context snapshot assembled (%d chars)", len(ambient))
+
         # Fetch date keys for prompt providers that need them.
         # We INTENTIONALLY trim to a small high-frequency subset before
         # injecting into the prompt — the full list is ~60 keys (~250 prompt
@@ -2642,6 +2653,72 @@ class ConversationHandler:
         except Exception as e:
             logger.warning("Failed to get agent context: %s", e)
             return None
+
+    def _get_ambient_context_enabled(self) -> bool:
+        """Opt-in gate for the cached ambient situational snapshot (default OFF)."""
+        try:
+            from app.services.settings_service import get_settings_service
+            val = get_settings_service().get("ambient_context.enabled")
+            return val is True or str(val).lower() in ("true", "1", "yes")
+        except Exception:
+            return False
+
+    def _assemble_ambient_bundle(self, household_id: str, timezone: Optional[str]) -> str:
+        """Snapshot the household's situational context (current time + weather + today's
+        calendar) as a byte-stable string for the cached prefix.
+
+        Household-scoped (weather/calendar are household-wide agent memories), so it's
+        speaker-agnostic and safe in the shared prefix. The clock is quantized to 15 min
+        and rendered ABSOLUTE — no live/relative value may survive into the string, or the
+        per-turn prompt would differ and break the llama.cpp prefix cache. Best-effort: a
+        missing source drops its line; any failure returns "" (fail-open, prefix stays
+        byte-identical to the pre-feature header).
+        """
+        try:
+            from datetime import datetime
+            try:
+                from zoneinfo import ZoneInfo
+                now = datetime.now(ZoneInfo(timezone or "UTC"))
+            except Exception:
+                now = datetime.utcnow()
+            clock = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+            lines = [f"As of {clock.strftime('%-I:%M %p')}, {clock.strftime('%A, %b %-d')}."]
+
+            from app.db import get_session_local
+            from app.models import UserMemory
+
+            # Latest non-expired household (user_id IS NULL) memory per category, labeled.
+            # Weather + calendar are fed by the node's agents today; reminders arrive once
+            # reminder_agent injects a "reminder" memory (see slice-2 plumbing).
+            categories = (("weather", "Weather"), ("calendar", "Today"), ("reminder", "Reminders"))
+            SessionLocal = get_session_local()
+            db = SessionLocal()
+            try:
+                utcnow = datetime.utcnow()
+                for category, label in categories:
+                    row = (
+                        db.query(UserMemory)
+                        .filter(
+                            UserMemory.user_id.is_(None),
+                            UserMemory.household_id == household_id,
+                            UserMemory.category == category,
+                            UserMemory.is_active == True,  # noqa: E712
+                            (UserMemory.expires_at.is_(None)) | (UserMemory.expires_at > utcnow),
+                        )
+                        .order_by(UserMemory.updated_at.desc())
+                        .first()
+                    )
+                    if row and row.content and row.content.strip():
+                        content = row.content.strip()
+                        lines.append(content if content.lower().startswith(label.lower())
+                                     else f"{label}: {content}")
+            finally:
+                db.close()
+
+            return "\n".join(lines)
+        except Exception as e:  # noqa: BLE001 — fail-open, never break warmup
+            logger.warning("Failed to assemble ambient bundle: %s", e)
+            return ""
 
     def _get_system_prompt(
         self,
