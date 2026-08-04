@@ -33,6 +33,12 @@ class MakePhoneCallTool(IServerTool):
         return "make_phone_call"
 
     @property
+    def is_risky(self) -> bool:
+        # Speaks to a stranger on the user's behalf — the archetypal
+        # envelope-widening step for errand pause-and-replan.
+        return True
+
+    @property
     def description(self) -> str:
         return (
             "Place a phone call to a business on the user's behalf (book a "

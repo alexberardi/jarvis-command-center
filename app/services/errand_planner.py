@@ -81,7 +81,12 @@ def build_errand_menu(available_commands: list[dict[str, Any]] | None) -> list[d
             for p in (c.get("parameters") or [])
             if p.get("name")
         }
-        menu.append({"command": name, "description": c.get("description") or "", "args": args})
+        menu.append({
+            "command": name,
+            "description": c.get("description") or "",
+            "args": args,
+            "is_risky": bool(c.get("is_risky", False)),
+        })
     return menu
 
 
@@ -177,6 +182,7 @@ def build_server_tool_menu(
             "command": fn.get("name") or name,
             "description": fn.get("description") or "",
             "args": args,
+            "is_risky": bool(getattr(tool, "is_risky", False)),
         })
     return menu
 

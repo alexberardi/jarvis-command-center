@@ -111,7 +111,19 @@ def test_build_errand_menu_converts_available_commands():
         "command": "set_timer",
         "description": "Start a timer.",
         "args": {"duration": "how long, e.g. '5 minutes'", "label": "string"},
+        "is_risky": False,  # not declared → low-stakes default
     }]
+
+
+def test_build_errand_menu_carries_is_risky_flag():
+    # is_risky rides through from the node CommandDefinition (SDK schema) so the
+    # errand envelope check can read it off a persisted step. Absent → False.
+    available = [
+        {"command_name": "send_text", "description": "text someone", "parameters": [], "is_risky": True},
+        {"command_name": "get_weather", "description": "weather", "parameters": []},
+    ]
+    menu = {m["command"]: m["is_risky"] for m in errand_planner.build_errand_menu(available)}
+    assert menu == {"send_text": True, "get_weather": False}
 
 
 def test_build_errand_menu_filters_deny_and_junk():
