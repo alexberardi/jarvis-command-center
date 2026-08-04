@@ -100,11 +100,17 @@ def should_double_check_sentinel(
     (2026-07-27: "who is Leo?" silenced because "Leo" is a pet name) than
     a real addressing verdict, and one /think re-check is cheap next to a
     false silence. Ambient and middle-band turns stay single-pass so
-    genuine overheard-speech rejections aren't argued with, and the
-    follow-up window never qualifies — silence is its designed ending.
+    genuine overheard-speech rejections aren't argued with. EARLY follow-up
+    iterations (< FOLLOW_UP_STRICT_ITERATION) also qualify: a tool-needing
+    continuation ("...actually set a timer for 5 minutes") must not be
+    snap-silenced by a first-look ``<not_for_me/>``. Late follow-up iterations
+    stay single-pass — by then silence is the window's designed ending.
     """
     if turn_source == "follow_up":
-        return False
+        # Early iterations get the /think rescue — a genuine continuation may
+        # need a tool and must not be dropped by a snap sentinel. Late
+        # iterations stay strict, where going quiet is the designed ending.
+        return (follow_up_iteration or 1) < FOLLOW_UP_STRICT_ITERATION
     # A typed app message is directed at Jarvis by construction — any
     # sentinel on it deserves the reasoned re-check.
     if turn_source == "chat":
@@ -158,7 +164,8 @@ def _follow_up_hint(follow_up_iteration: int | None) -> str:
         f"[turn context: follow-up window, iteration {iteration} — there "
         f"was no wake word; the mic stayed open after your last reply to "
         f"catch a continuation. If this clearly continues your exchange, "
-        f"answer. If the room's conversation has moved on without you, emit "
-        f"<not_for_me/> — your exchange is over, and going quiet is the "
-        f"designed ending, not a failure.{escalation}]"
+        f"answer it — or run the tool it calls for; don't reply with bare "
+        f"prose when the request needs a tool. If the room's conversation has "
+        f"moved on without you, emit <not_for_me/> — your exchange is over, "
+        f"and going quiet is the designed ending, not a failure.{escalation}]"
     )
