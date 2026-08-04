@@ -108,6 +108,14 @@ class TestFollowUpMode:
         assert "fresh wake" not in hint.lower()
         assert "no wake word" in hint.lower()
 
+    def test_follow_up_offers_the_tool_affordance(self):
+        # Regression pin for the follow-up tool-call drop: a continuation that
+        # needs a tool must be allowed to RUN it, not just answered as prose.
+        # The wake hint always said "run the tool it calls for"; the follow-up
+        # hint had dropped it, steering the model to prose/silence.
+        hint = build_turn_hint("follow_up", follow_up_iteration=1)
+        assert "run the tool" in hint.lower()
+
 
 class TestInference:
     """Old node clients don't send turn_source. Only the wake path measures
@@ -161,10 +169,12 @@ class TestInstructionIntegration:
 
 
 class TestShouldDoubleCheckSentinel:
-    """Gate for the engine's sentinel double-check: only turns whose
-    acoustics clearly say "directed at Jarvis" qualify — a quiet-room wake
-    or a high-confidence OWW fire. Ambient and middle-band turns don't,
-    so genuine overheard-speech rejections stay single-pass."""
+    """Gate for the engine's sentinel double-check. Turns whose acoustics
+    clearly say "directed at Jarvis" qualify (a quiet-room wake or a
+    high-confidence OWW fire), as do typed chat and EARLY follow-up iterations
+    (a real continuation may need a tool). Ambient/middle-band turns and LATE
+    follow-up iterations don't — genuine overheard-speech and end-of-window
+    silences stay single-pass."""
 
     def test_quiet_room_wake_qualifies(self):
         from app.core.turn_context import should_double_check_sentinel
@@ -189,12 +199,37 @@ class TestShouldDoubleCheckSentinel:
 
         assert should_double_check_sentinel("wake", 0.4, None, None) is False
 
-    def test_follow_up_never_qualifies(self):
+    def test_early_follow_up_qualifies_for_rescue(self):
         from app.core.turn_context import should_double_check_sentinel
 
-        # In the follow-up window silence is the designed ending — never
-        # argue the model out of it.
-        assert should_double_check_sentinel("follow_up", None, 1, 0.0) is False
+        # Regression pin for the follow-up tool-call drop: a tool-needing
+        # continuation ("...actually set a timer for 5 minutes") must not be
+        # snap-silenced — early follow-up iterations buy the /think re-check.
+        assert should_double_check_sentinel("follow_up", None, 1, 0.0) is True
+        assert (
+            should_double_check_sentinel(
+                "follow_up", None, FOLLOW_UP_STRICT_ITERATION - 1, None
+            )
+            is True
+        )
+
+    def test_follow_up_default_iteration_qualifies(self):
+        from app.core.turn_context import should_double_check_sentinel
+
+        # No iteration supplied → treated as iteration 1 → qualifies.
+        assert should_double_check_sentinel("follow_up", None, None, None) is True
+
+    def test_late_follow_up_stays_single_pass(self):
+        from app.core.turn_context import should_double_check_sentinel
+
+        # By the strict iteration the room has likely moved on — silence is
+        # the window's designed ending, so don't argue the model out of it.
+        assert (
+            should_double_check_sentinel(
+                "follow_up", None, FOLLOW_UP_STRICT_ITERATION, None
+            )
+            is False
+        )
 
     def test_no_signal_does_not_qualify(self):
         from app.core.turn_context import should_double_check_sentinel
