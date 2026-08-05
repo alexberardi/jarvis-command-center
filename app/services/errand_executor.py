@@ -101,19 +101,26 @@ async def _compose_errand_message(goal: str, results: list[dict[str, Any]], fall
     lines: list[str] = []
     for r in results:
         label = r.get("label") or r.get("command") or "step"
-        state = "ok" if r.get("success") else "FAILED"
+        ok = r.get("success")
         detail = r.get("message") or _compact_data(r.get("data")) or r.get("error") or ""
-        lines.append(f"- {label} [{state}]: {detail}")
+        if not detail:
+            # A step that "succeeded" but returned nothing — the model must NOT invent
+            # what it produced (live: it said "a joke was told" for an empty tell_joke).
+            detail = "finished but returned no information" if ok else "failed with no detail"
+        lines.append(f"- {label} [{'ok' if ok else 'FAILED'}]: {detail}")
     prompt = (
         "You are Jarvis giving the user the FINAL report on a background errand that "
         f"has now FINISHED. Their goal was: {goal}\n\nWhat ACTUALLY happened, step by "
         "step:\n" + "\n".join(lines) +
-        "\n\nWrite a short, friendly 1-2 sentence summary of what happened, including the "
-        "useful information (the weather, the answer, who you reached). Report ONLY the "
-        "steps above — the errand is OVER, so NEVER say you 'will' do something and never "
-        "mention any action that isn't in the steps above. If a step FAILED, say so "
-        "honestly (a failed step stops the errand, so later steps did NOT run). No "
-        "preamble, no markdown.\n\n/no_think"
+        "\n\nWrite a short, friendly 1-2 sentence summary. Base EVERY statement STRICTLY "
+        "on the detail shown after each step — quote the useful information (the weather, "
+        "the answer, who you reached). NEVER invent an outcome: if a step's detail says it "
+        "'returned no information', report that it ran but do NOT claim what it produced — "
+        "do NOT say a joke was told, a message was sent, an item was found, or a task was "
+        "done unless that detail is actually shown above. The errand is OVER, so NEVER say "
+        "you 'will' do something and never mention any action not in the steps above. If a "
+        "step FAILED, say so honestly (a failed step stops the errand, so later steps did "
+        "NOT run). No preamble, no markdown.\n\n/no_think"
     )
     try:
         from app.core.llm_proxy_client import LLMProxyClient
@@ -139,9 +146,17 @@ async def _compose_errand_message(goal: str, results: list[dict[str, Any]], fall
 async def aggregate_and_compose(goal: str, results: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate step outcomes into a final result AND LLM-compose the completion
     message. Shared by the executor's completion path and the resume handler's
-    fail-fast path so both produce the same friendly, honest summary."""
-    result = _aggregate(results)
-    result["message"] = await _compose_errand_message(goal, results, result["message"])
+    fail-fast path so both produce the same friendly, honest summary.
+
+    Control-flow steps (an approved ``request_replan``; ``control: True``) are not
+    user-facing WORK — a completion card must not narrate "the replanning task
+    returned no information". They're dropped from the summary + the pass/fail
+    tally (but kept in the record). If filtering leaves nothing, fall back to the
+    full list so an all-control run still reports sensibly."""
+    visible = [r for r in results if not r.get("control")] or results
+    result = _aggregate(visible)
+    result["results"] = results  # keep the full record, incl. control steps
+    result["message"] = await _compose_errand_message(goal, visible, result["message"])
     return result
 
 

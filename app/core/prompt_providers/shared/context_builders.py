@@ -101,6 +101,20 @@ def build_direct_answer_section(
         section += f"- MUST call tools for: {', '.join(sorted(set(must_call_tools)))}\n"
     if direct_answer_allowed:
         section += f"- Direct answers allowed for: {', '.join(sorted(set(direct_answer_allowed)))}\n"
+    # Spoken replies are read aloud by TTS — long answers are slow to speak and
+    # tiring to hear, and every extra output token is decode + TTS latency (and gets
+    # generated TWICE when the force-tool-calls guard retries). The soft "a sentence
+    # or two" nudge was ignored — the warm persona + injected context made the model
+    # write multi-paragraph essays. Calibrated on the live 8B: this strong, concrete
+    # form cut "what are my dogs named?" from ~97 tokens to ~13. Still a directive,
+    # NOT a hard cap (no max_tokens change — length stays model-controlled).
+    section += (
+        "- BE BRIEF. Your reply is read aloud. Answer in ONE short sentence and STOP. "
+        "Give exactly what was asked — do NOT add tips, extra facts, safety advice, or "
+        "\"let me know if…\" offers unless the user explicitly asks for more. Warm tone "
+        "is fine; padding is not. E.g. \"what's the weather?\" -> \"72 and cloudy.\" — "
+        "not a paragraph.\n"
+    )
 
     return section
 

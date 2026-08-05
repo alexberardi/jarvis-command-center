@@ -41,7 +41,9 @@ class RunErrandTool(IServerTool):
             "multi-step background task (e.g. 'run an errand: check the weather "
             "and remind me to buy milk tomorrow'). Nothing runs until the user "
             "taps Run on the plan card. Do NOT use for a single immediate command "
-            "the user wants done right now — use the normal command for that."
+            "the user wants done right now — use the normal command for that. If "
+            "the user names a FUTURE time (later, tonight, tomorrow, at 9am), use "
+            "schedule_errand instead."
         )
 
     @property

@@ -318,6 +318,12 @@ class ConversationHandler:
             # fires a fire-and-forget plan draft and returns a spoken ack; the
             # errand only runs after the user taps Run on the plan card.
             _safe_tool_names.append("run_errand")
+            # schedule_errand: the same launcher, but for a FUTURE time — it only
+            # writes a schedule row and returns a spoken ack. Even safer than
+            # run_errand (nothing is planned or shown until the scheduled time, and
+            # it still requires a Run tap then). Must be offered alongside run_errand
+            # or the model can't pick it for "schedule an errand for tonight…".
+            _safe_tool_names.append("schedule_errand")
             # Outbound-web tools (quick_search live lookups, deep_research) are
             # gated on the per-household web_search.enabled setting (default
             # OFF). When disabled they never enter the tool list — and because
@@ -441,7 +447,7 @@ class ConversationHandler:
         # the cached prefix byte-stable across the conversation (see
         # build_ambient_context_block). Opt-in per household (default off → no prefix
         # change for anyone).
-        if household_id and _memory_enabled and self._get_ambient_context_enabled():
+        if household_id and _memory_enabled and self._get_ambient_context_enabled(household_id):
             ambient = self._assemble_ambient_bundle(household_id, timezone)
             if ambient:
                 node_context["ambient_context"] = ambient
@@ -636,9 +642,9 @@ class ConversationHandler:
         # cache or clobber the cached timezone (the old mismatch-rebuild bug).
         logger.debug(f"⏱️  [T+{(time.time()-_t0)*1000:.0f}ms] Cache lookups done")
 
-        # Propagate model.advanced_thinking to the prompt provider so
+        # Propagate model.include_thinking to the prompt provider so
         # user_message_suffix returns /think or /no_think accordingly.
-        advanced_thinking = self._sync_advanced_thinking(conversation_id)
+        self._sync_include_thinking(conversation_id)
 
         if not messages:
             raise ConversationPreconditionError(
@@ -706,10 +712,10 @@ class ConversationHandler:
         # relevant to the user's utterance via vector similarity search.
         # Appended AFTER the user message so recency bias in attention
         # keeps it top-of-mind when the model generates its response.
-        # Gated behind model.advanced_thinking — when disabled, skip the
+        # Gated behind model.advanced_context — when disabled, skip the
         # vector search and embedding query to save latency.
         agent_context: str | None = None
-        if advanced_thinking:
+        if self._get_advanced_context_enabled(conversation_id):
             with timing.measure("agent_context") if timing else nullcontext():
                 agent_context = await self._get_agent_context(voice_command, conversation_id)
 
@@ -969,7 +975,7 @@ class ConversationHandler:
         _append_referenced_items_block(messages, conversation_id)
 
         # Sync advanced thinking setting so suffix adapts
-        self._sync_advanced_thinking(conversation_id)
+        self._sync_include_thinking(conversation_id)
 
         # Add user message
         suffix: str = (
@@ -1302,7 +1308,7 @@ class ConversationHandler:
         _append_referenced_items_block(messages, conversation_id)
 
         # Sync advanced thinking setting so suffix adapts
-        self._sync_advanced_thinking(conversation_id)
+        self._sync_include_thinking(conversation_id)
 
         # Adapter settings
         node_context = conversation_cache.get_node_context(conversation_id) or {}
@@ -2557,12 +2563,13 @@ class ConversationHandler:
 
         return router_decision
 
-    def _sync_advanced_thinking(self, conversation_id: str) -> bool:
-        """Read model.advanced_thinking setting and propagate to the provider.
+    def _sync_include_thinking(self, conversation_id: str) -> bool:
+        """Read model.include_thinking and propagate to the provider.
 
-        Sets ``self.prompt_provider.advanced_thinking`` so suffix and prompt
-        behaviour adapt automatically.  Returns the resolved value so
-        callers can gate agent-context retrieval.
+        Sets ``self.prompt_provider.include_thinking`` so user_message_suffix returns
+        /think or /no_think. DECOUPLED from model.advanced_context (proactive context
+        injection), which is read separately by ``_get_advanced_context_enabled`` — a
+        household can have fast context injection without paying for chain-of-thought.
         """
         enabled = False
         try:
@@ -2570,14 +2577,29 @@ class ConversationHandler:
             hh_id = node_ctx.get("household_id") if node_ctx else None
             if hh_id:
                 settings = get_settings_service()
-                val = settings.get("model.advanced_thinking", household_id=str(hh_id))
+                val = settings.get("model.include_thinking", household_id=str(hh_id))
                 if val is not None:
                     enabled = str(val).lower() in ("true", "1")
         except Exception:
             pass  # default to False
         if self.prompt_provider:
-            self.prompt_provider.advanced_thinking = enabled
+            self.prompt_provider.include_thinking = enabled
         return enabled
+
+    def _get_advanced_context_enabled(self, conversation_id: str) -> bool:
+        """model.advanced_context — whether the background agents' weather/calendar/
+        news/reminder context is injected into this turn (per household)."""
+        try:
+            node_ctx = conversation_cache.get_node_context(conversation_id)
+            hh_id = node_ctx.get("household_id") if node_ctx else None
+            if hh_id:
+                val = get_settings_service().get(
+                    "model.advanced_context", household_id=str(hh_id)
+                )
+                return val is not None and str(val).lower() in ("true", "1")
+        except Exception:
+            pass
+        return False
 
     async def _get_agent_context(
         self,
@@ -2654,11 +2676,17 @@ class ConversationHandler:
             logger.warning("Failed to get agent context: %s", e)
             return None
 
-    def _get_ambient_context_enabled(self) -> bool:
-        """Opt-in gate for the cached ambient situational snapshot (default OFF)."""
+    def _get_ambient_context_enabled(self, household_id: str) -> bool:
+        """Opt-in gate for the cached ambient situational snapshot (default OFF).
+
+        Read PER-HOUSEHOLD (matches memory.agent_context_enabled) — a global read
+        would ignore a household that enabled it in admin.
+        """
         try:
             from app.services.settings_service import get_settings_service
-            val = get_settings_service().get("ambient_context.enabled")
+            val = get_settings_service().get(
+                "ambient_context.enabled", household_id=str(household_id)
+            )
             return val is True or str(val).lower() in ("true", "1", "yes")
         except Exception:
             return False
@@ -2696,18 +2724,27 @@ class ConversationHandler:
             try:
                 utcnow = datetime.utcnow()
                 for category, label in categories:
-                    row = (
-                        db.query(UserMemory)
-                        .filter(
-                            UserMemory.user_id.is_(None),
-                            UserMemory.household_id == household_id,
-                            UserMemory.category == category,
-                            UserMemory.is_active == True,  # noqa: E712
-                            (UserMemory.expires_at.is_(None)) | (UserMemory.expires_at > utcnow),
-                        )
-                        .order_by(UserMemory.updated_at.desc())
-                        .first()
+                    base = db.query(UserMemory).filter(
+                        UserMemory.user_id.is_(None),
+                        UserMemory.household_id == household_id,
+                        UserMemory.category == category,
+                        UserMemory.is_active == True,  # noqa: E712
+                        (UserMemory.expires_at.is_(None)) | (UserMemory.expires_at > utcnow),
                     )
+                    row = None
+                    if category == "weather":
+                        # The weather agent injects BOTH a "Current weather ..." row and a
+                        # "Tomorrow's forecast ..." row. The forecast usually carries the
+                        # newer updated_at and would win a plain recency sort — making a
+                        # "how's today looking" reply describe TOMORROW. Prefer the
+                        # current-conditions row when one exists.
+                        row = (
+                            base.filter(UserMemory.content.ilike("current weather%"))
+                            .order_by(UserMemory.updated_at.desc())
+                            .first()
+                        )
+                    if row is None:
+                        row = base.order_by(UserMemory.updated_at.desc()).first()
                     if row and row.content and row.content.strip():
                         content = row.content.strip()
                         lines.append(content if content.lower().startswith(label.lower())

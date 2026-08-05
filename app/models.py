@@ -1085,14 +1085,54 @@ class Workflow(Base):
     steps = Column(Text, nullable=False, default="[]")  # JSON array of node-native steps — the plan
     cursor = Column(Integer, nullable=False, default=0)          # next step index to run on resume
     results_json = Column(Text, nullable=False, default="[]")    # accumulated per-step outcomes
+    # Bumps on a mid-run replan (a request_replan step splices new steps in).
+    # The change/delta card carries the revision it was posted for, so a tap on
+    # a stale card (one the run already moved past) is rejected — same
+    # stale-guard the draft ErrandPlan uses.
+    revision = Column(Integer, nullable=False, default=1)
+    # The run's live card (plan/delta/status) in the notifications inbox, so an
+    # update posts IN PLACE instead of stacking a second card.
+    inbox_item_id = Column(String, nullable=True)
     # running | waiting | done | partial | failed | timeout | cancelled
     state = Column(String(16), nullable=False, default="running", index=True)
     # When state == 'waiting', which wakeup source will resume it, and (for a timer)
     # when. ``phone_call`` waits resume on the call's outcome; ``timer`` waits
-    # resume when ``wake_at`` passes (the wait_for step). Persisted so a wait
-    # survives a restart — the point of a durable engine.
-    waiting_on = Column(String(20), nullable=True)  # phone_call | timer
+    # resume when ``wake_at`` passes (the wait_for step); ``approval`` waits on a
+    # human tapping the mid-run replan card (the request_replan step). Persisted
+    # so a wait survives a restart — the point of a durable engine.
+    waiting_on = Column(String(20), nullable=True)  # phone_call | timer | approval
     wake_at = Column(DateTime, nullable=True, index=True)  # timer wait: UTC instant to resume
     error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Schedule(Base):
+    """A durable TRIGGER that fires the plan→card loop on a clock. A schedule is NOT a
+    plan or a run — at ``next_fire_at`` a sweep re-plans ``intent`` against fresh context
+    and posts a plan card the user must approve (design decision: re-plan + RE-CONFIRM
+    each run, so a schedule never acts autonomously). One-shot for now (``recurrence``
+    null); a recurring schedule re-arms ``next_fire_at`` after each fire.
+
+    ``timezone`` is the user's IANA zone — kept so recurrence math (e.g. "every Monday
+    8am") stays correct across DST; ``next_fire_at`` itself is a naive-UTC instant to
+    match ``workflows.wake_at`` and the due sweep. A later ``silent`` mode (per-schedule
+    opt-in, gated by blast-radius) would skip the card for low-risk recurrences.
+    """
+
+    __tablename__ = 'schedules'
+
+    id = Column(String(40), primary_key=True, default=lambda: f"sch_{uuid4().hex}")
+    household_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True)   # who scheduled it / plan-card + notify target
+    node_id = Column(String, nullable=True)    # target node for the planned errand's node steps
+    intent = Column(Text, nullable=False)      # the natural-language goal to re-plan at fire time
+    title = Column(Text, nullable=True)        # display label
+    timezone = Column(String(64), nullable=False, default="UTC")  # IANA zone for recurrence math
+    next_fire_at = Column(DateTime, nullable=False, index=True)    # naive UTC — the due sweep key
+    recurrence = Column(Text, nullable=True)   # JSON recurrence spec; NULL = one-shot (Slice 1)
+    # active | done | cancelled | paused
+    state = Column(String(16), nullable=False, default="active", index=True)
+    last_fired_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

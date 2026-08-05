@@ -253,7 +253,12 @@ class TestBuildSpeakerBlock:
     def test_name_and_memories(self):
         result = build_speaker_block("alex", "- Likes coffee black")
         assert "You are speaking with alex." in result
-        assert "User Profile - If user asks" in result
+        assert "User Profile" in result
+        # Load-bearing anti-recall directive: the model must answer profile
+        # facts DIRECTLY, never fire a redundant `recall` round-trip for a fact
+        # already listed here (the ~2.2s-per-call latency fix on the 9B).
+        assert "answer DIRECTLY from this list" in result
+        assert "Do NOT call recall" in result
         assert "- Likes coffee black" in result
 
     def test_default_name_no_memories_is_empty(self):

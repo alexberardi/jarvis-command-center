@@ -474,24 +474,29 @@ class MemoryService:
         household_id: str,
         query_embedding: list[float],
         threshold: float = 0.9,
+        user_id: int | None = None,
     ) -> UserMemory | None:
         """Check if a very similar memory already exists (content dedup).
 
-        Used at inject time to prevent near-duplicate memories from
-        different keys (e.g. same news story rephrased).
+        Prevents near-duplicate memories from different keys (the same fact rephrased,
+        or the same news story). Scope: pass ``user_id`` to dedup a USER'S own memories
+        (the passive-extraction path); omit it (default) to dedup the household-wide
+        ``user_id IS NULL`` pool (agent injections).
 
         Args:
             household_id: The household scope
             query_embedding: Embedding of the new content
             threshold: Minimum similarity to consider a duplicate (default 0.9)
+            user_id: Dedup within this user's memories; None = household-wide pool
 
         Returns:
             The existing duplicate memory, or None if no match
         """
-        sql = """
+        user_clause = "user_id = :uid" if user_id is not None else "user_id IS NULL"
+        sql = f"""
             SELECT id, 1 - (embedding <=> CAST(:query_vec AS vector)) AS similarity
             FROM user_memories
-            WHERE user_id IS NULL
+            WHERE {user_clause}
               AND household_id = :hid
               AND is_active = true
               AND embedding IS NOT NULL
@@ -505,6 +510,8 @@ class MemoryService:
             "hid": household_id,
             "threshold": threshold,
         }
+        if user_id is not None:
+            params["uid"] = user_id
 
         row = self.db.execute(text(sql), params).fetchone()
         if not row:

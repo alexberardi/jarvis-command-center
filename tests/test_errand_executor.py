@@ -271,6 +271,21 @@ def test_compose_errand_message_uses_llm_and_falls_back():
     assert out == "fallback"  # composition never blocks the terminal card
 
 
+def test_compose_marks_empty_result_and_forbids_inventing_it():
+    """A step that 'succeeded' with no content must be reported as returning nothing —
+    the model is told not to invent an outcome (live: 'a joke was told' for an empty
+    tell_joke). We assert the grounding reaches the prompt, not the LLM's phrasing."""
+    results = [{"command": "tell_joke", "label": "Tell a joke", "success": True,
+                "message": None, "data": None}]
+    resp = {"choices": [{"message": {"content": "I ran the joke step; it returned nothing."}}]}
+    with patch("app.core.llm_proxy_client.LLMProxyClient") as LC:
+        LC.return_value.chat_completion = AsyncMock(return_value=resp)
+        asyncio.run(errand_executor._compose_errand_message("tell a joke", results, "fallback"))
+    sent = LC.return_value.chat_completion.call_args.kwargs["messages"][0]["content"]
+    assert "returned no information" in sent   # the empty step is explicit
+    assert "NEVER invent an outcome" in sent   # and the model is told not to fill the gap
+
+
 def test_wait_for_step_suspends_the_run_on_a_timer():
     """A wait_for step suspends the run on the TIMER wakeup source (signal_kind
     'timer' + a wake_at), through the same executor loop a phone step uses — the

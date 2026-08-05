@@ -249,3 +249,16 @@ class TestSemanticRecallRealPgvector:
         hits = svc.search_memories(ALICE, hh, _close_vec(), similarity_threshold=0.1)
         ids = [mm.id for mm, _ in hits]
         assert a.id in ids and b.id not in ids
+
+    def test_dedup_guard_is_user_scoped(self, pg_service):
+        """check_content_similarity(user_id=...) must match within a user's OWN
+        memories (the extraction dedup path), not across users or the household pool."""
+        svc, hh = pg_service
+        m = svc.save_memory(ALICE, hh, "likes coffee black", source="passive")
+        svc.update_embedding(m.id, _close_vec())
+        # Same user, near-identical vector → duplicate found.
+        assert svc.check_content_similarity(hh, _close_vec(), threshold=0.5, user_id=ALICE) is not None
+        # Different user → not a duplicate for them (scoped).
+        assert svc.check_content_similarity(hh, _close_vec(), threshold=0.5, user_id=BOB) is None
+        # Household pool (user_id IS NULL) → does not match a USER memory.
+        assert svc.check_content_similarity(hh, _close_vec(), threshold=0.5) is None

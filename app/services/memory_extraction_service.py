@@ -139,9 +139,15 @@ async def _enqueue_extraction(
         {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
         {
             "role": "user",
+            # `/no_think` is Qwen3's control token to disable chain-of-thought — the
+            # ONLY reliable way to suppress it. The system prompt's "no <think> block"
+            # text is ignored: extraction jobs were emitting ~1.5k-token reasoning
+            # blocks (~9.5s each) that get stripped later anyway but burn the shared
+            # GPU while live voice turns wait behind them in the queue. Must live in a
+            # USER turn (system-prompt placement is ignored by Qwen3).
             "content": (
                 f"Existing memories for this user:\n{existing_memories}\n\n"
-                f"Recent conversations:\n{transcript_text}"
+                f"Recent conversations:\n{transcript_text}\n\n/no_think"
             ),
         },
     ]
@@ -244,10 +250,34 @@ async def handle_extraction_callback(payload: dict[str, Any]) -> None:
 
         if memories:
             memory_svc = MemoryService(db)
-            for mem in memories:
+            # Embed the extracted facts up front so we can (a) SKIP near-duplicates of
+            # the user's existing memories before creating a new row — the root cause of
+            # the duplicate pile-up, since the extractor emits the same fact under
+            # different keys — and (b) store the vector immediately so recall works and
+            # the NEXT extraction dedups against it. Best-effort: if embedding is
+            # unavailable, fall back to a plain save (the periodic sweep embeds later).
+            from app.core.llm_proxy_client import LLMProxyClient
+            try:
+                vectors = LLMProxyClient().create_embeddings_sync([m["content"] for m in memories])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Extraction dedup embed failed, saving without dedup: %s", e)
+                vectors = [None] * len(memories)
+
+            saved_count = skipped = 0
+            for mem, vec in zip(memories, vectors):
                 expires_at = _expires_at_from_ttl(mem.get("ttl_days"))
 
-                memory_svc.save_memory(
+                if vec:
+                    dup = memory_svc.check_content_similarity(
+                        household_id, vec, threshold=0.9, user_id=user_id
+                    )
+                    if dup is not None:
+                        skipped += 1
+                        logger.info("Skipping near-duplicate memory (~#%s): %r",
+                                    dup.id, mem["content"][:60])
+                        continue
+
+                saved = memory_svc.save_memory(
                     user_id=user_id,
                     household_id=household_id,
                     content=mem["content"],
@@ -256,9 +286,15 @@ async def handle_extraction_callback(payload: dict[str, Any]) -> None:
                     source="passive",
                     expires_at=expires_at,
                 )
+                saved_count += 1
+                if vec:
+                    try:
+                        memory_svc.update_embedding(saved.id, vec)
+                    except Exception:  # noqa: BLE001
+                        pass  # the periodic sweep will embed it
             logger.info(
-                "Extracted %d memories for user %d (job %s)",
-                len(memories), user_id, job_id,
+                "Extracted %d memories for user %d (job %s): %d saved, %d deduped",
+                len(memories), user_id, job_id, saved_count, skipped,
             )
         else:
             logger.info("No new memories extracted for user %d (job %s)", user_id, job_id)

@@ -216,8 +216,10 @@ async def startup_event():
                     resume_due_timer_workflows,
                     resume_waiting_errands,
                 )
+                from app.services.schedule_service import fire_due_schedules
                 await resume_waiting_errands()       # phone-outcome wakeup + timeout
                 await resume_due_timer_workflows()   # timer wakeup (wait_for steps)
+                await fire_due_schedules()           # scheduled trigger → re-plan + card
             except Exception as e:
                 logger.warning("Workflow resume sweep failed: %s", e)
 
@@ -904,6 +906,12 @@ async def start_conversation(
         client_timezone = None
         if request.node_context:
             client_timezone = request.node_context.get("timezone")
+            # Carry the node's IANA zone INTO the cached node_context so tools that
+            # resolve times off node_context (schedule_errand, run_errand) don't fall
+            # back to UTC. Without this the timezone only reached the prompt path and
+            # scheduling resolved every clock time in UTC. See conversation_cache.set.
+            if client_timezone:
+                node_context["timezone"] = client_timezone
             # Include agent context (e.g., Home Assistant devices) - this is read-only data
             if "agents" in request.node_context:
                 node_context["agents"] = request.node_context["agents"]

@@ -174,6 +174,19 @@ class TestParseTimeString:
         assert hour == 12
         assert minute == 0
 
+    def test_separatorless_and_dotted_never_overflow_the_hour(self):
+        """Regression: '730pm' (STT dropping the ':') gave hour=730 → +12 → crash
+        ('hour must be in 0..23') in apply_time_modifier. Parse it as 7:30pm, and never
+        return an out-of-range hour."""
+        from app.core.date_resolution import apply_time_modifier, parse_time_string
+        assert parse_time_string("730pm") == (19, 30)
+        assert parse_time_string("1230pm") == (12, 30)
+        assert parse_time_string("7.30pm") == (19, 30)   # dotted
+        assert parse_time_string("1930") == (19, 30)     # bare 24h
+        assert parse_time_string("99pm") == (0, 0)       # garbage → safe, no overflow
+        # the crash path is now safe end-to-end
+        assert apply_time_modifier("2099-01-01T00:00:00Z", "at_730pm") == "2099-01-01T19:30:00Z"
+
     def test_invalid_format(self):
         from app.core.date_resolution import parse_time_string
         hour, minute = parse_time_string("invalid")

@@ -24,10 +24,9 @@ class IJarvisPromptProvider(ABC):
     app/core/prompt_providers/ and matching by the `name` property.
     """
 
-    # Set by ConversationHandler from the model.advanced_thinking setting.
-    # Providers that support thinking mode use this to decide /think vs
-    # /no_think suffix and whether to include agent context.
-    advanced_thinking: bool = False
+    # Set by ConversationHandler from the model.include_thinking setting.
+    # Providers that support thinking mode use this to decide /think vs /no_think.
+    include_thinking: bool = False
 
     # ── Shared context builders ──────────────────────────────────────
     # Room and user context are automatically extracted from node_context
