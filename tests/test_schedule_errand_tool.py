@@ -108,7 +108,11 @@ def test_resolve_fire_at_parses_day_and_clock_time():
     assert _resolve_fire_at("2099-06-01T09:00:00Z", "UTC") == datetime(2099, 6, 1, 9, 0)
     # a naive local time converts to UTC (EST winter = +5h)
     assert _resolve_fire_at("2099-01-01T09:00:00", "America/New_York") == datetime(2099, 1, 1, 14, 0)
-    # no time at all → can't schedule precisely
+    # a named DAY with no clock time → 9am on that day (the model frequently drops the
+    # time; a silent bad_time is worse than a sensible default). This is the #2 fix.
+    assert _resolve_fire_at("tomorrow", "UTC") == datetime(tmr.year, tmr.month, tmr.day, 9, 0)
+    assert _resolve_fire_at("today", "UTC") == datetime(today.year, today.month, today.day, 9, 0)
+    # no day AND no time → still can't schedule precisely; the assistant asks
     assert _resolve_fire_at("sometime soon", "UTC") is None
     assert _resolve_fire_at("", "UTC") is None
 
@@ -197,9 +201,10 @@ def test_recurring_without_a_time_defaults_to_9am():
     assert kw["fire_at"] > datetime.utcnow()
 
 
-def test_one_shot_without_a_time_still_rejected():
-    # No recurrence + no clock time → still can't schedule precisely (the default only
-    # applies to recurring errands).
+def test_no_day_and_no_time_is_rejected():
+    # A phrase with neither a day NOR a time genuinely can't be scheduled → the
+    # assistant asks. (A NAMED day with no clock time now defaults to 9am — see
+    # test_resolve_fire_at_parses_day_and_clock_time — so "today"/"tomorrow" create.)
     with patch.object(conversation_cache, "get_node_context", return_value=_CTX):
-        res = ScheduleErrandTool().execute(goal="x", fire_at="today", conversation_id="c1")
+        res = ScheduleErrandTool().execute(goal="x", fire_at="at some point", conversation_id="c1")
     assert res["error"] == "bad_time"

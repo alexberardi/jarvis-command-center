@@ -76,13 +76,17 @@ def _resolve_fire_at(raw: str, tz_name: str) -> datetime | None:
     tz = _zone(tz_name)
     today = datetime.now(tz).date()
 
-    # Date
+    # Date. Track whether the user actually NAMED a day — a bare "tomorrow"/weekday
+    # with no clock time should still schedule (at a default hour) rather than fail;
+    # only a phrase with neither a day nor a time is truly unschedulable.
     date = today
+    day_named = "tomorrow" in low or "today" in low
     if "tomorrow" in low:
         date = today + timedelta(days=1)
     else:
         for name, wd in _WEEKDAYS.items():
             if name in low:
+                day_named = True
                 days = ((wd - today.weekday()) % 7) or 7  # the NEXT such weekday
                 date = today + timedelta(days=days)
                 break
@@ -99,7 +103,13 @@ def _resolve_fire_at(raw: str, tz_name: str) -> datetime | None:
                 hour, minute = h, mm
                 break
     if hour is None:
-        return None  # no time → can't schedule precisely
+        if day_named:
+            # A named day but no clock time ("tomorrow", "friday") — the model often
+            # drops the time even when the user gave one. Default to 9am on that day
+            # rather than silently failing (which the model then narrates as success).
+            hour, minute = 9, 0
+        else:
+            return None  # no day AND no time → genuinely can't schedule; ask the user
 
     local = datetime(date.year, date.month, date.day, hour, minute, tzinfo=tz)
     return local.astimezone(timezone.utc).replace(tzinfo=None)
