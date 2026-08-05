@@ -324,6 +324,11 @@ class ConversationHandler:
             # it still requires a Run tap then). Must be offered alongside run_errand
             # or the model can't pick it for "schedule an errand for tonight…".
             _safe_tool_names.append("schedule_errand")
+            # list_scheduled_errands: read-only — lists the household's scheduled +
+            # recurring errands and posts a management card with per-errand Cancel
+            # buttons. Must be offered or the model improvises "you have no errands
+            # scheduled" for "what errands do I have scheduled?" instead of checking.
+            _safe_tool_names.append("list_scheduled_errands")
             # Outbound-web tools (quick_search live lookups, deep_research) are
             # gated on the per-household web_search.enabled setting (default
             # OFF). When disabled they never enter the tool list — and because
