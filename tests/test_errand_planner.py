@@ -36,6 +36,7 @@ def test_plans_valid_steps_and_summary():
         "command": "set_reminder",
         "args": {"text": "check gym charge", "when": "next month"},
         "label": "Set reminder",
+        "is_risky": False,  # stamped from the menu (set_reminder isn't risky)
     }
 
 
@@ -246,3 +247,81 @@ def test_plan_and_refine_prompts_include_guardrail_and_decomposition():
         # ...but now every action becomes its own step (fixes dropped-clause plans)
         assert errand_planner._DECOMPOSITION_RULE in prompt
         assert "separate step for each" in prompt.lower()
+
+
+# ── Chunk 5: pause-and-replan — planner emits a checkpoint + cursor-aware re-plan ──
+
+
+def test_planner_may_emit_a_replan_checkpoint():
+    # An outcome-dependent goal → the planner ends the plan at a request_replan
+    # checkpoint instead of guessing the dependent steps. The control command isn't
+    # in the menu but survives validation (CONTROL_COMMANDS).
+    client = _client(_plan({
+        "summary": "Check the weather, then decide",
+        "steps": [
+            {"command": "get_weather", "args": {"resolved_datetimes": ["tomorrow"]},
+             "label": "Check weather"},
+            {"command": "request_replan", "args": {"reason": "if rain, remind umbrella"},
+             "label": "Decide follow-up"},
+        ],
+    }))
+    plan = asyncio.run(plan_errand(
+        "check tomorrow's weather and if it'll rain remind me to bring an umbrella", client))
+    assert [s.command for s in plan.steps] == ["get_weather", "request_replan"]
+    assert plan.steps[1].args["reason"]
+    assert plan.steps[1].is_risky is False  # a control step is never risky
+
+
+def test_checkpoint_rule_is_in_the_prompt():
+    prompt = errand_planner._build_prompt("g", errand_planner.COMMAND_MENU)
+    assert errand_planner._REPLAN_CHECKPOINT_RULE in prompt
+    assert "request_replan" in prompt
+
+
+def test_is_risky_is_stamped_onto_steps_from_the_menu():
+    menu = [
+        {"command": "get_weather", "description": "w", "args": {}, "is_risky": False},
+        {"command": "make_phone_call", "description": "call",
+         "args": {"business": "who"}, "is_risky": True},
+    ]
+    client = _client(_plan({
+        "summary": "call the shop",
+        "steps": [{"command": "make_phone_call", "args": {"business": "Tony's"},
+                   "label": "Call Tony's"}],
+    }))
+    plan = asyncio.run(plan_errand("call Tony's", client, menu=menu))
+    assert plan.steps[0].is_risky is True  # the risky menu flag rode onto the step
+
+
+def test_replan_from_progress_returns_a_cursor_aware_continuation():
+    from app.services.errand_planner import replan_from_progress
+
+    menu = [{"command": "set_reminder", "description": "r",
+             "args": {"text": "t", "when": "w"}, "is_risky": False}]
+    client = _client(_plan({
+        "summary": "remind umbrella",
+        "steps": [{"command": "set_reminder",
+                   "args": {"text": "bring umbrella", "when": "tomorrow 7am"},
+                   "label": "Remind umbrella"}],
+    }))
+    done = [{"command": "get_weather", "args": {}, "label": "Check weather"}]
+    results = [{"label": "Check weather", "success": True, "message": "Rain tomorrow, 90%"}]
+    plan = asyncio.run(replan_from_progress(
+        "check weather then remind if rain", done, results, "if rain remind umbrella",
+        client, menu=menu))
+    assert [s.command for s in plan.steps] == ["set_reminder"]
+    # the earlier result is fed to the planner so it can adapt
+    sent = client.chat_completion.call_args.kwargs["messages"][0]["content"]
+    assert "Rain tomorrow, 90%" in sent and "Check weather" in sent
+
+
+def test_replan_from_progress_allows_an_empty_continuation():
+    from app.services.errand_planner import replan_from_progress
+
+    # "the results mean nothing more is needed" is valid — plan_errand would raise, but
+    # a continuation may legitimately be empty (just proceed past the checkpoint).
+    client = _client(_plan({"summary": "nothing more", "steps": []}))
+    plan = asyncio.run(replan_from_progress(
+        "g", [], [], "reason", client,
+        menu=[{"command": "x", "description": "", "args": {}}]))
+    assert plan.steps == []

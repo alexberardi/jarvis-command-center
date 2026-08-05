@@ -1102,3 +1102,145 @@ def test_startup_recovery_fails_orphaned_running_only():
         assert check.query(Workflow).filter(Workflow.id == "wf_wait").first().state == "waiting"  # untouched
     finally:
         check.close()
+
+
+# ── Chunk 5: mid-run checkpoint resolution (cursor-aware re-plan + widen decision) ──
+
+from app.services.errand_planner import ErrandPlan as _PlanObj  # noqa: E402
+from app.services.errand_planner import PlanStep as _PlanStep  # noqa: E402
+
+
+def _checkpoint_wf(Session, add_command="set_reminder"):
+    """Seed a WAITING run parked on a request_replan checkpoint (step 1), after a
+    get_weather step (step 0) that already ran. Returns the sessionmaker."""
+    seed = Session()
+    seed.add(_wf_row(
+        state="waiting", cursor=2, wf_id="wf_cp",
+        steps=[
+            {"command": "get_weather", "args": {}, "label": "W", "is_risky": False},
+            {"command": "request_replan", "args": {"reason": "if rain, remind"},
+             "label": "Decide", "is_risky": False},
+        ],
+        results=json.dumps([{"label": "W", "success": True, "message": "Rain tomorrow 90%"}]),
+    ))
+    seed.commit()
+    seed.close()
+    return Session
+
+
+def test_replan_resolution_widens_posts_a_card_and_persists_add_steps():
+    Session = _checkpoint_wf(_sqlite_sessionmaker())
+
+    async def fake_replan(*a, **k):  # a NEW command (set_reminder) → widens the envelope
+        return _PlanObj(summary="s", steps=[
+            _PlanStep("set_reminder", {"text": "umbrella", "when": "7am"}, "Remind")])
+
+    with patch("app.db.get_session_local", return_value=Session), \
+         patch("app.core.llm_proxy_client.LLMProxyClient", MagicMock()), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=[])), \
+         patch.object(errand_service, "replan_from_progress", new=fake_replan), \
+         patch.object(errand_service, "_post_replan_card") as post_card, \
+         patch.object(errand_service, "_auto_continue_replan", new=AsyncMock()) as auto:
+        asyncio.run(errand_service._resolve_and_decide_replan("wf_cp", 1, "if rain, remind", []))
+
+    post_card.assert_called_once()   # widening → surface a delta card
+    auto.assert_not_called()         # ...and DON'T silently continue
+    check = Session()
+    try:
+        steps = json.loads(check.query(Workflow).filter(Workflow.id == "wf_cp").first().steps)
+        # the resolved continuation is persisted on the checkpoint step for the tap to splice
+        assert steps[1]["args"]["add_steps"][0]["command"] == "set_reminder"
+    finally:
+        check.close()
+
+
+def test_replan_resolution_in_envelope_auto_continues_no_card():
+    Session = _checkpoint_wf(_sqlite_sessionmaker())
+
+    async def fake_replan(*a, **k):  # get_weather is already in the approved plan → no widen
+        return _PlanObj(summary="s", steps=[
+            _PlanStep("get_weather", {}, "Check again", is_risky=False)])
+
+    with patch("app.db.get_session_local", return_value=Session), \
+         patch("app.core.llm_proxy_client.LLMProxyClient", MagicMock()), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=[])), \
+         patch.object(errand_service, "replan_from_progress", new=fake_replan), \
+         patch.object(errand_service, "_post_replan_card") as post_card, \
+         patch.object(errand_service, "_auto_continue_replan", new=AsyncMock()) as auto:
+        asyncio.run(errand_service._resolve_and_decide_replan("wf_cp", 1, "if rain, remind", []))
+
+    auto.assert_awaited_once()       # in-envelope → resume without a tap
+    post_card.assert_not_called()
+
+
+def test_replan_resolution_empty_continuation_auto_continues():
+    Session = _checkpoint_wf(_sqlite_sessionmaker())
+
+    async def fake_replan(*a, **k):  # planner decided nothing more is needed
+        return _PlanObj(summary="done", steps=[])
+
+    with patch("app.db.get_session_local", return_value=Session), \
+         patch("app.core.llm_proxy_client.LLMProxyClient", MagicMock()), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=[])), \
+         patch.object(errand_service, "replan_from_progress", new=fake_replan), \
+         patch.object(errand_service, "_post_replan_card") as post_card, \
+         patch.object(errand_service, "_auto_continue_replan", new=AsyncMock()) as auto:
+        asyncio.run(errand_service._resolve_and_decide_replan("wf_cp", 1, "if rain, remind", []))
+
+    auto.assert_awaited_once()       # nothing to add → just proceed past the checkpoint
+    post_card.assert_not_called()
+
+
+def test_replan_resolution_planner_failure_still_continues():
+    Session = _checkpoint_wf(_sqlite_sessionmaker())
+
+    async def boom(*a, **k):
+        raise ValueError("planner down")
+
+    with patch("app.db.get_session_local", return_value=Session), \
+         patch("app.core.llm_proxy_client.LLMProxyClient", MagicMock()), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=[])), \
+         patch.object(errand_service, "replan_from_progress", new=boom), \
+         patch.object(errand_service, "_post_replan_card") as post_card, \
+         patch.object(errand_service, "_auto_continue_replan", new=AsyncMock()) as auto:
+        asyncio.run(errand_service._resolve_and_decide_replan("wf_cp", 1, "if rain, remind", []))
+
+    auto.assert_awaited_once()       # a failed re-plan must not leave the errand parked
+    post_card.assert_not_called()
+
+
+def test_static_add_steps_skip_the_planner():
+    Session = _checkpoint_wf(_sqlite_sessionmaker())
+    static = [{"command": "make_phone_call", "args": {"business": "Vet"},
+               "label": "Call vet", "is_risky": True}]
+
+    async def should_not_run(*a, **k):
+        raise AssertionError("planner should be skipped when static add_steps are given")
+
+    with patch("app.db.get_session_local", return_value=Session), \
+         patch("app.core.llm_proxy_client.LLMProxyClient", MagicMock()), \
+         patch.object(errand_service, "_resolve_node_menu", new=AsyncMock(return_value=[])), \
+         patch.object(errand_service, "replan_from_progress", new=should_not_run), \
+         patch.object(errand_service, "_post_replan_card") as post_card, \
+         patch.object(errand_service, "_auto_continue_replan", new=AsyncMock()):
+        asyncio.run(errand_service._resolve_and_decide_replan("wf_cp", 1, "reason", static))
+
+    post_card.assert_called_once()  # a risky pre-baked call widens → card
+
+
+def test_needs_a_tap_schedules_the_resolver():
+    run = MagicMock()
+    run.id = "wf_cp"
+    captured = {}
+
+    async def fake_resolve(wf_id, idx, reason, static):
+        captured["args"] = (wf_id, idx, reason, static)
+
+    async def drive():
+        with patch.object(errand_service, "_resolve_and_decide_replan", new=fake_resolve):
+            errand_service._handle_replan_needs_a_tap(
+                run, {"step_index": 1, "reason": "r", "add_steps": []})
+            await asyncio.sleep(0)  # let the scheduled task run
+
+    asyncio.run(drive())
+    assert captured["args"] == ("wf_cp", 1, "r", [])

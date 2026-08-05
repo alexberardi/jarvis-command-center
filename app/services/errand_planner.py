@@ -210,15 +210,28 @@ def build_full_errand_menu(
     return node_menu + server_menu
 
 
+# Control-flow commands the planner may emit that are NOT capabilities in the menu.
+# They're always allowed through validation (the engine has a handler for each);
+# they never contact anyone, so they're never risky.
+#   request_replan — a mid-run checkpoint: pause here and plan the rest once the
+#                    earlier steps' results are known (pause-and-replan, PRD §2.6).
+CONTROL_COMMANDS: frozenset[str] = frozenset({"request_replan"})
+
+
 @dataclass
 class PlanStep:
     command: str
     args: dict[str, Any]
     label: str
+    is_risky: bool = False
 
     def as_routine_step(self) -> dict[str, Any]:
-        """The routine step shape the executor (RoutineCommand) consumes."""
-        return {"command": self.command, "args": self.args, "label": self.label}
+        """The routine step shape the executor consumes. ``is_risky`` rides along so
+        the mid-run envelope check (``widens_envelope``) can tell a benign added step
+        from one that spends money / contacts a stranger — the stored plan is the only
+        place that signal survives to run time."""
+        return {"command": self.command, "args": self.args, "label": self.label,
+                "is_risky": self.is_risky}
 
 
 @dataclass
@@ -267,6 +280,29 @@ _CLOSING_DIRECTIVE = (
 )
 
 
+# Mid-run checkpoint rule — lets the planner defer the part of a plan that can't be
+# decided until earlier steps run, instead of guessing. Deliberately CONSERVATIVE:
+# the small model would over-insert checkpoints given half a reason, and every extra
+# checkpoint is a wasted re-plan. Only outcome-dependent, can't-know-yet branches.
+_REPLAN_CHECKPOINT_RULE = (
+    "CHECKPOINT (rare): if — and ONLY if — a later action genuinely depends on the "
+    "RESULT of an earlier step that cannot be known yet (e.g. 'check the weather and "
+    "IF it's going to rain remind me to bring an umbrella', or 'call the pharmacy and "
+    "then do the right follow-up based on what they say'), end the plan at that point "
+    "with a single checkpoint step "
+    '{"command": "request_replan", "args": {"reason": "<what to decide once the '
+    'earlier steps have run>"}, "label": "<short label>"} and DO NOT try to guess the '
+    "steps that come after it — they will be planned once the earlier results are "
+    "known. Most goals do NOT need a checkpoint; only use one when the next actions "
+    "truly cannot be chosen until the earlier steps have run.\n\n"
+)
+
+
+def _risky_by_cmd(menu: list[dict[str, Any]]) -> dict[str, bool]:
+    """command → is_risky, from a planner menu (for stamping steps)."""
+    return {c["command"]: bool(c.get("is_risky", False)) for c in menu}
+
+
 def _build_prompt(goal: str, menu: list[dict[str, Any]]) -> str:
     menu_text = "\n".join(
         f"- {c['command']}: {c['description']} | args: {json.dumps(c['args'])}" for c in menu
@@ -276,7 +312,8 @@ def _build_prompt(goal: str, menu: list[dict[str, Any]]) -> str:
         "list of steps, choosing ONLY from the available commands below. Fill each "
         "step's args from that command's arg spec, using the user's own words, and "
         "give each step a short human-readable label.\n\n"
-        + _DECOMPOSITION_RULE +
+        + _DECOMPOSITION_RULE
+        + _REPLAN_CHECKPOINT_RULE +
         f"Available commands:\n{menu_text}\n\n"
         f"User's goal: {goal}\n\n"
         + _FABRICATION_GUARDRAIL +
@@ -370,20 +407,26 @@ async def _run_planner(prompt: str, llm_client: Any) -> dict[str, Any]:
 
 
 def _plan_from_data(
-    data: dict[str, Any], allowed: set[str], fallback_summary: str
+    data: dict[str, Any], allowed: set[str], fallback_summary: str,
+    risky_by_cmd: dict[str, bool] | None = None, *, require_nonempty: bool = True,
 ) -> ErrandPlan:
-    """Validate the LLM's steps against the menu, dropping unknown commands.
-    Raises ValueError if nothing usable survives."""
+    """Validate the LLM's steps against the menu, dropping unknown commands and
+    stamping each step's ``is_risky`` from the menu (control commands are never
+    risky). ``allowed`` should already include ``CONTROL_COMMANDS``. Raises ValueError
+    if ``require_nonempty`` and nothing usable survives; a cursor-aware replan passes
+    ``require_nonempty=False`` because "nothing more to do" is a valid continuation."""
+    risky_by_cmd = risky_by_cmd or {}
     steps: list[PlanStep] = []
     for s in data.get("steps", []) or []:
         cmd = (s.get("command") or "").strip()
         if cmd not in allowed:
             logger.warning("Planner proposed unknown command %r — dropping it", cmd)
             continue
-        steps.append(
-            PlanStep(command=cmd, args=dict(s.get("args") or {}), label=(s.get("label") or cmd))
-        )
-    if not steps:
+        steps.append(PlanStep(
+            command=cmd, args=dict(s.get("args") or {}), label=(s.get("label") or cmd),
+            is_risky=bool(risky_by_cmd.get(cmd, False)),
+        ))
+    if not steps and require_nonempty:
         raise ValueError("planner produced no usable steps")
     return ErrandPlan(summary=(data.get("summary") or fallback_summary).strip(), steps=steps)
 
@@ -399,7 +442,8 @@ async def plan_errand(
     """
     menu = menu or COMMAND_MENU
     data = await _run_planner(_build_prompt(goal, menu), llm_client)
-    return _plan_from_data(data, {c["command"] for c in menu}, goal)
+    allowed = {c["command"] for c in menu} | CONTROL_COMMANDS
+    return _plan_from_data(data, allowed, goal, _risky_by_cmd(menu))
 
 
 async def refine_errand_plan(
@@ -415,6 +459,69 @@ async def refine_errand_plan(
     # Never let a degraded menu (a transient node-fetch failure falls back to
     # COMMAND_MENU) strip steps the plan already had — union the menu's commands
     # with the current plan's, so a refine always preserves what it didn't change.
-    allowed = {c["command"] for c in menu}
+    allowed = {c["command"] for c in menu} | CONTROL_COMMANDS
     allowed |= {s["command"] for s in current_steps if s.get("command")}
-    return _plan_from_data(data, allowed, summary)
+    return _plan_from_data(data, allowed, summary, _risky_by_cmd(menu))
+
+
+def _summarize_progress(done_steps: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
+    """A short "what happened so far" block for the cursor-aware replan prompt, pairing
+    each already-run step with its outcome (message / call wrapup summary / error)."""
+    lines: list[str] = []
+    for i, step in enumerate(done_steps):
+        label = step.get("label") or step.get("command") or f"step {i + 1}"
+        r = results[i] if i < len(results) else {}
+        detail = (r.get("message") or r.get("summary") or r.get("error")
+                  or ("done" if r.get("success") else "no result"))
+        lines.append(f"- {label}: {detail}")
+    return "\n".join(lines) or "(nothing has run yet)"
+
+
+def _build_replan_prompt(
+    goal: str, done_steps: list[dict[str, Any]], progress: str, reason: str,
+    menu: list[dict[str, Any]],
+) -> str:
+    """Prompt to CONTINUE an in-flight errand: given the goal, what already ran (+ its
+    real results), and the checkpoint's reason, choose the NEXT steps. Returns only the
+    additional steps — the done ones are not repeated."""
+    menu_text = "\n".join(
+        f"- {c['command']}: {c['description']} | args: {json.dumps(c['args'])}" for c in menu
+    )
+    return (
+        "You are Jarvis's errand planner CONTINUING an errand that is already underway. "
+        "Some steps have run — here is what ACTUALLY happened. Decide the NEXT steps "
+        "needed to finish the goal BASED ON those results, choosing ONLY from the "
+        "available commands. Return ONLY the steps still to run (do not repeat the ones "
+        "already done).\n\n"
+        + _DECOMPOSITION_RULE +
+        f"Goal: {goal}\n"
+        f"Steps already run: {json.dumps(done_steps)}\n"
+        f"What happened:\n{progress}\n\n"
+        f"Why we paused to re-plan: {reason}\n\n"
+        f"Available commands:\n{menu_text}\n\n"
+        + _FABRICATION_GUARDRAIL +
+        "If the results mean nothing further is needed, return an EMPTY steps list. "
+        'Return a JSON object: {"summary": "<one-line plan for the remaining work>", '
+        '"steps": [{"command": "<name>", "args": {...}, "label": "<short label>"}]}. '
+        "No markdown.\n\n"
+        + _CLOSING_DIRECTIVE
+    )
+
+
+async def replan_from_progress(
+    goal: str, done_steps: list[dict[str, Any]], results: list[dict[str, Any]],
+    reason: str, llm_client: Any, menu: list[dict[str, Any]] | None = None,
+) -> ErrandPlan:
+    """Cursor-aware re-plan at a mid-run checkpoint: look at the goal, the steps that
+    already ran, and their REAL results, and propose the continuation (the steps to add
+    after the checkpoint). Unlike ``plan_errand`` this MAY return zero steps — "the
+    results mean there's nothing more to do" is a valid continuation (the run just
+    proceeds past the checkpoint). Same empty/unparseable-response failure contract."""
+    menu = menu or COMMAND_MENU
+    progress = _summarize_progress(done_steps, results)
+    data = await _run_planner(_build_replan_prompt(goal, done_steps, progress, reason, menu), llm_client)
+    allowed = {c["command"] for c in menu} | CONTROL_COMMANDS
+    return _plan_from_data(
+        data, allowed, (data.get("summary") or "continue"), _risky_by_cmd(menu),
+        require_nonempty=False,
+    )

@@ -34,7 +34,12 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models import ErrandPlan, Workflow
-from app.services.errand_planner import build_full_errand_menu, plan_errand, refine_errand_plan
+from app.services.errand_planner import (
+    build_full_errand_menu,
+    plan_errand,
+    refine_errand_plan,
+    replan_from_progress,
+)
 from app.services.inbox_notification_service import (
     post_inbox_item_sync,
     update_inbox_item_sync,
@@ -326,29 +331,113 @@ async def _auto_continue_replan(workflow_id: str, step_index: int) -> None:
 
 
 def _handle_replan_needs_a_tap(run: WorkflowRun, data: dict[str, Any]) -> None:
-    """The engine paused a run on a request_replan step (SEAM 3, ``needs_a_tap``).
-    Decide via ``widens_envelope``: a widening change posts a delta card and waits
-    for a tap; an in-envelope change auto-continues silently."""
-    add_steps = data.get("add_steps") or []
+    """The engine paused a run on a ``request_replan`` checkpoint (SEAM 3,
+    ``needs_a_tap``). The proposed delta is resolved CURSOR-AWARE (re-plan from the
+    goal + results so far) unless the step pre-baked ``add_steps``, then
+    ``widens_envelope`` decides: a widening change posts a delta card and waits for a
+    tap; an in-envelope change auto-continues silently. All of that needs an LLM call
+    + DB work, so it runs as a detached task off this sync emitter hook."""
     step_index = data.get("step_index")
-    if not isinstance(add_steps, list) or step_index is None:
+    if step_index is None:
         return
-    amended = list(run.steps) + list(add_steps)  # order-agnostic for the envelope axes
-    if widens_envelope(run.steps, amended):
-        from app.db import get_session_local
+    static_add = data.get("add_steps") or []
+    reason = str(data.get("reason") or "")
+    try:
+        asyncio.get_running_loop().create_task(
+            _resolve_and_decide_replan(run.id, step_index, reason, list(static_add))
+        )
+    except RuntimeError:
+        logger.warning("Errand %s: no running loop to resolve a replan checkpoint", run.id)
 
+
+def _store_replan_add_steps(
+    workflow_id: str, step_index: int, add_steps: list[dict[str, Any]], reason: str
+) -> None:
+    """Persist the resolved continuation onto the checkpoint step's ``args.add_steps``
+    (and ``args.reason``) so the card, the Approve tap, and the auto-continue path all
+    splice the SAME steps — ``_apply_workflow_replan`` reads them from there."""
+    from app.db import get_session_local
+
+    db = get_session_local()()
+    try:
+        wf = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+        if wf is None:
+            return
+        steps = json.loads(wf.steps or "[]")
+        if not (0 <= step_index < len(steps)):
+            return
+        args = steps[step_index].get("args") or {}
+        args["add_steps"] = add_steps
+        if reason:
+            args.setdefault("reason", reason)
+        steps[step_index]["args"] = args
+        wf.steps = json.dumps(steps)
+        db.commit()
+    except Exception:  # noqa: BLE001 — best-effort; a failed store degrades to auto-continue
+        logger.exception("Errand %s: couldn't store replan add_steps", workflow_id)
+        db.rollback()
+    finally:
+        db.close()
+
+
+async def _resolve_and_decide_replan(
+    workflow_id: str, step_index: int, reason: str, static_add: list[dict[str, Any]]
+) -> None:
+    """Resolve a checkpoint's continuation and decide pause-vs-continue. Runs detached
+    off the emitter. Cursor-aware: re-plans from the goal + the results collected so
+    far. Never raises — on ANY failure it auto-continues so the errand can't hang
+    parked on the checkpoint forever."""
+    from app.db import get_session_local
+
+    try:
         db = get_session_local()()
         try:
-            wf = db.query(Workflow).filter(Workflow.id == run.id).first()
-            if wf is not None:
-                _post_replan_card(wf, str(data.get("reason") or ""), add_steps, db)
+            wf = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+            if wf is None or wf.state != "waiting":
+                return  # already resumed / cancelled
+            goal = wf.goal or ""
+            steps = json.loads(wf.steps or "[]")
+            results = json.loads(wf.results_json or "[]")
+            node_id, household_id, user_id = wf.node_id, wf.household_id, wf.user_id
         finally:
             db.close()
-    else:
+
+        add_steps = list(static_add)
+        if not add_steps:
+            # Dynamic: plan the rest from what actually happened up to the checkpoint.
+            from app.core.llm_proxy_client import LLMProxyClient
+
+            menu = await _resolve_node_menu(node_id, household_id, user_id)
+            try:
+                plan = await replan_from_progress(
+                    goal, steps[:step_index], results, reason, LLMProxyClient(), menu=menu
+                )
+                add_steps = plan.routine_steps()
+            except ValueError:
+                logger.info("Errand %s: replan produced no steps — continuing", workflow_id)
+                add_steps = []
+
+        # Persist so card/approve/auto-continue splice the same continuation.
+        _store_replan_add_steps(workflow_id, step_index, add_steps, reason)
+
+        amended = list(steps) + list(add_steps)
+        if add_steps and widens_envelope(steps, amended):
+            db = get_session_local()()
+            try:
+                wf = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+                if wf is not None:
+                    _post_replan_card(wf, reason, add_steps, db)
+            finally:
+                db.close()
+        else:
+            # In-envelope, or nothing to add → splice (if any) + resume, no tap.
+            await _auto_continue_replan(workflow_id, step_index)
+    except Exception:  # noqa: BLE001 — never leave the run parked on a failed replan
+        logger.exception("Errand %s: replan resolution failed; continuing", workflow_id)
         try:
-            asyncio.get_running_loop().create_task(_auto_continue_replan(run.id, step_index))
-        except RuntimeError:
-            logger.warning("Errand %s: no running loop to auto-continue an in-envelope replan", run.id)
+            await _auto_continue_replan(workflow_id, step_index)
+        except Exception:  # noqa: BLE001
+            logger.exception("Errand %s: replan fallback continue also failed", workflow_id)
 
 
 async def create_errand_plan(
