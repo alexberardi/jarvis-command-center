@@ -9,6 +9,7 @@ consumer, so a bug in the engine can't hide behind a mock that agrees with it.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -436,3 +437,93 @@ def test_deliver_signal_timer_resumes_the_run(engine):
     assert call["prior_results"][0]["command"] == "wait_for"  # the wait outcome carried in
     assert store.runs["wf_1"].state == "done"
     assert engine["events"][0][1] == "complete"
+
+
+# ── request_replan / the APPROVAL wakeup source (pause-and-replan) ────────────
+
+
+def test_widens_envelope_truth_table():
+    approved = [
+        {"command": "get_weather", "args": {}, "is_risky": False},
+        {"command": "make_phone_call", "args": {"business": "CVS"}, "is_risky": True},
+    ]
+    w = we.widens_envelope
+    # re-adding an already-approved, non-risky command → in-envelope
+    assert w(approved, approved + [{"command": "get_weather", "args": {}, "is_risky": False}]) is False
+    # a brand-new command → widen
+    assert w(approved, approved + [{"command": "tell_joke", "args": {}, "is_risky": False}]) is True
+    # a call to a NEW counterparty → widen
+    assert w(approved, approved + [{"command": "make_phone_call", "args": {"business": "Walgreens"}, "is_risky": True}]) is True
+    # a 2nd risky step even to a KNOWN party → widen (net-new risky step)
+    assert w(approved, approved + [{"command": "make_phone_call", "args": {"business": "CVS"}, "is_risky": True}]) is True
+    # reordering only → in-envelope
+    assert w(approved, list(reversed(approved))) is False
+    # removing a step → in-envelope
+    assert w(approved, approved[:1]) is False
+
+
+def test_replan_handler_suspends_on_approval():
+    h = we.ReplanHandler()
+    assert h.handles("request_replan") is True
+    assert h.kind == "deferred" and h.signal_kind == "approval"
+    ctx = we.WorkflowContext(household_id="hh-1", node_id="node-1", workflow_id="wf_1")
+    res = asyncio.run(h.run(ctx, "request_replan", {"add_steps": [], "reason": "x"}, "Replan", 2))
+    assert isinstance(res, Suspend)
+    assert res.cursor == 3 and res.signal_kind == "approval" and res.signal_key == "wf_1:2"
+
+
+def test_replan_handler_fails_without_workflow_link():
+    h = we.ReplanHandler()
+    ctx = we.WorkflowContext(household_id="hh-1", node_id="node-1", workflow_id=None)
+    res = asyncio.run(h.run(ctx, "request_replan", {}, "Replan", 0))
+    assert isinstance(res, dict) and res["success"] is False
+
+
+def test_replan_handler_interpret_signal_is_control_success():
+    h = we.ReplanHandler()
+    out = h.interpret_signal(SimpleNamespace(state="approved"),
+                             [{"command": "request_replan", "label": "Replan"}], 0)
+    assert out["success"] is True and out.get("control") is True
+
+
+def test_run_workflow_suspends_on_approval_and_emits_needs_a_tap(engine):
+    steps = [{
+        "command": "request_replan", "label": "Replan",
+        "args": {"reason": "found a follow-up",
+                 "add_steps": [{"command": "tell_joke", "args": {}, "label": "Joke"}]},
+    }]
+    store = FakeStore([_run(state="running", steps=steps)])
+    engine["store_holder"]["store"] = store
+    engine["calls"]["_run_returns"] = [Suspend(cursor=1, signal_kind="approval", signal_key="wf_1:0")]
+
+    asyncio.run(we.run_workflow("wf_1"))
+
+    stored = store.runs["wf_1"]
+    assert stored.state == "waiting" and stored.waiting_on == "approval"
+    taps = [e for e in engine["events"] if e[1] == "needs_a_tap"]
+    assert len(taps) == 1
+    assert taps[0][2]["step_index"] == 0
+    assert taps[0][2]["reason"] == "found a follow-up"
+    assert taps[0][2]["add_steps"] == [{"command": "tell_joke", "args": {}, "label": "Joke"}]
+    # No completion card while parked on a decision.
+    assert not [e for e in engine["events"] if e[1] == "complete"]
+
+
+def test_deliver_signal_approval_resumes_over_amended_plan(engine):
+    # Parked on an approval; the amended step (tell_joke) is already spliced in — the
+    # service does that BEFORE delivering — so deliver_signal just resumes the drive.
+    run = _run(state="waiting", cursor=1,
+               steps=[{"command": "request_replan", "args": {}, "label": "Replan"},
+                      {"command": "tell_joke", "args": {}, "label": "Joke"}])
+    store = FakeStore([run])
+    engine["store_holder"]["store"] = store
+    engine["calls"]["_run_returns"] = [
+        {"status": "success", "message": "done", "passed": 1, "failed": 0, "results": []}
+    ]
+
+    ok = asyncio.run(we.deliver_signal("wf_1", 0, "approval", SimpleNamespace(state="approved")))
+
+    assert ok is True and store.claims == 1
+    assert engine["calls"]["run"][-1]["start_index"] == 1  # resumed from the cursor
+    assert store.runs["wf_1"].state == "done"
+    assert [e for e in engine["events"] if e[1] == "complete"]

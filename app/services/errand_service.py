@@ -24,6 +24,7 @@ wires ``("errand", "approve_errand_plan")`` / ``…refine…`` / ``…discard…
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -52,6 +53,7 @@ from app.services.workflow_engine import (
     deliver_signal,
     register_consumer,
     register_workflow_store,
+    widens_envelope,
 )
 
 logger = logging.getLogger("uvicorn")
@@ -64,6 +66,11 @@ ERRAND_APPROVE_CALLBACK = "approve_errand_plan"
 ERRAND_DISCARD_CALLBACK = "discard_errand_plan"
 ERRAND_REPLAN_CALLBACK = "replan_errand_plan"
 ERRAND_REFINE_CALLBACK = "refine_errand_plan"
+# Mid-run pause-and-replan: a running errand hit a request_replan step and posted a
+# delta card. Approve splices the proposed steps into the RUN and resumes it; Stop
+# ends the errand. These target the Workflow (run), not the draft ErrandPlan.
+ERRAND_REPLAN_APPROVE_CALLBACK = "approve_replan"
+ERRAND_STOP_CALLBACK = "stop_errand"
 
 # Own inbox category so the plan card is filterable and distinct from the
 # routine completion card (category="routine").
@@ -206,6 +213,142 @@ def _post_errand_plan_card(
         push=True,
         target_type="user" if user_id is not None else "household",
     )
+
+
+# ── Mid-run pause-and-replan ──────────────────────────────────────────────────
+# A running errand can hit a ``request_replan`` step (the engine's ``approval``
+# signal): it suspends the RUN, the emitter checks ``widens_envelope`` and either
+# posts a delta card for a one-tap decision (widen) or auto-continues silently
+# (in-envelope). Approve splices the proposal into the run and resumes it.
+
+
+def _replan_card_body(title: str, reason: str, add_steps: list[dict[str, Any]]) -> str:
+    """Markdown body for a mid-run delta card."""
+    lines = [f"While running **{title}**, I have a change to propose:", ""]
+    if reason:
+        lines += [reason, ""]
+    lines.append("**Proposed additional steps:**")
+    for i, step in enumerate(add_steps, start=1):
+        lines.append(f"{i}. {step.get('label') or step.get('command')}")
+    lines += ["", "Tap **Approve** to include these and continue, or **Stop** to end the errand here."]
+    return "\n".join(lines)
+
+
+def build_replan_card_metadata(
+    workflow_id: str, revision: int, add_steps: list[dict[str, Any]], household_id: str
+) -> dict[str, Any]:
+    """The delta card's ``metadata`` (server-plane interactive card). ``data`` round-
+    trips ``workflow_id`` + ``revision`` so Approve loads the RUN and rejects a stale
+    card (a change the run already moved past). Approve/Stop only."""
+    ident = {"workflow_id": workflow_id, "revision": revision}
+    return {
+        "household_id": household_id,
+        "workflow_id": workflow_id,
+        "revision": revision,
+        "steps": add_steps,  # the proposed additions, read-only
+        "interactive_elements": [
+            {"id": "approve-replan", "label": "Approve", "command": ERRAND_CALLBACK_COMMAND,
+             "callback": ERRAND_REPLAN_APPROVE_CALLBACK, "target": "server", "data": ident},
+            {"id": "stop-errand", "label": "Stop", "command": ERRAND_CALLBACK_COMMAND,
+             "callback": ERRAND_STOP_CALLBACK, "target": "server", "data": ident},
+        ],
+    }
+
+
+def _apply_workflow_replan(db: Session, workflow_id: str, at_step: int) -> bool:
+    """Splice the ``request_replan`` step's proposed ``add_steps`` into the RUN's
+    plan, right AFTER that step (index ``at_step+1``), and bump ``revision`` (so the
+    delta card's Approve becomes stale). Shared by the human-approve and in-envelope
+    auto-continue paths. Returns True if it spliced."""
+    wf = db.query(Workflow).filter(Workflow.id == workflow_id).first()
+    if wf is None:
+        return False
+    steps = json.loads(wf.steps or "[]")
+    if not (0 <= at_step < len(steps)):
+        return False
+    add = (steps[at_step].get("args") or {}).get("add_steps") or []
+    if not isinstance(add, list):
+        add = []
+    steps[at_step + 1:at_step + 1] = add
+    wf.steps = json.dumps(steps)
+    wf.revision = (wf.revision or 1) + 1
+    db.commit()
+    return True
+
+
+def _post_replan_card(
+    wf: Workflow, reason: str, add_steps: list[dict[str, Any]], db: Session
+) -> None:
+    """Post (or in-place update) the delta card for a WAITING run and store its id on
+    ``wf.inbox_item_id``. Best-effort — the run is already durably waiting."""
+    title_summary = wf.title or wf.goal or "your errand"
+    title = f"🔀 Errand update: {title_summary}"
+    summary = reason or "I have a change to propose."
+    body = _replan_card_body(title_summary, reason, add_steps)
+    metadata = build_replan_card_metadata(wf.id, wf.revision, add_steps, wf.household_id)
+    item_id: str | None = None
+    if wf.inbox_item_id and update_inbox_item_sync(
+        item_id=wf.inbox_item_id, household_id=wf.household_id,
+        title=title, summary=summary, body=body,
+        category=ERRAND_PLAN_CATEGORY, metadata=metadata,
+    ):
+        item_id = wf.inbox_item_id
+    else:
+        item_id = post_inbox_item_sync(
+            household_id=wf.household_id, title=title, summary=summary, body=body,
+            category=ERRAND_PLAN_CATEGORY, metadata=metadata, user_id=wf.user_id,
+            push=True, target_type="user" if wf.user_id is not None else "household",
+        )
+    if item_id and item_id != wf.inbox_item_id:
+        wf.inbox_item_id = item_id
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001 — storing the card id is best-effort
+            db.rollback()
+
+
+async def _auto_continue_replan(workflow_id: str, step_index: int) -> None:
+    """In-envelope replan → splice the delta + resume WITHOUT a human tap. Runs as a
+    detached task off the (sync) progress emitter. The run is durably 'waiting' on
+    approval; if this task is lost to a restart before it fires the run parks — a rare
+    gap (no approval sweep yet; single-instance CC). Never raises out."""
+    from app.db import get_session_local
+
+    try:
+        db = get_session_local()()
+        try:
+            _apply_workflow_replan(db, workflow_id, step_index)
+        finally:
+            db.close()
+        await deliver_signal(workflow_id, step_index, "approval", SimpleNamespace(state="approved"))
+    except Exception:  # noqa: BLE001 — a detached auto-continue must not crash the loop
+        logger.exception("Errand %s: in-envelope auto-continue failed", workflow_id)
+
+
+def _handle_replan_needs_a_tap(run: WorkflowRun, data: dict[str, Any]) -> None:
+    """The engine paused a run on a request_replan step (SEAM 3, ``needs_a_tap``).
+    Decide via ``widens_envelope``: a widening change posts a delta card and waits
+    for a tap; an in-envelope change auto-continues silently."""
+    add_steps = data.get("add_steps") or []
+    step_index = data.get("step_index")
+    if not isinstance(add_steps, list) or step_index is None:
+        return
+    amended = list(run.steps) + list(add_steps)  # order-agnostic for the envelope axes
+    if widens_envelope(run.steps, amended):
+        from app.db import get_session_local
+
+        db = get_session_local()()
+        try:
+            wf = db.query(Workflow).filter(Workflow.id == run.id).first()
+            if wf is not None:
+                _post_replan_card(wf, str(data.get("reason") or ""), add_steps, db)
+        finally:
+            db.close()
+    else:
+        try:
+            asyncio.get_running_loop().create_task(_auto_continue_replan(run.id, step_index))
+        except RuntimeError:
+            logger.warning("Errand %s: no running loop to auto-continue an in-envelope replan", run.id)
 
 
 async def create_errand_plan(
@@ -754,6 +897,101 @@ def _decline_pending_workflow_calls(db: Session, workflow_id: str) -> bool:
         return False
 
 
+async def _handle_approve_replan(ctx: ServerCallbackContext) -> ServerCallbackResult:
+    """Approve tap on a mid-run delta card → splice the proposed steps into the RUN
+    and resume it. Guards: the Workflow is WAITING on ``approval`` and the card's
+    revision matches (a stale card — one the run already moved past — is rejected).
+    The splice happens BEFORE ``deliver_signal`` so the resumed drive sees the
+    amended plan. Never raises: deliver_signal owns anti-vanishing."""
+    from app.db import get_session_local
+
+    db = get_session_local()()
+    step_index: int
+    workflow_id: Any
+    try:
+        workflow_id = ctx.data.get("workflow_id")
+        if not workflow_id:
+            return ServerCallbackResult(success=False, error="Missing workflow_id")
+        wf = (
+            db.query(Workflow)
+            .filter(Workflow.id == workflow_id, Workflow.household_id == ctx.household_id)
+            .first()
+        )
+        if wf is None:
+            return ServerCallbackResult(success=False, error="Errand not found")
+        # Single-use: a second tap once the run has moved on is a friendly no-op.
+        if wf.state != "waiting" or wf.waiting_on != "approval":
+            return ServerCallbackResult(
+                success=True,
+                context_data={"inbox": {
+                    "title": "Errand already handled",
+                    "summary": "That change was already handled.",
+                    "metadata": {"household_id": ctx.household_id},
+                }},
+            )
+        if not _revisions_match(ctx.data.get("revision"), wf.revision):
+            return ServerCallbackResult(
+                success=False,
+                error="This change was already updated — open the latest card.",
+            )
+        step_index = wf.cursor - 1  # the request_replan step the run is parked on
+        if not _apply_workflow_replan(db, workflow_id, step_index):
+            return ServerCallbackResult(success=False, error="Couldn't apply the change.")
+    finally:
+        db.close()
+
+    # Resume over the amended plan (fresh store inside deliver_signal).
+    await deliver_signal(workflow_id, step_index, "approval", SimpleNamespace(state="approved"))
+    logger.info("Errand %s replan approved → resumed at step %s", workflow_id, step_index + 1)
+    return ServerCallbackResult(success=True)
+
+
+def _handle_stop_errand(ctx: ServerCallbackContext) -> ServerCallbackResult:
+    """Stop tap on a mid-run delta card → cancel the errand here. Only a WAITING run
+    is safe to cancel (parked, no active drive); its pending downstream call is
+    declined so nothing dials after the stop. Mirrors ``_handle_discard_errand_plan``
+    for the launched-waiting case."""
+    from app.db import get_session_local
+
+    db = get_session_local()()
+    try:
+        workflow_id = ctx.data.get("workflow_id")
+        wf = (
+            db.query(Workflow)
+            .filter(Workflow.id == workflow_id, Workflow.household_id == ctx.household_id)
+            .first()
+        )
+        if wf is None:
+            return ServerCallbackResult(success=True)  # gone — idempotent
+        if wf.state == "waiting":
+            wf.state = "cancelled"
+            db.commit()
+            declined = _decline_pending_workflow_calls(db, wf.id)
+            db.query(ErrandPlan).filter(ErrandPlan.workflow_id == wf.id).update(
+                {"state": "cancelled"}
+            )
+            db.commit()
+            note = " I won't place the remaining call(s)." if declined else ""
+            return ServerCallbackResult(
+                success=True,
+                context_data={"inbox": {
+                    "title": "🗑️ Errand stopped",
+                    "summary": (wf.title or wf.goal or "The errand") + " stopped." + note,
+                    "metadata": {"household_id": ctx.household_id},
+                }},
+            )
+        return ServerCallbackResult(
+            success=True,
+            context_data={"inbox": {
+                "title": "Errand already handled",
+                "summary": f"This errand is already {wf.state}.",
+                "metadata": {"household_id": ctx.household_id},
+            }},
+        )
+    finally:
+        db.close()
+
+
 async def _handle_replan_errand_plan(ctx: ServerCallbackContext) -> ServerCallbackResult:
     """Update-plan tap → re-plan the errand from the edited goal, re-post the card.
 
@@ -1002,6 +1240,8 @@ class _ErrandProgressEmitter(ProgressEmitter):
     def emit(self, run: WorkflowRun, event: ProgressEvent) -> None:
         if event.type == "complete" and event.result is not None:
             _post_errand_completion_card(run.household_id, run.title, event.result, run.user_id)
+        elif event.type == "needs_a_tap" and event.result is not None:
+            _handle_replan_needs_a_tap(run, event.result)
 
 
 async def _errand_run_fn(*args: Any, **kwargs: Any) -> Any:
@@ -1042,6 +1282,8 @@ def register_errand_callbacks() -> None:
     register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_REFINE_CALLBACK, _handle_refine_errand_plan)
     register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_REPLAN_CALLBACK, _handle_replan_errand_plan)
     register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_DISCARD_CALLBACK, _handle_discard_errand_plan)
+    register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_REPLAN_APPROVE_CALLBACK, _handle_approve_replan)
+    register_server_callback(ERRAND_CALLBACK_COMMAND, ERRAND_STOP_CALLBACK, _handle_stop_errand)
     logger.info("🗒️ Errand server callbacks registered")
 
 

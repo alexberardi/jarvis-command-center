@@ -465,6 +465,86 @@ class WaitForHandler(StepHandler):
                 "message": "the wait finished", "error": None, "data": None}
 
 
+def widens_envelope(
+    approved_steps: list[dict[str, Any]], amended_steps: list[dict[str, Any]]
+) -> bool:
+    """Does the amended plan WIDEN the errand's envelope vs. the approved plan?
+
+    The gate for mid-run pause-and-replan: a widening change must pause for a
+    one-tap human confirm (a delta card); a non-widening change auto-continues.
+    Four axes over the step dicts (errand-runner PRD §2.6). The autonomy-dial is
+    deferred, so this is a strict binary — no tunability, no pre-approving
+    patterns; ANY axis true → widen:
+
+      1. NEW CAPABILITY   — a command in the amended plan not already approved.
+      2. NEW COUNTERPARTY — a step whose ``args.business`` is a party not already
+                            being contacted in the approved plan.
+      3. NEW RISKY STEP   — the amended plan has MORE ``is_risky`` steps than the
+                            approved one (spends money / contacts a stranger /
+                            irreversible — e.g. an extra make_phone_call).
+      4. GUARDRAIL-LOOSENING — stubbed False until per-step clamp values exist
+                            (lands with the deferred autonomy-dial / clamp).
+
+    Pure + dependency-free so it unit-tests as a truth table. Reordering or
+    REMOVING steps never widens (no new command/party, risky count can't rise).
+    """
+    def _party(step: dict[str, Any]) -> str | None:
+        return ((step.get("args") or {}).get("business") or "").strip() or None
+
+    approved_cmds = {s.get("command") for s in approved_steps}
+    approved_parties = {_party(s) for s in approved_steps if _party(s)}
+    approved_risky = sum(1 for s in approved_steps if s.get("is_risky"))
+
+    # Axis 3: a net-new risky step (catches a second call even to a known party).
+    if sum(1 for s in amended_steps if s.get("is_risky")) > approved_risky:
+        return True
+    for s in amended_steps:
+        if s.get("command") not in approved_cmds:
+            return True  # axis 1
+        party = _party(s)
+        if party and party not in approved_parties:
+            return True  # axis 2
+    return False  # axis 4 stubbed → not looser
+
+
+class ReplanHandler(StepHandler):
+    """DEFERRED (approval) — the ``request_replan`` control-flow step. A mid-run plan
+    change (a discovered follow-up, extra work) SUSPENDS the run on the APPROVAL
+    wakeup source; the consumer surfaces a delta card, and a human tap — or an
+    auto-continue for an in-envelope change — resumes it through the SAME
+    ``deliver_signal`` primitive the phone/timer sources use. The step's args carry
+    the proposed delta (``add_steps``, ``reason``), which the consumer reads off the
+    step to render the card and (on approval) splice in. This is the third signal
+    source: gates, escalations, wait-fors and discovered branches all reduce to one
+    suspend→get-a-decision→resume primitive (errand-runner PRD §2.6)."""
+
+    kind = "deferred"
+    signal_kind = "approval"
+
+    def handles(self, command: str) -> bool:
+        return command == "request_replan"
+
+    async def run(self, ctx, command, args, label, step_index):
+        if not ctx.workflow_id:  # can't resume an unlinked approval → fail the step
+            return {"command": "request_replan", "label": label, "success": False,
+                    "message": None, "error": "replan step has no workflow link", "data": None}
+        return Suspend(cursor=step_index + 1, signal_key=f"{ctx.workflow_id}:{step_index}",
+                       signal_kind=self.signal_kind or "approval")
+
+    def interpret_signal(self, outcome, steps, step_index):
+        """The replan was approved (a tap, or an in-envelope auto-continue) → a
+        success outcome so the run continues from the cursor over the AMENDED plan
+        (the consumer splices the delta in BEFORE delivering this signal). A declined
+        replan never delivers ``approval`` — Stop cancels the run instead — so this
+        only ever runs for an approval. ``control`` marks it a control-flow step so
+        the completion summary can skip it."""
+        label = "Replan"
+        if 0 <= step_index < len(steps):
+            label = steps[step_index].get("label") or "Replan"
+        return {"command": "request_replan", "label": label, "success": True,
+                "message": None, "error": None, "data": None, "control": True}
+
+
 class ServerToolHandler(StepHandler):
     """SYNC — any registered IServerTool, run in-process via the same tool_executor
     the voice loop uses. Reads household/speaker from the seeded ``conv_id``."""
@@ -700,7 +780,21 @@ async def _drive_run(
         store.save_waiting(
             run, result.cursor, result.results,
             signal_kind=result.signal_kind, wake_at=result.wake_at,
-        )  # suspended on the next deferred step (phone outcome or timer)
+        )  # suspended on the next deferred step (phone outcome, timer, or approval)
+        if result.signal_kind == "approval":
+            # A request_replan step paused the run pending a decision. Surface the
+            # proposed delta so the consumer can decide (widens_envelope) whether to
+            # post a change card and wait, or auto-continue an in-envelope change.
+            step_index = result.cursor - 1
+            replan_args: dict[str, Any] = {}
+            if 0 <= step_index < len(run.steps):
+                replan_args = run.steps[step_index].get("args") or {}
+            emit_progress(run, ProgressEvent("needs_a_tap", {
+                "workflow_id": run.id,
+                "step_index": step_index,
+                "reason": replan_args.get("reason") or "",
+                "add_steps": replan_args.get("add_steps") or [],
+            }))
         logger.info("Workflow %s waiting on %s (%s)", run.id, result.signal_kind, result.signal_key)
         return
     emit_progress(run, ProgressEvent("complete", result))
@@ -835,5 +929,6 @@ async def deliver_signal(
 # handler is the catch-all.
 register_handler(PhoneCallHandler())
 register_handler(WaitForHandler())
+register_handler(ReplanHandler())
 register_handler(ServerToolHandler())
 register_handler(NodeCommandHandler())
