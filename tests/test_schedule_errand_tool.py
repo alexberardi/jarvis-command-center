@@ -111,3 +111,70 @@ def test_resolve_fire_at_parses_day_and_clock_time():
     # no time at all → can't schedule precisely
     assert _resolve_fire_at("sometime soon", "UTC") is None
     assert _resolve_fire_at("", "UTC") is None
+
+
+# ── Slice 2: recurrence entry ─────────────────────────────────────────────────
+
+
+def test_build_recurrence_cadences_utc():
+    import json
+    from app.core.tools.schedule_errand_tool import _build_recurrence
+
+    fire = datetime(2099, 1, 5, 9, 30)  # naive UTC, 09:30
+
+    def spec(desc):
+        r = _build_recurrence(desc, fire, "UTC")
+        return json.loads(r) if r else None
+
+    assert spec("daily") == {"type": "cron", "cron": "30 9 * * *"}
+    assert spec("weekdays") == {"type": "cron", "cron": "30 9 * * 1-5"}
+    assert spec("monthly") == {"type": "cron", "cron": "30 9 5 * *"}  # day-of-month = 5
+    assert spec("hourly") == {"type": "interval", "interval_seconds": 3600}
+    assert spec("every 30 minutes") == {"type": "interval", "interval_seconds": 1800}
+    assert spec("every 2 hours") == {"type": "interval", "interval_seconds": 7200}
+    assert spec("weekly")["cron"].startswith("30 9 * * ")  # weekly cron at 9:30, some DOW
+    # one-shot / unrecognized → None (treated as a one-time schedule)
+    assert spec(None) is None and spec("once") is None and spec("banana") is None
+
+
+def test_build_recurrence_uses_node_timezone():
+    import json
+    from app.core.tools.schedule_errand_tool import _build_recurrence
+
+    # 09:30 UTC == 04:30 America/New_York (EST) → the daily cron fixes 4:30 LOCAL
+    fire = datetime(2099, 1, 5, 9, 30)
+    assert json.loads(_build_recurrence("daily", fire, "America/New_York"))["cron"] == "30 4 * * *"
+
+
+def test_execute_recurring_passes_recurrence_and_first_fire():
+    import json
+
+    fake_loop = MagicMock()
+    with patch.object(conversation_cache, "get_node_context", return_value=_CTX), \
+         patch("app.core.tools.schedule_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
+         patch("app.services.schedule_service.create_schedule") as create:
+        res = ScheduleErrandTool().execute(
+            goal="check the weather", fire_at="2099-06-01T08:00:00",
+            recurrence="daily", conversation_id="c1")
+    assert res["status"] == "accepted"
+    kw = create.call_args.kwargs
+    assert json.loads(kw["recurrence"]) == {"type": "cron", "cron": "0 8 * * *"}
+    assert kw["fire_at"] == datetime(2099, 6, 1, 8, 0)  # first occurrence
+
+
+def test_recurring_past_first_fire_rolls_forward_not_rejected():
+    # "every day at 8am" when today's 8am has passed → the FIRST fire rolls to the next
+    # 8am (future), instead of the one-shot "past_time" rejection.
+    import json
+
+    fake_loop = MagicMock()
+    with patch.object(conversation_cache, "get_node_context", return_value=_CTX), \
+         patch("app.core.tools.schedule_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
+         patch("app.services.schedule_service.create_schedule") as create:
+        res = ScheduleErrandTool().execute(
+            goal="check the weather", fire_at="2000-01-01T08:00:00",
+            recurrence="daily", conversation_id="c1")
+    assert res["status"] == "accepted"  # NOT past_time
+    kw = create.call_args.kwargs
+    assert kw["fire_at"] > datetime.utcnow()  # rolled forward
+    assert json.loads(kw["recurrence"])["cron"] == "0 8 * * *"

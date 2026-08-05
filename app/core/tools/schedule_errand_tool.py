@@ -4,8 +4,9 @@ Example: "Tomorrow at 9am, call the dentist to book a cleaning."
 
 Voice entry for the scheduler: a spoken goal + a time → a ``Schedule`` row. At the
 scheduled time the sweep RE-PLANS the goal against fresh context and posts a plan card
-to approve (re-plan + re-confirm each run — nothing runs unattended). This is the
-deferred single-run slice; recurrence ("every Monday") is a follow-up.
+to approve (re-plan + re-confirm each run — nothing runs unattended). Supports a
+one-time fire (``fire_at``) or a repeating cadence (``recurrence``: daily / weekdays /
+weekly / monthly / hourly / "every N minutes"), which re-arms after each fire.
 
 Mirrors run_errand_tool: derive household/node/speaker from node_context, kick the
 schedule off, return a spoken ack. ``fire_at`` is a plain string (NOT format:date-time)
@@ -15,6 +16,7 @@ string — so ``_resolve_fire_at`` parses the day AND the time here, in the NODE
 """
 
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -103,6 +105,38 @@ def _resolve_fire_at(raw: str, tz_name: str) -> datetime | None:
     return local.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _build_recurrence(descriptor: str | None, fire_dt_utc: datetime, tz_name: str) -> str | None:
+    """Turn a coarse recurrence phrase ("daily", "every weekday", "weekly", "monthly",
+    "hourly", "every 30 minutes") + the first occurrence's LOCAL time into a
+    ``schedule_service`` recurrence spec (JSON), or None for a one-shot / unrecognized
+    phrase (treated as one-shot — safer than guessing a cadence). Cron cadences fix the
+    time-of-day (and day-of-week / day-of-month) from ``fire_dt`` in the node's zone, so
+    the schedule re-fires at the same wall-clock time the user gave."""
+    d = (descriptor or "").strip().lower()
+    if not d or d in ("none", "once", "one-time", "one time", "just once", "no", "never"):
+        return None
+    # Explicit interval phrasing: "every 30 minutes", "every 2 hours".
+    m = re.search(r"every\s+(\d+)\s*(minute|min|hour|hr)s?", d)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        secs = n * 60 if unit.startswith("min") else n * 3600
+        return json.dumps({"type": "interval", "interval_seconds": secs}) if secs > 0 else None
+    if "hour" in d:  # "hourly", "every hour"
+        return json.dumps({"type": "interval", "interval_seconds": 3600})
+    local = fire_dt_utc.replace(tzinfo=timezone.utc).astimezone(_zone(tz_name))
+    hh, mm = local.hour, local.minute
+    if "weekday" in d:  # "weekdays", "every weekday"
+        return json.dumps({"type": "cron", "cron": f"{mm} {hh} * * 1-5"})
+    if "week" in d:  # "weekly", "every week", "every Monday"
+        cron_dow = (local.weekday() + 1) % 7  # Python Mon=0..Sun=6 → cron Sun=0..Sat=6
+        return json.dumps({"type": "cron", "cron": f"{mm} {hh} * * {cron_dow}"})
+    if "month" in d:  # "monthly", "every month"
+        return json.dumps({"type": "cron", "cron": f"{mm} {hh} {local.day} * *"})
+    if "daily" in d or "day" in d:  # "daily" ('day' isn't a substring of it), "every day"
+        return json.dumps({"type": "cron", "cron": f"{mm} {hh} * * *"})
+    return None  # unrecognized → one-shot
+
+
 class ScheduleErrandTool(IServerTool):
     """Schedule a background errand to run at a future time."""
 
@@ -115,11 +149,13 @@ class ScheduleErrandTool(IServerTool):
         return (
             "Use this WHENEVER the user says 'schedule an errand', or asks for an errand / "
             "background task to happen at a FUTURE time — 'later', 'tonight', 'tomorrow at "
-            "9am', 'at 7:30pm', 'this evening', 'in an hour'. Put what to do in `goal` and "
-            "the time in `fire_at`. At that time Jarvis re-plans the goal and sends a plan "
-            "card to approve — nothing runs unattended. PREFER this over run_errand any "
-            "time the user names a future time; use run_errand only for 'run an errand' to "
-            "do NOW, and the normal command for a single immediate action."
+            "9am', 'at 7:30pm', 'this evening', 'in an hour' — OR on a REPEATING schedule — "
+            "'every morning at 8', 'each weekday', 'every Monday', 'monthly', 'every hour'. "
+            "Put what to do in `goal`, the (first) time in `fire_at`, and any repeat cadence "
+            "in `recurrence` (omit it for a one-time errand). Each time it fires, Jarvis "
+            "re-plans the goal and sends a plan card to approve — nothing runs unattended. "
+            "PREFER this over run_errand any time the user names a future or repeating time; "
+            "use run_errand only for 'run an errand' to do NOW."
         )
 
     @property
@@ -137,9 +173,18 @@ class ScheduleErrandTool(IServerTool):
                 "fire_at": {
                     "type": "string",
                     "description": (
-                        "When to run it, as the natural day + clock time the user gave — "
-                        "e.g. 'tonight at 7:51pm', 'tomorrow at 9am', 'friday at noon'. "
-                        "Include BOTH the day and the time; copy the user's time exactly."
+                        "When to run it (the FIRST time, if it repeats), as the natural day "
+                        "+ clock time the user gave — e.g. 'tonight at 7:51pm', 'tomorrow at "
+                        "9am', 'friday at noon', 'at 8am'. Include the time; copy it exactly."
+                    ),
+                },
+                "recurrence": {
+                    "type": "string",
+                    "description": (
+                        "Repeat cadence, if the user wants it to REPEAT — one of: 'daily', "
+                        "'weekdays', 'weekly', 'monthly', 'hourly', or 'every N minutes/hours'. "
+                        "OMIT entirely for a one-time errand. The time-of-day comes from "
+                        "`fire_at` (e.g. fire_at='at 8am' + recurrence='daily' → every day at 8am)."
                     ),
                 },
             },
@@ -178,8 +223,23 @@ class ScheduleErrandTool(IServerTool):
         fire_dt = _resolve_fire_at(fire_at_raw, tz_name)
         if fire_dt is None:
             return {"error": "bad_time", "message": "I couldn't work out when to run that — tell me a day and a time, like 'tomorrow at 9am'."}
-        if fire_dt <= datetime.utcnow():
-            return {"error": "past_time", "message": "That time has already passed — give me a future time."}
+
+        # Repeat cadence (optional) — derived from the first fire's local time-of-day.
+        recurrence = _build_recurrence(kwargs.get("recurrence"), fire_dt, tz_name)
+
+        now = datetime.utcnow()
+        if fire_dt <= now:
+            if recurrence is not None:
+                # A recurring first-fire already in the past (e.g. "every day at 8am"
+                # said at 2pm) rolls forward to the next occurrence instead of erroring.
+                from app.services.schedule_service import compute_next_fire
+
+                rolled = compute_next_fire(recurrence, now, tz_name)
+                if rolled is None:
+                    return {"error": "bad_time", "message": "I couldn't work out the schedule — try 'every day at 9am'."}
+                fire_dt = rolled
+            else:
+                return {"error": "past_time", "message": "That time has already passed — give me a future time."}
 
         try:
             from app.services.schedule_service import create_schedule
@@ -188,27 +248,28 @@ class ScheduleErrandTool(IServerTool):
             task = loop.create_task(
                 create_schedule(
                     household_id=household_id, node_id=node_id, user_id=user_id,
-                    intent=goal, fire_at=fire_dt, timezone=tz_name,
+                    intent=goal, fire_at=fire_dt, timezone=tz_name, recurrence=recurrence,
                 )
             )
             _SCHEDULE_TASKS.add(task)
             task.add_done_callback(_SCHEDULE_TASKS.discard)
             logger.info(
-                "🗓️ Schedule started: household=%s node=%s fire_at=%s goal=%r",
-                household_id, node_id, fire_dt, goal,
+                "🗓️ Schedule started: household=%s node=%s fire_at=%s recurrence=%s goal=%r",
+                household_id, node_id, fire_dt, recurrence, goal,
             )
         except RuntimeError as e:
             logger.error("Failed to start schedule task: %s", e)
             return {"error": "task_failed", "message": f"I couldn't schedule that: {e}"}
 
         when = _friendly_when(fire_at_raw, fire_dt, tz_name)
-        return {
-            "status": "accepted",
-            "message": (
-                f"Okay — I'll get to that {when}. I'll send a plan to your phone to "
-                "approve when the time comes."
-            ),
-        }
+        if recurrence is not None:
+            repeat = _friendly_recurrence(kwargs.get("recurrence"))
+            msg = (f"Okay — I'll do that {repeat}, starting {when}. Each time, I'll send a "
+                   "plan to your phone to approve first.")
+        else:
+            msg = (f"Okay — I'll get to that {when}. I'll send a plan to your phone to "
+                   "approve when the time comes.")
+        return {"status": "accepted", "message": msg}
 
 
 def _friendly_when(fire_at_raw: str, fire_dt: datetime, tz_name: str) -> str:
@@ -219,3 +280,17 @@ def _friendly_when(fire_at_raw: str, fire_dt: datetime, tz_name: str) -> str:
         return local.strftime("%A at %-I:%M %p").replace(":00", "")
     except Exception:  # noqa: BLE001 — fall back to the raw phrase
         return "then"
+
+
+def _friendly_recurrence(descriptor: str | None) -> str:
+    """A short spoken cadence for the recurring ack (best-effort)."""
+    d = (descriptor or "").strip().lower()
+    known = {
+        "daily": "every day", "weekdays": "on weekdays", "weekly": "every week",
+        "monthly": "every month", "hourly": "every hour",
+    }
+    if d in known:
+        return known[d]
+    if d.startswith("every"):
+        return d
+    return "on a repeating schedule"
