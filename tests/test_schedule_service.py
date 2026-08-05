@@ -6,6 +6,7 @@ that the intent is what gets re-planned.
 """
 
 import asyncio
+import json
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -101,3 +102,56 @@ def test_create_schedule_persists_an_active_row(sched_db):
     assert row.state == "active"
     assert row.intent == "call the dentist tomorrow morning"
     assert row.household_id == "hh-2" and row.recurrence is None
+
+
+# ── Slice 2: recurrence ───────────────────────────────────────────────────────
+
+
+def test_compute_next_fire_interval():
+    after = datetime(2026, 8, 5, 12, 0, 0)
+    nxt = schedule_service.compute_next_fire({"type": "interval", "interval_seconds": 3600}, after)
+    assert nxt == datetime(2026, 8, 5, 13, 0, 0)
+
+
+def test_compute_next_fire_interval_always_advances_past_after():
+    # A short interval + a late sweep must still land in the future.
+    after = datetime(2026, 8, 5, 12, 0, 30)
+    nxt = schedule_service.compute_next_fire({"type": "interval", "interval_seconds": 60}, after)
+    assert nxt is not None and nxt > after
+
+
+def test_compute_next_fire_cron_daily_utc():
+    # 9am daily; from noon on the 5th → next is 9am on the 6th (UTC).
+    after = datetime(2026, 8, 5, 12, 0, 0)
+    nxt = schedule_service.compute_next_fire({"type": "cron", "cron": "0 9 * * *"}, after, "UTC")
+    assert nxt == datetime(2026, 8, 6, 9, 0, 0)
+
+
+def test_compute_next_fire_none_for_oneshot_and_junk():
+    after = datetime(2026, 8, 5, 12, 0, 0)
+    assert schedule_service.compute_next_fire(None, after) is None
+    assert schedule_service.compute_next_fire("", after) is None
+    assert schedule_service.compute_next_fire("{bad json", after) is None
+    assert schedule_service.compute_next_fire({"type": "interval", "interval_seconds": 0}, after) is None
+    assert schedule_service.compute_next_fire({"type": "cron"}, after) is None  # no cron string
+
+
+def test_recurring_schedule_fires_and_rearms(sched_db):
+    # A recurring schedule fires, STAYS active, and moves next_fire_at into the future.
+    sid = _add(sched_db, recurrence=json.dumps({"type": "interval", "interval_seconds": 86400}))
+    with patch(_DRAFT, new=AsyncMock()) as draft:
+        fired = asyncio.run(schedule_service.fire_due_schedules())
+    assert fired == 1
+    draft.assert_awaited_once()
+    row = _get(sched_db, sid)
+    assert row.state == "active"                     # recurring → NOT 'done'
+    assert row.next_fire_at > datetime.utcnow()      # re-armed forward
+    assert row.last_fired_at is not None
+
+
+def test_recurring_rearm_claim_is_idempotent(sched_db):
+    sid = _add(sched_db, recurrence=json.dumps({"type": "interval", "interval_seconds": 3600}))
+    now = datetime.utcnow()
+    nxt = now + timedelta(hours=1)
+    assert schedule_service._claim_and_rearm(sid, now, nxt) is True   # first sweep claims
+    assert schedule_service._claim_and_rearm(sid, now, nxt) is False  # moved forward → no double-fire
