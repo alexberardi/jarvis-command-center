@@ -791,6 +791,8 @@ from app.api import mobile_phone_contacts
 app.include_router(mobile_phone_contacts.router, prefix="/api/v0/mobile", tags=["mobile-phone-contacts"])
 from app.api import mobile_call_context
 app.include_router(mobile_call_context.router, prefix="/api/v0/mobile", tags=["mobile-call-context"])
+from app.api import mobile_schedules
+app.include_router(mobile_schedules.router, prefix="/api/v0/mobile", tags=["mobile-schedules"])
 
 # Phone-call session endpoints for the gateway (app-to-app auth). No /api/v0
 # prefix — the gateway's session_client addresses /internal/phone/... directly.

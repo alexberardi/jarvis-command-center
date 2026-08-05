@@ -255,6 +255,25 @@ def describe_schedule(sch: dict) -> str:
     return " · ".join(b for b in bits if b)
 
 
+def schedule_view(sch: dict) -> dict:
+    """A raw schedule dict enriched with the display strings the mobile renders
+    as-is — so the phone screen and the voice card agree on how a cadence reads
+    (CC owns the vocabulary). Adds ``is_recurring`` / ``cadence`` / ``next_local`` /
+    ``description`` alongside the stored fields."""
+    return {
+        **sch,
+        "is_recurring": bool(sch.get("recurrence")),
+        "cadence": _describe_recurrence(sch.get("recurrence")),
+        "next_local": _local_when(sch.get("next_fire_at"), sch.get("timezone")),
+        "description": describe_schedule(sch),
+    }
+
+
+def list_schedule_views(household_id: str, *, include_done: bool = False) -> list[dict]:
+    """``list_schedules`` enriched for display (the mobile schedules screen)."""
+    return [schedule_view(s) for s in list_schedules(household_id, include_done=include_done)]
+
+
 def _schedule_list_body(schedules: list[dict]) -> str:
     """Markdown body for the management card."""
     if not schedules:
