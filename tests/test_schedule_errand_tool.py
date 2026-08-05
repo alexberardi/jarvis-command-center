@@ -178,3 +178,28 @@ def test_recurring_past_first_fire_rolls_forward_not_rejected():
     kw = create.call_args.kwargs
     assert kw["fire_at"] > datetime.utcnow()  # rolled forward
     assert json.loads(kw["recurrence"])["cron"] == "0 8 * * *"
+
+
+def test_recurring_without_a_time_defaults_to_9am():
+    # "every day, check the weather" → fire_at="today" (no clock time). A recurring
+    # errand defaults to 9am local instead of the bad_time rejection.
+    import json
+
+    fake_loop = MagicMock()
+    with patch.object(conversation_cache, "get_node_context", return_value=_CTX), \
+         patch("app.core.tools.schedule_errand_tool.asyncio.get_event_loop", return_value=fake_loop), \
+         patch("app.services.schedule_service.create_schedule") as create:
+        res = ScheduleErrandTool().execute(
+            goal="check the weather", fire_at="today", recurrence="daily", conversation_id="c1")
+    assert res["status"] == "accepted"  # NOT bad_time — this was the live gap
+    kw = create.call_args.kwargs
+    assert json.loads(kw["recurrence"]) == {"type": "cron", "cron": "0 9 * * *"}
+    assert kw["fire_at"] > datetime.utcnow()
+
+
+def test_one_shot_without_a_time_still_rejected():
+    # No recurrence + no clock time → still can't schedule precisely (the default only
+    # applies to recurring errands).
+    with patch.object(conversation_cache, "get_node_context", return_value=_CTX):
+        res = ScheduleErrandTool().execute(goal="x", fire_at="today", conversation_id="c1")
+    assert res["error"] == "bad_time"

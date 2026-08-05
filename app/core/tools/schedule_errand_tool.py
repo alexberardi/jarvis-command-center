@@ -137,6 +137,17 @@ def _build_recurrence(descriptor: str | None, fire_dt_utc: datetime, tz_name: st
     return None  # unrecognized → one-shot
 
 
+def _default_recurring_fire(tz_name: str) -> datetime:
+    """First fire for a recurring errand that gave NO clock time ("every day, check
+    the weather"): 9:00 AM local today (a sensible 'daily check' hour). For a cron
+    cadence this fixes the time-of-day; for an interval cadence the past-9am then
+    rolls forward to now+interval. Returns naive UTC."""
+    tz = _zone(tz_name)
+    today = datetime.now(tz).date()
+    local = datetime(today.year, today.month, today.day, 9, 0, tzinfo=tz)
+    return local.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 class ScheduleErrandTool(IServerTool):
     """Schedule a background errand to run at a future time."""
 
@@ -221,11 +232,16 @@ class ScheduleErrandTool(IServerTool):
         )
 
         fire_dt = _resolve_fire_at(fire_at_raw, tz_name)
+        recurrence_desc = (kwargs.get("recurrence") or "").strip()
+        if fire_dt is None and recurrence_desc:
+            # A RECURRING errand with no stated clock time ("every day, check the
+            # weather" → fire_at="today") defaults to 9am local rather than failing.
+            fire_dt = _default_recurring_fire(tz_name)
         if fire_dt is None:
             return {"error": "bad_time", "message": "I couldn't work out when to run that — tell me a day and a time, like 'tomorrow at 9am'."}
 
         # Repeat cadence (optional) — derived from the first fire's local time-of-day.
-        recurrence = _build_recurrence(kwargs.get("recurrence"), fire_dt, tz_name)
+        recurrence = _build_recurrence(recurrence_desc, fire_dt, tz_name)
 
         now = datetime.utcnow()
         if fire_dt <= now:
