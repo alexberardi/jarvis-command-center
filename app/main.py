@@ -471,8 +471,10 @@ async def startup_event():
     # Errand Runner plan-card Run/Cancel (server plane) — must be registered
     # before any tap arrives, or the callback dispatch 400s.
     from app.services.errand_service import register_errand_callbacks
+    from app.services.schedule_service import register_schedule_callbacks
 
     register_errand_callbacks()
+    register_schedule_callbacks()  # "your scheduled errands" card Cancel taps
 
     async def _periodic_phone_reaper() -> None:
         while True:

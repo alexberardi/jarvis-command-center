@@ -22,8 +22,21 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.models import Schedule
+from app.services.server_callback_registry import (
+    ServerCallbackContext,
+    ServerCallbackResult,
+    register_server_callback,
+)
 
 logger = logging.getLogger("uvicorn")
+
+# The command + callback the "your scheduled errands" card's Cancel buttons target.
+SCHEDULE_CALLBACK_COMMAND = "schedule"
+SCHEDULE_CANCEL_CALLBACK = "cancel_schedule"
+SCHEDULE_LIST_CATEGORY = "schedule"
+# Never render more than this many Cancel buttons on one card (a huge card is
+# unusable); the spoken/body text notes the rest.
+_LIST_CARD_MAX = 8
 
 
 def _tz(name: str | None):
@@ -105,6 +118,234 @@ async def create_schedule(
         return row.id
     finally:
         db.close()
+
+
+def list_schedules(household_id: str, *, include_done: bool = False) -> list[dict]:
+    """The household's schedules for a management view, newest-next-fire first. By
+    default only the LIVE ones (active/paused) — the actionable set for list/cancel;
+    ``include_done`` adds finished/cancelled for history. Returns plain dicts (no ORM
+    escapes the session)."""
+    from app.db import get_session_local
+
+    live = ("active", "paused")
+    db = get_session_local()()
+    try:
+        q = db.query(Schedule).filter(Schedule.household_id == household_id)
+        if not include_done:
+            q = q.filter(Schedule.state.in_(live))
+        rows = q.order_by(Schedule.next_fire_at.asc()).all()
+        return [
+            {
+                "id": r.id,
+                "intent": r.intent,
+                "state": r.state,
+                "next_fire_at": r.next_fire_at.isoformat() if r.next_fire_at else None,
+                "recurrence": r.recurrence,           # JSON spec or None (one-shot)
+                "timezone": r.timezone,
+                "last_fired_at": r.last_fired_at.isoformat() if r.last_fired_at else None,
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
+def cancel_schedule(schedule_id: str, household_id: str) -> bool:
+    """Cancel a LIVE (active/paused) schedule so it stops firing. Household-scoped so a
+    caller can't cancel another household's schedule. Idempotent: cancelling an
+    already-terminal schedule returns False (nothing to do). Returns True iff a live
+    schedule was cancelled."""
+    from app.db import get_session_local
+
+    db = get_session_local()()
+    try:
+        cancelled = (
+            db.query(Schedule)
+            .filter(
+                Schedule.id == schedule_id,
+                Schedule.household_id == household_id,
+                Schedule.state.in_(("active", "paused")),
+            )
+            .update({Schedule.state: "cancelled"}, synchronize_session=False)
+        )
+        db.commit()
+        return bool(cancelled)
+    finally:
+        db.close()
+
+
+# ── List / cancel: the "your scheduled errands" management card ───────────────
+# A voice ask ("what errands do I have scheduled?") or the mobile schedules screen
+# posts a card listing the household's live schedules, each with its own Cancel
+# button (server-plane, target:"server"). Cancel is a TAP — no fuzzy "which one did
+# you mean" matching that could stop the wrong errand.
+
+_WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+
+def _cron_time_phrase(minute: str, hour: str) -> str:
+    """" at 9:00 AM" from cron minute/hour fields when both are concrete, else ""."""
+    if not (minute.isdigit() and hour.isdigit()):
+        return ""
+    h, m = int(hour), int(minute)
+    suffix = "AM" if h < 12 else "PM"
+    h12 = h % 12 or 12
+    return f" at {h12}:{m:02d} {suffix}"
+
+
+def _describe_recurrence(recurrence: str | None) -> str:
+    """A human cadence for a recurrence spec: "every day at 9:00 AM", "on weekdays",
+    "every 30 minutes", "every Monday", "monthly on day 5" — or "once" for a one-shot
+    (``recurrence`` is None)."""
+    if not recurrence:
+        return "once"
+    try:
+        spec = json.loads(recurrence) if isinstance(recurrence, str) else dict(recurrence)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return "repeating"
+    rtype = spec.get("type")
+    if rtype == "interval":
+        secs = int(spec.get("interval_seconds") or 0)
+        if secs and secs % 3600 == 0:
+            h = secs // 3600
+            return "every hour" if h == 1 else f"every {h} hours"
+        if secs and secs % 60 == 0:
+            m = secs // 60
+            return "every minute" if m == 1 else f"every {m} minutes"
+        return "on a repeating interval"
+    if rtype == "cron":
+        parts = (spec.get("cron") or "").split()
+        if len(parts) != 5:
+            return "repeating"
+        minute, hour, dom, _mon, dow = parts
+        tod = _cron_time_phrase(minute, hour)
+        if dow == "1-5":
+            return f"every weekday{tod}"
+        if dow.isdigit():
+            return f"every {_WEEKDAY_NAMES[int(dow) % 7]}{tod}"
+        if dom.isdigit():
+            return f"monthly on day {dom}{tod}"
+        return f"every day{tod}"
+    return "repeating"
+
+
+def _local_when(iso_utc: str | None, tz_name: str | None) -> str:
+    """A short local phrase for the next fire ("Tue Aug 5, 9:00 AM"), or "" if unknown."""
+    if not iso_utc:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(_tz(tz_name))
+        return local.strftime("%a %b %-d, %-I:%M %p").replace(":00", "")
+    except (ValueError, TypeError):
+        return ""
+
+
+def describe_schedule(sch: dict) -> str:
+    """One human line for a schedule dict — "check the weather · every day at 9:00 AM
+    · next Tue Aug 5, 9 AM". The pieces present depend on the schedule."""
+    intent = (sch.get("intent") or "an errand").strip()
+    cadence = _describe_recurrence(sch.get("recurrence"))
+    nxt = _local_when(sch.get("next_fire_at"), sch.get("timezone"))
+    bits = [intent, cadence]
+    if nxt:
+        bits.append(f"next {nxt}")
+    return " · ".join(b for b in bits if b)
+
+
+def _schedule_list_body(schedules: list[dict]) -> str:
+    """Markdown body for the management card."""
+    if not schedules:
+        return "You don't have any errands scheduled right now."
+    lines = ["Your scheduled errands:", ""]
+    for i, s in enumerate(schedules, start=1):
+        lines.append(f"{i}. {describe_schedule(s)}")
+    if len(schedules) > _LIST_CARD_MAX:
+        lines += ["", f"_Showing the first {_LIST_CARD_MAX} of {len(schedules)}._"]
+    lines += ["", "Tap **Cancel** on any errand to stop it."]
+    return "\n".join(lines)
+
+
+def build_schedule_list_card_metadata(schedules: list[dict], household_id: str) -> dict:
+    """The management card's ``metadata`` — a read-only ``schedules`` view plus one
+    server-plane Cancel button per schedule (capped at ``_LIST_CARD_MAX``). ``data``
+    carries the ``schedule_id`` so the tap cancels exactly that one."""
+    shown = schedules[:_LIST_CARD_MAX]
+    return {
+        "household_id": household_id,
+        "schedules": shown,
+        "interactive_elements": [
+            {
+                "id": f"cancel-schedule-{s['id']}",
+                "label": f"Cancel: {(s.get('intent') or 'errand')[:32]}",
+                "command": SCHEDULE_CALLBACK_COMMAND,
+                "callback": SCHEDULE_CANCEL_CALLBACK,
+                "target": "server",
+                "data": {"schedule_id": s["id"]},
+            }
+            for s in shown
+        ],
+    }
+
+
+def post_schedule_list_card(household_id: str, user_id: int | None) -> tuple[int, str | None]:
+    """Post the household's "scheduled errands" management card. Returns
+    ``(count, item_id)`` — ``count`` is the number of live schedules (0 → no card is
+    posted, the caller just speaks "nothing scheduled"). Best-effort on the post."""
+    from app.services.inbox_notification_service import post_inbox_item_sync
+
+    schedules = list_schedules(household_id)
+    if not schedules:
+        return 0, None
+    n = len(schedules)
+    title = f"🗓️ {n} scheduled errand{'s' if n != 1 else ''}"
+    summary = describe_schedule(schedules[0]) if n == 1 else f"{n} errands scheduled"
+    item_id = post_inbox_item_sync(
+        household_id=household_id,
+        title=title,
+        summary=summary,
+        body=_schedule_list_body(schedules),
+        category=SCHEDULE_LIST_CATEGORY,
+        metadata=build_schedule_list_card_metadata(schedules, household_id),
+        user_id=user_id,
+        push=True,
+        target_type="user" if user_id is not None else "household",
+    )
+    return n, item_id
+
+
+def _handle_cancel_schedule(ctx: ServerCallbackContext) -> ServerCallbackResult:
+    """Cancel tap on the management card → cancel that schedule (household-scoped),
+    then re-post the list card so it reflects the removal. Idempotent: a
+    second tap on an already-cancelled schedule reports it's already stopped."""
+    schedule_id = ctx.data.get("schedule_id")
+    if not schedule_id:
+        return ServerCallbackResult(success=False, error="No schedule to cancel.")
+    cancelled = cancel_schedule(schedule_id, ctx.household_id)
+    # Refresh the management card in place of the tap's own result card so the user
+    # sees the updated list (or the "nothing left" state).
+    remaining, _ = post_schedule_list_card(ctx.household_id, ctx.user_id)
+    title = "🗓️ Errand cancelled" if cancelled else "Errand already stopped"
+    if remaining:
+        summary = f"Done — you have {remaining} errand{'s' if remaining != 1 else ''} still scheduled."
+    else:
+        summary = "Done — you have no errands scheduled now."
+    return ServerCallbackResult(
+        success=True,
+        context_data={"inbox": {"title": title, "summary": summary,
+                                "metadata": {"household_id": ctx.household_id}}},
+    )
+
+
+def register_schedule_callbacks() -> None:
+    """Wire the management card's Cancel taps to their handler. Call at startup
+    (main.py lifespan); an unregistered pair 400s at the tap."""
+    register_server_callback(
+        SCHEDULE_CALLBACK_COMMAND, SCHEDULE_CANCEL_CALLBACK, _handle_cancel_schedule
+    )
+    logger.info("🗓️ Schedule server callbacks registered")
 
 
 def _claim_one_shot(schedule_id: str, now: datetime) -> bool:
