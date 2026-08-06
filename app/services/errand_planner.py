@@ -399,10 +399,26 @@ async def _run_planner(prompt: str, llm_client: Any) -> dict[str, Any]:
     )
     raw = _extract_content(response)
     if not raw:
+        # DIAGNOSTIC (Qwen3.5): the answer can land in reasoning_content, or content
+        # can be empty when thinking runs past max_tokens — both surface here as an
+        # empty planner response (seen live: a mid-run replan returned nothing → no
+        # continuation steps got added). Log enough to tell which next time.
+        try:
+            ch = (response.get("choices") or [{}])[0] if isinstance(response, dict) else {}
+            msg = ch.get("message", {}) if isinstance(ch, dict) else {}
+            logger.warning(
+                "planner EMPTY response: finish=%s content=%r reasoning_len=%d",
+                ch.get("finish_reason"),
+                (msg.get("content") if isinstance(msg, dict) else None),
+                len((msg.get("reasoning_content") if isinstance(msg, dict) else "") or ""),
+            )
+        except Exception:  # noqa: BLE001 — logging must not mask the real error
+            logger.warning("planner EMPTY response (uninspectable): %r", str(response)[:300])
         raise ValueError("planner returned an empty response")
     try:
         return json.loads(_strip_fences(_strip_think(raw)))
     except json.JSONDecodeError as e:
+        logger.warning("planner UNPARSEABLE JSON (first 400 chars): %r", raw[:400])
         raise ValueError(f"planner returned invalid JSON: {e}") from e
 
 

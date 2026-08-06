@@ -120,7 +120,13 @@ async def _compose_errand_message(goal: str, results: list[dict[str, Any]], fall
         "done unless that detail is actually shown above. The errand is OVER, so NEVER say "
         "you 'will' do something and never mention any action not in the steps above. If a "
         "step FAILED, say so honestly (a failed step stops the errand, so later steps did "
-        "NOT run). No preamble, no markdown.\n\n/no_think"
+        "NOT run).\n"
+        "CRITICAL — the goal may DESCRIBE actions (set a reminder, send a message, make a "
+        "call, add a to-do) that were NOT performed: ONLY the steps listed above are real. "
+        "If the goal mentions such an action but there is NO step for it above, you MUST "
+        "state it was NOT done (e.g. 'I checked the forecast — 100% rain — but I did not set "
+        "a reminder'). Do not imply a conditional follow-up happened just because its "
+        "condition was met. No preamble, no markdown.\n\n/no_think"
     )
     try:
         from app.core.llm_proxy_client import LLMProxyClient
