@@ -69,6 +69,19 @@ class IServerTool(ABC):
         return True
 
     @property
+    def is_risky(self) -> bool:
+        """Whether this tool is high-stakes for autonomous (errand) execution.
+
+        Mirrors ``IJarvisCommand.is_risky``. Errand pause-and-replan treats a
+        mid-run plan change that introduces a risky command/tool as
+        envelope-widening — it pauses for a one-tap human confirm instead of
+        auto-continuing. Set True for tools that spend money, contact a
+        stranger, or take an irreversible action (e.g. placing a phone call).
+        Default False.
+        """
+        return False
+
+    @property
     def included_system_prompt_text(self) -> Optional[str]:
         """
         Optional extra guidance to include in the main system prompt.

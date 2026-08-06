@@ -1,0 +1,791 @@
+{
+  "extraction_scenarios": [
+    {
+      "name": "sister-priya-relocation",
+      "transcript": "User: Hey Jarvis, remind me to call my sister Priya on Sunday \u2014 it's her birthday.\nJarvis: Sure, I'll remind you Sunday morning to call Priya.\nUser: Thanks. She moved to Portland last month, so I keep losing track of the time zone.\nJarvis: Got it \u2014 Portland is on Pacific time, three hours behind you.",
+      "expected_saves": [
+        {
+          "fact": "User has a sister named Priya",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "Priya (user's sister) recently moved to and now lives in Portland (Pacific time)",
+          "ttl_category": "permanent"
+        }
+      ],
+      "expected_skips": [
+        "The one-off reminder to call Priya on Sunday (ephemeral task, handled by the reminder system)",
+        "Priya's exact birthday date \u2014 stated only as 'Sunday', too relative/ambiguous to store as a durable annual fact"
+      ],
+      "rationale": "Family member named naturally in passing while making a request. Tests that the extractor separates the durable identity/location facts (sister's name, that she moved to Portland) from the one-off reminder task. The birthday is mentioned only as 'Sunday' (relative, un-pinnable), so a careful extractor should NOT fabricate a stored calendar date for it."
+    },
+    {
+      "name": "pet-dog-max-vet",
+      "transcript": "User: Jarvis, find me a good vet nearby \u2014 Max has been favoring his back leg.\nJarvis: I can do that. Is Max a dog or a cat, so I can filter the results?\nUser: Golden retriever, just turned four. He's my big goofball.\nJarvis: Thanks. Here are three highly-rated vets nearby that see dogs.",
+      "expected_saves": [
+        {
+          "fact": "User has a dog named Max, a golden retriever (around 4 years old)",
+          "ttl_category": "permanent"
+        }
+      ],
+      "expected_skips": [
+        "The vet-search request (ephemeral one-off task)",
+        "Max currently favoring/limping on his back leg (transient symptom, not a durable fact)"
+      ],
+      "rationale": "Pet introduced naturally through a service request. Durable facts (dog named Max, golden retriever) should be saved as permanent identity facts; the transient symptom (favoring a leg) and the vet search are ephemeral and should be skipped rather than stored as long-lived memories."
+    },
+    {
+      "name": "friend-ravi-diwali",
+      "transcript": "User: Add Diwali to my calendar this year \u2014 my friend Ravi always throws a huge party.\nJarvis: Added. Want a reminder to RSVP to Ravi's party?\nUser: Yeah, do that. He's been my best friend since freshman year of college.\nJarvis: Done \u2014 reminder set.",
+      "expected_saves": [
+        {
+          "fact": "User has a close friend named Ravi, his best friend since college",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "User attends Ravi's big annual Diwali party each year",
+          "ttl_category": "permanent"
+        }
+      ],
+      "expected_skips": [
+        "Adding Diwali to the calendar this year (ephemeral request)",
+        "The RSVP reminder for Ravi's party (ephemeral task)"
+      ],
+      "rationale": "Friend named naturally, with an explicit durability signal ('best friend since college') and a recurring social tradition. Saves the friendship facts and the annual-party tradition as permanent; skips the ephemeral calendar-add and RSVP-reminder actions."
+    },
+    {
+      "name": "brother-implied-name-birthday",
+      "transcript": "User: Jarvis, text my brother a happy birthday for me.\nJarvis: Sure \u2014 sending Marcus a happy-birthday text now.\nUser: Perfect. Can't believe he's thirty already.\nJarvis: Sent. Anything else?",
+      "expected_saves": [
+        {
+          "fact": "User has a brother named Marcus (name surfaced via contact resolution, not spoken by the user)",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "Marcus's (user's brother's) birthday is today's date; he turned 30 this year",
+          "ttl_category": "permanent"
+        }
+      ],
+      "expected_skips": [
+        "Sending the happy-birthday text to Marcus (ephemeral one-off request)"
+      ],
+      "rationale": "IMPLIED NAME case: the user only says 'my brother' \u2014 the name Marcus is surfaced by Jarvis resolving the contact, never spoken by the user. A good extractor should still bind the durable fact 'user's brother is Marcus'. The birthday (today, from 'thirty already') is a legitimate durable annual fact worth saving; the text itself is ephemeral."
+    },
+    {
+      "name": "grandmother-nonna-weekly-call",
+      "transcript": "User: Remind me to call Nonna Sunday, like always \u2014 she frets if I skip a week.\nJarvis: Done \u2014 I'll keep your Sunday call with Nonna as a standing weekly reminder.\nUser: Thanks. Ninety-two and still sharper than me.\nJarvis: Noted.",
+      "expected_saves": [
+        {
+          "fact": "User has a grandmother she affectionately calls Nonna (relationship implied from the endearment)",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "User has a standing habit of calling Nonna every week, usually on Sundays",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "Nonna (user's grandmother) is around 92 years old and mentally sharp",
+          "ttl_category": "permanent"
+        }
+      ],
+      "expected_skips": [
+        "The specific Sunday call reminder instance (ephemeral task; the recurring reminder is managed by the reminder system, not memory)"
+      ],
+      "rationale": "IMPLIED NAME/relationship case: 'Nonna' is a term of endearment (grandmother) \u2014 the identity is implied, never stated as 'my grandmother named X'. Saves the implied relationship, the standing weekly-call habit, and her age as durable facts. Skips the specific Sunday reminder instance (memory stores the habit, not the reminder task)."
+    },
+    {
+      "name": "roommate-dev-allergy-preference",
+      "transcript": "User: Jarvis, whenever you help me plan dinners, keep them nut-free \u2014 my roommate Dev has a bad peanut allergy.\nJarvis: Understood. I'll flag any recipe with nuts. Is it severe?\nUser: Yeah, he carries an EpiPen. Also, put on something upbeat while I start cooking.\nJarvis: Keeping all shared meals nut-free. Starting your upbeat cooking playlist now.",
+      "expected_saves": [
+        {
+          "fact": "User has a roommate named Dev",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "Dev (user's roommate) has a severe peanut allergy and carries an EpiPen",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "User wants shared/dinner meal planning kept nut-free",
+          "ttl_category": "permanent"
+        }
+      ],
+      "expected_skips": [
+        "Playing upbeat music while the user starts cooking (ephemeral request)",
+        "Starting the cooking playlist right now (ephemeral action)"
+      ],
+      "rationale": "Friend/roommate named naturally, carrying a high-value durable safety fact (severe allergy) plus a standing preference ('keep dinners nut-free'). All three are permanent. The mid-utterance music request is a clear ephemeral action to skip, testing that the extractor doesn't over-capture commands embedded alongside durable facts."
+    },
+    {
+      "name": "vegetarian_plus_sunday_meal_prep",
+      "transcript": "User: Hey Jarvis, can you pull up a dinner recipe for me? Just keep in mind I'm vegetarian, so nothing with meat.\nJarvis: Sure. Here's a 30-minute chickpea and spinach curry.\nUser: Nice. I do my meal prep every Sunday afternoon, so that kind of batch recipe is perfect.\nJarvis: Good to know. Want me to remind you Sunday afternoons?\nUser: Yeah, do that. Oh, and add a can of coconut milk to my shopping list for tonight.\nJarvis: Added coconut milk to your shopping list, and I'll remind you Sunday afternoons for meal prep.",
+      "expected_saves": [
+        {
+          "fact": "User is vegetarian and does not eat meat",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "User does meal prep every Sunday afternoon",
+          "ttl_category": "recurring_30d"
+        }
+      ],
+      "expected_skips": [
+        "The one-off request to pull up a dinner recipe",
+        "Adding coconut milk to the shopping list (transient task)",
+        "The specific chickpea curry recipe suggested this turn"
+      ],
+      "rationale": "A dietary restriction is a durable fact that should always be honored (permanent). A stated weekly cadence ('every Sunday afternoon') is a recurring habit worth a ~30-day TTL so it refreshes if repeated. The recipe lookup and shopping-list edit are ephemeral commands, not durable facts."
+    },
+    {
+      "name": "jazz_work_music_and_black_coffee",
+      "transcript": "User: Put on some jazz \u2014 that's my go-to whenever I'm working.\nJarvis: Starting a jazz playlist for you.\nUser: And for future reference, I take my coffee black, no sugar, so remember that when I have you order.\nJarvis: Noted \u2014 black coffee, no sugar.\nUser: Actually skip this track, not feeling it.\nJarvis: Skipped.",
+      "expected_saves": [
+        {
+          "fact": "User's go-to music while working is jazz",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "User takes their coffee black with no sugar",
+          "ttl_category": "permanent"
+        }
+      ],
+      "expected_skips": [
+        "The immediate 'put on some jazz' playback command",
+        "The 'skip this track' playback control"
+      ],
+      "rationale": "The stated preferences (jazz as work music, black coffee) are durable taste facts a voice assistant should retain across sessions (permanent). The playback command and the skip-track control are transient device actions with no lasting value."
+    },
+    {
+      "name": "soccer_pickup_tue_thu_routine",
+      "transcript": "User: Set this up for me \u2014 I pick up the kids from soccer practice every Tuesday and Thursday at 5.\nJarvis: Done. I'll remind you Tuesdays and Thursdays at 5 PM for soccer pickup.\nUser: Thanks. My daughter Riley is the one who plays goalie.\nJarvis: Got it.\nUser: Oh, and cancel my 3 PM meeting reminder just for today.\nJarvis: Cancelled today's 3 PM reminder.",
+      "expected_saves": [
+        {
+          "fact": "User picks up the kids from soccer practice every Tuesday and Thursday at 5 PM",
+          "ttl_category": "recurring_30d"
+        },
+        {
+          "fact": "User has a daughter named Riley",
+          "ttl_category": "permanent"
+        }
+      ],
+      "expected_skips": [
+        "Cancelling today's 3 PM meeting reminder (one-off scheduling action)",
+        "The season-specific detail that Riley currently plays goalie"
+      ],
+      "rationale": "The twice-weekly pickup is a textbook recurring routine (recurring_30d) that should refresh if it keeps coming up. A family relationship (daughter named Riley) is durable (permanent), while her current position is volatile enough to skip. Cancelling one specific reminder is a transient action."
+    },
+    {
+      "name": "peanut_allergy_and_weekday_gym",
+      "transcript": "User: Important one, Jarvis \u2014 I'm allergic to peanuts. Always flag it if a recipe has them.\nJarvis: Understood. I'll always flag peanuts.\nUser: Also I'm at the gym every weekday morning at 6, so don't put anything on my calendar before 7.\nJarvis: Got it \u2014 I'll keep weekday mornings before 7 free.\nUser: Cool. Now set a timer for my eggs, 7 minutes.\nJarvis: Timer set for 7 minutes.",
+      "expected_saves": [
+        {
+          "fact": "User is allergic to peanuts",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "User goes to the gym every weekday morning at 6 and wants nothing scheduled before 7 AM on weekdays",
+          "ttl_category": "recurring_30d"
+        }
+      ],
+      "expected_skips": [
+        "Setting a 7-minute egg timer (ephemeral one-off)"
+      ],
+      "rationale": "A food allergy is a high-stakes permanent fact that must always be retained. A stated weekday-morning gym habit with a scheduling constraint is a recurring routine (recurring_30d). The egg timer is a throwaway command."
+    },
+    {
+      "name": "tea_person_and_monthly_book_club",
+      "transcript": "User: Just so you know, I'm more of a tea person than coffee \u2014 English breakfast in the morning, chamomile at night.\nJarvis: Noted your tea preferences.\nUser: And I've got book club on the first Monday of every month. Remind me the day before each time.\nJarvis: I'll remind you the day before your monthly book club.\nUser: What's the weather looking like tomorrow?\nJarvis: Tomorrow will be sunny with a high of 72.",
+      "expected_saves": [
+        {
+          "fact": "User prefers tea over coffee: English breakfast in the morning, chamomile at night",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "User has book club on the first Monday of every month",
+          "ttl_category": "recurring_30d"
+        }
+      ],
+      "expected_skips": [
+        "The one-off 'weather tomorrow' query"
+      ],
+      "rationale": "Beverage preferences broken down by time of day are durable taste facts (permanent). A monthly standing commitment is a recurring routine deserving a ~30-day TTL. The weather lookup is a purely ephemeral request."
+    },
+    {
+      "name": "spicy_food_farmers_market_and_houseguest",
+      "transcript": "User: Whenever you order food for me, go spicy \u2014 the spicier the better, always ask for extra hot.\nJarvis: Noted, I'll always request extra hot.\nUser: I also hit the farmers market every Saturday morning \u2014 that's a standing thing for me.\nJarvis: Got it, standing Saturday farmers market.\nUser: My brother Sam is staying with us this week, so plan meals for two.\nJarvis: I'll plan for two this week.\nUser: And turn on the porch light.\nJarvis: Porch light on.",
+      "expected_saves": [
+        {
+          "fact": "User loves spicy food and always wants dishes extra hot",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "User has a brother named Sam",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "User goes to the farmers market every Saturday morning",
+          "ttl_category": "recurring_30d"
+        },
+        {
+          "fact": "User's brother Sam is staying with them this week, so plan meals for two",
+          "ttl_category": "time_bound_7d"
+        }
+      ],
+      "expected_skips": [
+        "Turning on the porch light (ephemeral device command)"
+      ],
+      "rationale": "Shows all three TTL tiers. The spice preference and the existence of a brother named Sam are durable (permanent). The weekly market trip is a recurring routine (recurring_30d). Sam's visit is a near-term situation that self-expires within a week (time_bound_7d). The porch-light action is transient and should be skipped."
+    },
+    {
+      "name": "appointment-this-friday-plus-timer",
+      "transcript": "User: Hey Jarvis, I've got a dentist appointment with Dr. Halloran this Friday at 2. Can you remember that?\nJarvis: Got it \u2014 dentist with Dr. Halloran, this Friday at 2 PM. Want a reminder too?\nUser: Yeah, remind me an hour before. Oh, and set a 10-minute timer for the laundry.\nJarvis: Timer's running for 10 minutes, and I'll ping you at 1 PM Friday.",
+      "expected_saves": [
+        {
+          "fact": "Has a dentist appointment with Dr. Halloran this Friday at 2 PM",
+          "ttl_category": "time_bound_7d"
+        }
+      ],
+      "expected_skips": [
+        "'set a 10-minute timer for the laundry' \u2014 raw device command, ephemeral",
+        "'remind me an hour before' \u2014 a reminder action handled by the reminder subsystem, not a durable memory fact"
+      ],
+      "rationale": "A named near-term appointment tied to 'this Friday' is the canonical ttl_days~7 case: worth remembering for a few days, worthless after. The timer is a raw command and the reminder request is an action, not a fact \u2014 both must be skipped so the extractor doesn't mistake imperatives for durable memory."
+    },
+    {
+      "name": "all-ephemeral-nothing-to-save",
+      "transcript": "User: Jarvis, what's the weather looking like tomorrow?\nJarvis: Tomorrow it'll be sunny, high of 72.\nUser: Cool. What's 15% of 86?\nJarvis: 15% of 86 is 12.9.\nUser: And set a timer for 20 minutes.\nJarvis: Timer set for 20 minutes.",
+      "expected_saves": [],
+      "expected_skips": [
+        "'what's the weather looking like tomorrow' \u2014 transient query, and the sunny/72 answer is a fetched fact that expires",
+        "'what's 15% of 86' \u2014 one-off calculation, no lasting value",
+        "'set a timer for 20 minutes' \u2014 raw command, ephemeral"
+      ],
+      "rationale": "Pure over-extraction guard: three back-to-back utterances that are all requests or one-off answers with zero durable personal signal. A correct extractor stores nothing here \u2014 no preference, habit, relationship, or dated commitment is expressed."
+    },
+    {
+      "name": "durable-preference-amid-chatter",
+      "transcript": "User: Morning, Jarvis. What time is it?\nJarvis: It's 7:15 AM.\nUser: Thanks. Just so you know, I'm gluten-free \u2014 never suggest recipes with wheat or gluten.\nJarvis: Noted, I'll keep recipe suggestions gluten-free.\nUser: Great. Also, what's on my calendar today?\nJarvis: You have a team sync at 10 and nothing after lunch.",
+      "expected_saves": [
+        {
+          "fact": "Is gluten-free; do not suggest recipes containing wheat or gluten",
+          "ttl_category": "permanent"
+        }
+      ],
+      "expected_skips": [
+        "'what time is it' \u2014 transient query",
+        "'what's on my calendar today' \u2014 transient query",
+        "the calendar contents (team sync at 10, nothing after lunch) \u2014 a fetched, same-day fact, not a durable memory"
+      ],
+      "rationale": "A dietary constraint stated as an enduring rule ('never suggest wheat or gluten') is a permanent preference that should shape future behavior. It's surrounded by two clock/calendar queries whose answers are transient \u2014 the extractor must isolate the one durable preference and drop the ephemeral lookups, including today's fetched calendar. (Diet rewritten from vegetarian to gluten-free to avoid duplicating the vegetarian save in 'vegetarian_plus_sunday_meal_prep'.)"
+    },
+    {
+      "name": "time-bound-flight-plus-recurring-pt",
+      "transcript": "User: Jarvis, my flight to Denver is Thursday morning \u2014 I need to be at the airport around 6 AM.\nJarvis: Noted \u2014 flight to Denver this Thursday, at the airport around 6 AM.\nUser: And I'll be doing physical therapy every Tuesday and Thursday afternoon for the next few weeks after my knee surgery.\nJarvis: Got it \u2014 PT on Tuesday and Thursday afternoons for a while.\nUser: What's the traffic to the airport right now?\nJarvis: Traffic's light, about 25 minutes.",
+      "expected_saves": [
+        {
+          "fact": "Has a flight to Denver this Thursday, needs to be at the airport around 6 AM",
+          "ttl_category": "time_bound_7d"
+        },
+        {
+          "fact": "Attending physical therapy on Tuesday and Thursday afternoons for the next few weeks following knee surgery",
+          "ttl_category": "recurring_30d"
+        }
+      ],
+      "expected_skips": [
+        "'what's the traffic to the airport right now' \u2014 real-time query, answer expires in minutes"
+      ],
+      "rationale": "Contrasts two shelf-lives: a single dated trip ('this Thursday') is time_bound_7d, while a repeating commitment with an explicit multi-week horizon ('every Tue/Thu for the next few weeks') is recurring_30d \u2014 durable for about a month but not permanent, since it ends. The live traffic query is pure ephemera and must be skipped."
+    },
+    {
+      "name": "unsafe-otp-skip-plus-durable-bank-pref",
+      "transcript": "User: Jarvis, my bank just texted a verification code \u2014 it's 4 8 2 1 9. Can you hold onto it?\nJarvis: I won't store one-time codes for security reasons, but here it is right now: 4-8-2-1-9.\nUser: Fair enough. By the way, my go-to bank is Northgate Credit Union \u2014 treat that as my default for any money questions.\nJarvis: Done, I'll use Northgate Credit Union as your default bank.\nUser: Perfect.",
+      "expected_saves": [
+        {
+          "fact": "Default bank for money-related questions is Northgate Credit Union",
+          "ttl_category": "permanent"
+        }
+      ],
+      "expected_skips": [
+        "the one-time verification code '4 8 2 1 9' \u2014 a secret/OTP that is unsafe to store and expires immediately, even though the user asked to 'hold onto it'"
+      ],
+      "rationale": "Directly tests the safety boundary: a user can explicitly request storage of a sensitive one-time code and the extractor must still refuse \u2014 OTPs are both unsafe and worthless to persist. The bank-name preference in the same breath is a non-secret durable choice and should be saved as permanent. (The code is fictional and is the skip-target, not stored data.)"
+    },
+    {
+      "name": "mixed-command-embedding-preference-plus-visit",
+      "transcript": "User: Jarvis, add oat milk to the shopping list \u2014 and from now on remember I prefer oat milk over dairy.\nJarvis: Added oat milk to the list, and I'll remember you prefer oat milk over dairy.\nUser: Thanks. Also my sister Jordan Avery is coming to stay with us this Saturday for the week.\nJarvis: Got it \u2014 Jordan Avery visiting starting this Saturday for about a week.\nUser: Can you play some jazz while I cook?\nJarvis: Sure, starting a jazz playlist now.",
+      "expected_saves": [
+        {
+          "fact": "Prefers oat milk over dairy",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "Has a sister named Jordan Avery",
+          "ttl_category": "permanent"
+        },
+        {
+          "fact": "Sister Jordan Avery is staying with them starting this Saturday for about a week",
+          "ttl_category": "time_bound_7d"
+        }
+      ],
+      "expected_skips": [
+        "'add oat milk to the shopping list' \u2014 a raw list-action command (the derived standing preference is what gets saved, not the action)",
+        "'play some jazz while I cook' \u2014 raw playback command, ephemeral"
+      ],
+      "rationale": "The hardest mixed case: one utterance carries BOTH a disposable action ('add oat milk to the list') and an embedded durable preference ('from now on I prefer oat milk') \u2014 the extractor must split them, skipping the command while saving the preference. It also separates a permanent relationship fact (sister named Jordan Avery) from the time-bound visit event, and drops the trailing music command as pure ephemera. (Sister renamed from Riley Chen to Jordan Avery to avoid colliding with the daughter 'Riley' in another scenario.)"
+    }
+  ],
+  "recall_scenarios": [
+    {
+      "name": "coffee_oat_milk_unsweetened",
+      "rationale": "Classic preference recall. A single beverage preference should surface across many intents: ordering, home brewing, group runs, stocking supplies, and vetting a suggested drink. Guarded against unrelated logistics asks.",
+      "seed_memories": [
+        {
+          "category": "preferences",
+          "content": "Takes coffee with oat milk and unsweetened \u2014 no sugar, no flavored syrups."
+        }
+      ],
+      "should_recall": [
+        "I'm in line at the cafe, what should I order?",
+        "Put in my usual coffee for pickup at the shop on 5th.",
+        "Making a pot at home this morning \u2014 remind me how I take it?",
+        "We're stocking a little coffee bar for the team offsite, what should we get for me?",
+        "I'm doing a coffee run for the whole table \u2014 what do you want me to grab for you?",
+        "Would a caramel oat latte be a good pick for me?"
+      ],
+      "should_not_recall": [
+        "What's the weather in Denver tomorrow morning?",
+        "Help me draft a reply to my landlord about the lease renewal."
+      ],
+      "expected_fact": "The user drinks coffee with oat milk and unsweetened (no sugar or flavored syrups), so recommendations/orders should reflect oat milk and no added sweetener."
+    },
+    {
+      "name": "dietary_vegetarian_dairy_eggs_ok",
+      "rationale": "Dietary restriction that should shape restaurant picks, cooking suggestions, delivery orders, meal prep, and trip food recommendations. The over-recall guard tests that cooking a meat dish FOR SOMEONE ELSE should not trigger the user's own vegetarianism.",
+      "seed_memories": [
+        {
+          "category": "food",
+          "content": "Is vegetarian \u2014 eats no meat or fish, but does eat dairy and eggs."
+        }
+      ],
+      "should_recall": [
+        "Pick a restaurant for dinner with friends on Friday.",
+        "What should I make for dinner tonight?",
+        "Order me something from the Thai place down the street.",
+        "We're planning a weekend trip to Austin \u2014 any food spots I'd love?",
+        "Put together a meal-prep plan for my week.",
+        "Is the new steakhouse a good choice for me tonight?"
+      ],
+      "should_not_recall": [
+        "I'm grilling steaks for my parents this weekend \u2014 how long per side for medium-rare?",
+        "Summarize this article about interest rate changes."
+      ],
+      "expected_fact": "The user is vegetarian (no meat or fish, but dairy and eggs are fine), so food/restaurant recommendations for the user should be meat- and fish-free."
+    },
+    {
+      "name": "music_loves_mellow_jazz",
+      "rationale": "Music taste applied to playlists, focus sessions, hosting, concerts, and commutes. Over-recall guard checks that picking energetic music for another person doesn't pull the user's jazz preference or their metal dislike.",
+      "seed_memories": [
+        {
+          "category": "music",
+          "content": "Loves jazz, especially mellow instrumental jazz for working and unwinding; not a fan of heavy metal."
+        }
+      ],
+      "should_recall": [
+        "Put on something for my focus session.",
+        "Build me a playlist for a dinner party I'm hosting at home.",
+        "Any concerts I should check out around town this month?",
+        "I need some background music while I cook.",
+        "Recommend an album for my morning commute.",
+        "Queue up something to help me wind down before bed."
+      ],
+      "should_not_recall": [
+        "My daughter wants a high-energy playlist for her workout \u2014 any suggestions?",
+        "What time does the hardware store close today?"
+      ],
+      "expected_fact": "The user loves mellow instrumental jazz (and dislikes heavy metal), so music suggestions for the user should lean toward jazz/relaxed instrumental."
+    },
+    {
+      "name": "coffee_decaf_after_afternoon",
+      "rationale": "A time-conditional preference. Should surface for afternoon/evening drink asks, but the over-recall guard checks that a MORNING coffee ask does NOT trigger the decaf rule (the constraint only applies after 2pm).",
+      "seed_memories": [
+        {
+          "category": "preferences",
+          "content": "Sensitive to caffeine \u2014 only drinks decaf after 2pm; regular coffee is fine earlier in the day."
+        }
+      ],
+      "should_recall": [
+        "It's 4pm and I want a coffee \u2014 what should I get?",
+        "Order me an afternoon pick-me-up from the cafe.",
+        "I've got an evening study session planned, thinking about a warm drink.",
+        "Should I grab an espresso before my 5pm meeting?",
+        "Making coffee for after dinner tonight \u2014 anything I should keep in mind?"
+      ],
+      "should_not_recall": [
+        "It's 7am \u2014 what's a good first coffee to start the day?",
+        "Remind me to call the dentist at 3."
+      ],
+      "expected_fact": "The user only drinks decaf after 2pm due to caffeine sensitivity, so afternoon/evening coffee suggestions should be decaf (but morning/early-day regular coffee is fine)."
+    },
+    {
+      "name": "dietary_peanut_allergy_severe",
+      "rationale": "A safety-critical dietary constraint that should surface strongly across ordering, snacks, restaurants, groceries, and vetting a product. Over-recall guard uses clearly unrelated intents where flagging the allergy would be noise.",
+      "seed_memories": [
+        {
+          "category": "food",
+          "content": "Has a severe peanut allergy \u2014 must avoid all peanuts and any peanut-derived ingredients."
+        }
+      ],
+      "should_recall": [
+        "Order me pad thai for lunch.",
+        "Pick out some snacks for our road trip on Saturday.",
+        "What's safe for me to get at this bakery?",
+        "Recommend a restaurant for date night this weekend.",
+        "Help me put together a grocery list for the week.",
+        "Is this granola bar okay for me to eat?"
+      ],
+      "should_not_recall": [
+        "What was the final score of last night's game?",
+        "Draft a quick thank-you note to my coworker for covering my shift."
+      ],
+      "expected_fact": "The user has a severe peanut allergy and must avoid all peanuts and peanut-derived ingredients, so food orders/recommendations should be peanut-free and flag peanut risk."
+    },
+    {
+      "name": "music_indie_folk_favorite_artist",
+      "rationale": "A favorite-artist/genre preference applied to concerts while traveling, self-gift ideas, playlists, new releases, and vinyl. Over-recall guard checks that buying music FOR a country-loving relative doesn't pull the user's indie/folk taste or their country dislike.",
+      "seed_memories": [
+        {
+          "category": "music",
+          "content": "Big fan of indie rock and folk; favorite artist is the singer-songwriter Rowan Vale. Not into country music."
+        }
+      ],
+      "should_recall": [
+        "Find me a concert to catch when I'm in Nashville next month.",
+        "I want to treat myself to something music-related for my birthday \u2014 ideas?",
+        "Build me a road-trip playlist for this weekend.",
+        "Any new releases you think I'd like right now?",
+        "Set the vibe for a slow Sunday morning at home.",
+        "Recommend a vinyl record I should pick up."
+      ],
+      "should_not_recall": [
+        "My uncle is a huge country fan \u2014 what album should I get him for his birthday?",
+        "How do I reset my WiFi router?"
+      ],
+      "expected_fact": "The user loves indie rock and folk (favorite artist Rowan Vale) and dislikes country, so music suggestions for the user should lean indie/folk and can feature Rowan Vale."
+    },
+    {
+      "name": "spouse_name_recall",
+      "rationale": "Tests that a seeded spouse name is used to personalize a wide range of intents (gifts, reminders, message drafting, date planning) even when the user only says 'wife'/'partner'/'spouse'. The should_not_recall set proves the model does not slap the spouse's name onto requests about a sister, a dentist, or explicitly-named other people (coworker Riley Chen, friend Sam Diaz).",
+      "seed_memories": [
+        {
+          "category": "people",
+          "content": "The user's spouse (wife) is named Jordan Avery. Their wedding anniversary is in September."
+        }
+      ],
+      "should_recall": [
+        "What should I get my wife for our anniversary this year?",
+        "Help me write a heartfelt birthday card for my wife.",
+        "Remind me to call my partner at 6pm today.",
+        "I want to plan a surprise date night for my spouse \u2014 any ideas?",
+        "Draft a sweet good-morning text I can send my wife.",
+        "My wife has been stressed lately; suggest a small gesture to cheer her up.",
+        "Book a dinner reservation for me and my wife on Friday."
+      ],
+      "should_not_recall": [
+        "Help me write a thank-you note to my coworker Riley Chen.",
+        "What should I get my sister for her birthday?",
+        "Remind me to email my dentist about rescheduling my cleaning.",
+        "Draft a congratulations message for my friend Sam Diaz's promotion."
+      ],
+      "expected_fact": "The user's spouse (wife) is named Jordan Avery."
+    },
+    {
+      "name": "childrens_names_recall",
+      "rationale": "Tests recall of two seeded kids' names (with genders) across indirect references like 'my youngest', 'my oldest', 'my son', 'my kids'. Guards against attaching the children's names to requests about a nephew, a friend's baby, the user's mom, or a colleague (named Jordan Avery as a distractor).",
+      "seed_memories": [
+        {
+          "category": "family",
+          "content": "The user has two children: a son named Micah (age 8) and a daughter named Nora (age 5)."
+        }
+      ],
+      "should_recall": [
+        "I need to pack lunches for my kids tomorrow \u2014 any healthy ideas?",
+        "Help me plan a birthday party for my youngest.",
+        "What are some good bedtime stories for my children?",
+        "My oldest has a science project due \u2014 can you help me brainstorm topics?",
+        "Write a short note excusing my son from school for a dentist appointment.",
+        "Suggest a family movie the kids would enjoy this weekend.",
+        "My daughter is scared of the dark; how can I help her sleep?"
+      ],
+      "should_not_recall": [
+        "What should I get my nephew for his birthday?",
+        "Help me plan a retirement party for my colleague Jordan Avery.",
+        "Draft a birthday message for my mom.",
+        "Suggest a gift for my friend's new baby shower."
+      ],
+      "expected_fact": "The user's children are a son named Micah and a daughter named Nora."
+    },
+    {
+      "name": "dog_name_recall",
+      "rationale": "Tests that a seeded dog name/breed is surfaced for pet-care, shopping, and playful captioning intents phrased only as 'the dog' / 'my dog'. The should_not_recall set is deliberately adversarial: naming a NEW puppy, a cat, a neighbor's dog, and a fish \u2014 none of which should pull 'Biscuit'.",
+      "seed_memories": [
+        {
+          "category": "pets",
+          "content": "The user has a dog named Biscuit, a golden retriever."
+        }
+      ],
+      "should_recall": [
+        "Remind me to take the dog to the vet on Friday.",
+        "What's a good dog-friendly hiking trail near me?",
+        "My dog keeps chewing the furniture \u2014 how do I stop it?",
+        "Suggest a cute Halloween costume for my dog.",
+        "Add dog food and treats to my shopping list.",
+        "Write a funny caption for a photo of my dog at the beach.",
+        "How much exercise does my dog need each day given the breed?"
+      ],
+      "should_not_recall": [
+        "Help me pick a name for a new puppy I'm adopting next month.",
+        "My cat won't use the litter box \u2014 any advice?",
+        "What's a good gift for my neighbor Riley Chen's dog?",
+        "Remind me to refill the goldfish tank this weekend."
+      ],
+      "expected_fact": "The user's dog is named Biscuit and is a golden retriever."
+    },
+    {
+      "name": "cat_name_recall",
+      "rationale": "Tests recall of a seeded cat name across supply orders, health worries, product recommendations, and celebratory posts phrased as 'the cat' / 'my cat'. Over-recall guards cover naming a friend's kitten (named person Sam Diaz), a dog issue, and a coworker's cat gift.",
+      "seed_memories": [
+        {
+          "category": "pets",
+          "content": "The user has a cat named Mochi."
+        }
+      ],
+      "should_recall": [
+        "Order more litter for my cat.",
+        "My cat has been sneezing a lot lately \u2014 should I be worried?",
+        "Recommend a sturdy scratching post for my cat.",
+        "Write a cute post celebrating my cat's adoption anniversary.",
+        "Which houseplants are toxic to cats? I want to redecorate safely.",
+        "Set a reminder to give the cat her medication at 8am daily.",
+        "My cat won't stop meowing at night \u2014 what could be causing it?"
+      ],
+      "should_not_recall": [
+        "Help me pick a name for the kitten my friend Sam Diaz just adopted.",
+        "My dog keeps barking at strangers \u2014 how do I train that out?",
+        "What's a nice cat-themed gift for my coworker who loves cats?"
+      ],
+      "expected_fact": "The user's cat is named Mochi."
+    },
+    {
+      "name": "sibling_name_recall",
+      "rationale": "Tests recall of a younger brother's name and city across calls, gifts, travel planning, and congratulatory messages phrased as 'my brother' / 'my sibling' / 'my little brother'. Distractors reference a sister, a brother-in-law, the user's mom, and a friend (Riley Chen) so the brother's name is not over-applied.",
+      "seed_memories": [
+        {
+          "category": "family",
+          "content": "The user has a younger brother named Elliot Park who lives in Denver."
+        }
+      ],
+      "should_recall": [
+        "Remind me to call my brother this weekend.",
+        "What's a good birthday gift for my little brother?",
+        "Help me plan a weekend trip to visit my brother.",
+        "Draft a text to my brother about Thanksgiving plans.",
+        "My brother just got a new job \u2014 help me write a congrats message.",
+        "I want to send my sibling something nice for the holidays; any ideas?",
+        "What's the weather like where my brother lives \u2014 I'm shipping him a package."
+      ],
+      "should_not_recall": [
+        "What should I get my sister for her graduation?",
+        "Draft a text to my brother-in-law about the game this weekend.",
+        "Remind me to call my mom on Sunday afternoon.",
+        "Help me write a congrats note for my friend Riley Chen's new job."
+      ],
+      "expected_fact": "The user's younger brother is named Elliot Park and he lives in Denver."
+    },
+    {
+      "name": "mother_name_and_allergy_recall",
+      "rationale": "Tests recall of a parent's name plus a safety-relevant detail (peanut allergy) across cooking, card-writing, gifts, and restaurant recommendations phrased as 'my mom' / 'my mother'. Over-recall guards use in-laws, grandmother, dad, and wife so the mother's name/allergy isn't mistakenly applied to other relatives.",
+      "seed_memories": [
+        {
+          "category": "family",
+          "content": "The user's mother is named Carol Nguyen, and she has a peanut allergy."
+        }
+      ],
+      "should_recall": [
+        "I'm cooking dinner for my mom this weekend \u2014 suggest a menu.",
+        "Help me write a Mother's Day card.",
+        "Remind me to call my mom on her birthday next month.",
+        "What's a thoughtful gift idea for my mother?",
+        "My mom is visiting \u2014 recommend a couple of allergy-friendly restaurants.",
+        "Draft a heartfelt message thanking my mom for everything.",
+        "I'm baking cookies to bring to my mom \u2014 what recipe should I avoid?"
+      ],
+      "should_not_recall": [
+        "What should I make for dinner for my in-laws this weekend?",
+        "Help me write a card for my grandmother's 90th birthday.",
+        "Suggest a Father's Day gift for my dad.",
+        "Recommend a restaurant for date night with my wife."
+      ],
+      "expected_fact": "The user's mother is named Carol Nguyen and she has a peanut allergy."
+    },
+    {
+      "name": "home_city_weather_and_local_info",
+      "rationale": "Home city is the classic implicit-location fact: users ask weather/local questions without naming a city, expecting the assistant to fill in their home city. The should_not_recall cases cover an explicitly named different city (travel) and pure trivia where the home city is irrelevant.",
+      "seed_memories": [
+        {
+          "category": "location",
+          "content": "User lives in Portland, Oregon."
+        }
+      ],
+      "should_recall": [
+        "What's the weather looking like today?",
+        "Do I need an umbrella tomorrow morning?",
+        "Is it going to be cold this weekend?",
+        "Should I grab a jacket before I head out?",
+        "When's sunset tonight?",
+        "Any air quality or pollen warnings I should know about right now?",
+        "What's the forecast for my area over the next few days?",
+        "Are there any local events happening near me this Saturday?"
+      ],
+      "should_not_recall": [
+        "What's the weather like in Chicago this weekend? I'm flying out for a conference.",
+        "How do I make coffee with a French press?",
+        "What's the capital of Oregon?",
+        "Convert 30 degrees Celsius to Fahrenheit for me."
+      ],
+      "expected_fact": "The user's home location is Portland, Oregon, so implicit weather/local queries should be answered for Portland."
+    },
+    {
+      "name": "weekly_gym_routine_scheduling_conflicts",
+      "rationale": "A recurring workout block should inform scheduling (flag conflicts), reminders (prep the night before), and 'what's my morning' questions. should_not_recall covers unrelated errands and generic fitness trivia that don't touch the schedule.",
+      "seed_memories": [
+        {
+          "category": "routine",
+          "content": "User goes to the gym every Monday, Wednesday, and Friday at 6am."
+        }
+      ],
+      "should_recall": [
+        "Remind me to pack my gym bag tonight.",
+        "Set an alarm for my usual workout tomorrow.",
+        "Can you book a dentist appointment for 6am this Friday?",
+        "Do I have anything early on Wednesday?",
+        "Schedule a 6:30am breakfast meeting for Monday.",
+        "What does my Monday morning look like?",
+        "When do I normally work out?",
+        "Add a recurring reminder to refill my water bottle before I leave in the mornings."
+      ],
+      "should_not_recall": [
+        "What time is my flight on Saturday?",
+        "Remind me to call the plumber this afternoon.",
+        "How many calories are in a banana?",
+        "What's a good stretch for lower back pain?"
+      ],
+      "expected_fact": "The user works out at the gym on Monday, Wednesday, and Friday at 6am, and scheduling/reminders should account for that recurring block."
+    },
+    {
+      "name": "hybrid_work_from_home_schedule",
+      "rationale": "The WFH/in-office split drives whether commute-dependent tasks and in-person meetings are feasible on a given day. should_not_recall separates this routine from other facts (weather, general how-tos) so the model doesn't over-apply it.",
+      "seed_memories": [
+        {
+          "category": "routine",
+          "content": "User works from home on Mondays and Fridays, and goes into the office Tuesday through Thursday."
+        }
+      ],
+      "should_recall": [
+        "Can I take a 9am video call from home on Monday?",
+        "Book me a lunch downtown near the office on Wednesday.",
+        "Schedule the plumber for a day I'll be home.",
+        "Remind me to grab my office badge before I leave tomorrow.",
+        "Am I commuting on Thursday?",
+        "Set up a dog walker for the days I'm not around.",
+        "Which days this week am I not going into the office?",
+        "Find me a coffee shop to work from on Friday."
+      ],
+      "should_not_recall": [
+        "What's the weather going to be on Friday?",
+        "How do I set an out-of-office auto-reply in Gmail?",
+        "What are the federal holidays this year?",
+        "Remind me to water the plants tonight."
+      ],
+      "expected_fact": "The user works from home Mondays and Fridays and is in the office Tuesday through Thursday, so commute- and location-dependent scheduling should follow that pattern."
+    },
+    {
+      "name": "home_timezone_scheduling_and_conversion",
+      "rationale": "Knowing the user's timezone is essential for 'what time works for me' and relative time conversions. should_not_recall covers absolute time questions about other places and generic timezone trivia that don't anchor to the user. Trimmed two weak should_recall utterances that resolve to device-local time and don't genuinely require recalling the timezone.",
+      "seed_memories": [
+        {
+          "category": "location",
+          "content": "User lives in Austin, Texas and is on Central Time."
+        }
+      ],
+      "should_recall": [
+        "I need to set up a call with the London team \u2014 what time works for me?",
+        "If a webinar is at 2pm Eastern, when is that for me?",
+        "Book a 30-minute slot at 4pm my time tomorrow.",
+        "Is an 8am Pacific standup too early for me?",
+        "When it's noon in Tokyo, what time is it here?",
+        "What's a reasonable evening time for me to join a call with folks in Berlin?"
+      ],
+      "should_not_recall": [
+        "What time is it in Sydney right now?",
+        "How many time zones does the United States have?",
+        "Convert 3pm UTC to 24-hour format.",
+        "How do I change the timezone on my laptop?"
+      ],
+      "expected_fact": "The user is in Austin, Texas on Central Time, so their local times and time-zone conversions should be computed relative to Central Time."
+    },
+    {
+      "name": "weekly_sunday_grocery_run",
+      "rationale": "A weekly shopping cadence lets the assistant batch list additions, time reminders, and answer 'what's my Sunday like'. should_not_recall covers an immediate one-off grocery need and unrelated cooking trivia.",
+      "seed_memories": [
+        {
+          "category": "routine",
+          "content": "User does their weekly grocery shopping on Sunday mornings."
+        }
+      ],
+      "should_recall": [
+        "Add oat milk to my list for this weekend.",
+        "Remind me before I head out to shop.",
+        "Do I have anything on my calendar Sunday morning?",
+        "By when should I have this week's meals planned?",
+        "Nudge me to bring my reusable bags before I go.",
+        "Is this a shopping weekend for me?",
+        "What's my usual Sunday morning look like?",
+        "Put eggs and coffee on the list for my next run."
+      ],
+      "should_not_recall": [
+        "Find a grocery store that's open right now \u2014 I ran out of milk.",
+        "What's a good recipe for lasagna?",
+        "How much does a gallon of milk usually cost?",
+        "Remind me to take out the trash tonight."
+      ],
+      "expected_fact": "The user does their weekly grocery shopping on Sunday mornings, so list-building and shopping reminders should center on that recurring trip."
+    },
+    {
+      "name": "recurring_saturday_volunteer_block",
+      "rationale": "A standing Saturday-afternoon commitment should surface as a calendar conflict and inform 'am I free' and prep reminders. should_not_recall covers shelter-related trivia and how-tos that don't touch the user's own schedule.",
+      "seed_memories": [
+        {
+          "category": "routine",
+          "content": "User volunteers at the local animal shelter every Saturday from 1pm to 4pm."
+        }
+      ],
+      "should_recall": [
+        "Can you book a haircut for Saturday at 2pm?",
+        "Am I free Saturday afternoon?",
+        "Remind me when it's time to head out for volunteering.",
+        "Set a recurring reminder to bring dog treats on my volunteer days.",
+        "What do I usually do on Saturday afternoons?",
+        "Find a time Saturday to call my sister.",
+        "Block off my volunteer time on this week's calendar.",
+        "Is there a slot Saturday for a 90-minute lunch?"
+      ],
+      "should_not_recall": [
+        "What are the typical adoption fees at animal shelters?",
+        "How do I go about fostering a kitten?",
+        "Remind me to renew my car registration.",
+        "What breeds are best for apartments?"
+      ],
+      "expected_fact": "The user volunteers at the local animal shelter every Saturday from 1pm to 4pm, so Saturday-afternoon scheduling should treat that block as busy."
+    }
+  ]
+}

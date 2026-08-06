@@ -197,6 +197,34 @@ async def startup_event():
 
     asyncio.create_task(_periodic_cleanup())
 
+    # Safety sweep for wait-and-decide errands: resume any errand stuck 'waiting'
+    # whose linked phone call has finished via a path the immediate finalization
+    # hook doesn't cover (declined/expired) or was missed (restart/transient error).
+    async def _periodic_errand_resume() -> None:
+        # Startup recovery FIRST (once): any workflow left 'running' by the previous
+        # process is an orphan (nothing drives it now) — land it terminal with an
+        # honest card. Race-free because no driver exists yet at boot.
+        try:
+            from app.services.errand_service import recover_orphaned_running_workflows
+            await recover_orphaned_running_workflows()
+        except Exception as e:
+            logger.warning("Startup workflow recovery failed: %s", e)
+        while True:
+            await asyncio.sleep(20)
+            try:
+                from app.services.errand_service import (
+                    resume_due_timer_workflows,
+                    resume_waiting_errands,
+                )
+                from app.services.schedule_service import fire_due_schedules
+                await resume_waiting_errands()       # phone-outcome wakeup + timeout
+                await resume_due_timer_workflows()   # timer wakeup (wait_for steps)
+                await fire_due_schedules()           # scheduled trigger → re-plan + card
+            except Exception as e:
+                logger.warning("Workflow resume sweep failed: %s", e)
+
+    asyncio.create_task(_periodic_errand_resume())
+
     # Include settings router (after service_config is initialized so auth URL resolves)
     from jarvis_settings_client import create_settings_router, create_combined_auth, create_superuser_auth
     from app.services.settings_service import get_settings_service
@@ -229,6 +257,39 @@ async def startup_event():
                 logger.warning("Memory extraction batch failed: %s", e)
 
     asyncio.create_task(_periodic_memory_extraction())
+
+    # Schedule memory embedding sweep. Semantic recall filters `embedding IS NOT NULL`,
+    # but passive extraction (and agent contributions) write memories with a NULL vector
+    # and never embed them — only a MANUAL backfill script did, so passively-learned
+    # facts were effectively unrecallable. This sweep embeds any pending rows off the hot
+    # path (blocking embed call runs in a thread so it never touches the event loop).
+    async def _periodic_memory_embedding() -> None:
+        while True:
+            try:
+                interval = int(settings_service.get("memory.embedding_interval_seconds") or 60)
+            except (TypeError, ValueError):
+                interval = 60
+            await asyncio.sleep(interval)
+            try:
+                enabled = settings_service.get("memory.embedding_enabled")
+                if enabled is False or str(enabled).lower() in ("false", "0", "no"):
+                    continue
+
+                def _embed_pending() -> int:
+                    from app.services.memory_service import MemoryService
+                    db = SessionLocal()
+                    try:
+                        return MemoryService(db).embed_missing(limit=100)
+                    finally:
+                        db.close()
+
+                embedded = await asyncio.to_thread(_embed_pending)
+                if embedded:
+                    logger.info("🔢 Memory embedding sweep embedded %d memories", embedded)
+            except Exception as e:
+                logger.warning("Memory embedding sweep failed: %s", e)
+
+    asyncio.create_task(_periodic_memory_embedding())
 
     # Schedule background characterization synthesis (the evolving per-person view).
     # Off by default; enqueues background-model jobs whose results land via
@@ -406,6 +467,14 @@ async def startup_event():
     from app.services.phone_call_service import register_phone_callbacks
 
     register_phone_callbacks()
+
+    # Errand Runner plan-card Run/Cancel (server plane) — must be registered
+    # before any tap arrives, or the callback dispatch 400s.
+    from app.services.errand_service import register_errand_callbacks
+    from app.services.schedule_service import register_schedule_callbacks
+
+    register_errand_callbacks()
+    register_schedule_callbacks()  # "your scheduled errands" card Cancel taps
 
     async def _periodic_phone_reaper() -> None:
         while True:
@@ -705,6 +774,11 @@ app.include_router(node_tools.router, prefix="/api/v0/mobile", tags=["node-tools
 from app.api import routines
 app.include_router(routines.router, prefix="/api/v0", tags=["routines"])
 
+# Errands: POST /errands → plan a goal into a reviewable plan card (Errand Runner
+# POC). Node-authenticated; reuses the routines transient-routine + dispatch path.
+from app.api import errands
+app.include_router(errands.router, prefix="/api/v0", tags=["errands"])
+
 # Include mobile command-data browser router (JWT auth, MQTT round-trip)
 from app.api import mobile_command_data
 app.include_router(mobile_command_data.router, prefix="/api/v0/mobile", tags=["mobile-command-data"])
@@ -717,6 +791,8 @@ from app.api import mobile_phone_contacts
 app.include_router(mobile_phone_contacts.router, prefix="/api/v0/mobile", tags=["mobile-phone-contacts"])
 from app.api import mobile_call_context
 app.include_router(mobile_call_context.router, prefix="/api/v0/mobile", tags=["mobile-call-context"])
+from app.api import mobile_schedules
+app.include_router(mobile_schedules.router, prefix="/api/v0/mobile", tags=["mobile-schedules"])
 
 # Phone-call session endpoints for the gateway (app-to-app auth). No /api/v0
 # prefix — the gateway's session_client addresses /internal/phone/... directly.
@@ -834,6 +910,12 @@ async def start_conversation(
         client_timezone = None
         if request.node_context:
             client_timezone = request.node_context.get("timezone")
+            # Carry the node's IANA zone INTO the cached node_context so tools that
+            # resolve times off node_context (schedule_errand, run_errand) don't fall
+            # back to UTC. Without this the timezone only reached the prompt path and
+            # scheduling resolved every clock time in UTC. See conversation_cache.set.
+            if client_timezone:
+                node_context["timezone"] = client_timezone
             # Include agent context (e.g., Home Assistant devices) - this is read-only data
             if "agents" in request.node_context:
                 node_context["agents"] = request.node_context["agents"]

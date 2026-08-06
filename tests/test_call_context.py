@@ -111,15 +111,20 @@ PHARMACY = {"key": "pharmacy", "value": "Rite Aid on Main"}  # medical, STATE ti
 
 
 class TestBriefBlock:
-    def test_drops_full_name_and_frames_as_assistant(self):
-        """full_name repeated as a caller detail made the model introduce
-        itself AS the caller ("I'm Alex Berardi", 5/5 on the box). It is
-        already in the disclosure, so it is dropped and the block states the
-        model is the caller's assistant, not the caller."""
+    def test_full_name_is_give_when_asked_not_proactively_stated(self):
+        """full_name as a PROACTIVELY-stated caller detail made the model introduce
+        itself AS the caller ("I'm Alex Berardi", 5/5 on the box). But it's needed
+        for identity-heavy calls (pharmacy authorization), so it's routed to the
+        give-WHEN-ASKED section — present for reactive use, never in the "state
+        freely" group — under the assistant/on-behalf-of framing."""
         fields = parse_call_context(_blob(NAME, ADDRESS, MEMBER_ID))
         block = build_context_block(select_fields(fields, [MEDICAL]))
 
-        assert "Alex B" not in block  # full_name dropped
+        # not in the proactively-stated group (the identity-collapse fix holds)...
+        statable_part = block.split("If the business asks")[0]
+        assert "Alex B" not in statable_part
+        # ...but present in the give-when-asked group (so a pharmacy CAN get it).
+        assert "Alex B" in block
         assert "you are" in block and "assistant" in block
         assert "never claim to be them" in block
 
@@ -143,10 +148,13 @@ class TestBriefBlock:
     def test_no_fields_means_no_scaffolding(self):
         assert build_context_block([]) is None
 
-    def test_a_block_with_only_full_name_disappears(self):
-        """Dropping full_name can empty the block — then there is nothing to
-        render, not empty scaffolding."""
-        assert build_context_block(parse_call_context(_blob(NAME))) is None
+    def test_a_block_with_only_full_name_renders_as_give_when_asked(self):
+        """full_name is no longer dropped — it renders in the give-when-asked group
+        (so an identity-heavy call can still get it), never proactively stated."""
+        block = build_context_block(parse_call_context(_blob(NAME)))
+        assert block is not None
+        assert "Alex B" in block
+        assert "Alex B" not in block.split("If the business asks")[0]  # not proactively stated
 
     def test_only_private_fields_still_renders(self):
         fields = parse_call_context(_blob(MEMBER_ID))

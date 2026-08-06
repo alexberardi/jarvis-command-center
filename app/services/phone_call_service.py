@@ -338,10 +338,22 @@ async def create_call_plan(
     goal: str,
     household_id: str,
     user_id: int | None,
-) -> None:
+    errand_id: str | None = None,
+    errand_step: int | None = None,
+    prior_context: str = "",
+) -> str | None:
     """Background flow behind the tool's spoken ack.
 
     Failures land as an inbox card, never silence (anti-vanishing rule).
+
+    ``errand_id`` / ``errand_step`` link the created session back to a wait-and-decide
+    errand: when this call reaches a terminal state, ``phone_sessions`` resumes the
+    errand (continue on ``done``, fail-fast otherwise). Returns the session id when a
+    plan is drafted — the errand SUSPENDS on it; NOTE a number MISS still drafts a
+    session (with no number) so the user can enter it on the confirm card, so the
+    errand suspends, not fails. Returns None ONLY when the call is refused before any
+    session exists (caps exceeded, or a do-not-call contact), in which case the
+    errand fails that step immediately.
     """
     from app.db import get_session_local
 
@@ -434,13 +446,12 @@ async def create_call_plan(
         details = await apply_availability_envelope(
             household_id=household_id, goal=goal, details=details, user_id=user_id
         )
-        # A delivery/pickup call gets asked for the address constantly. If we
-        # know it, put it IN the brief — the brief is the complete set of
-        # facts the agent may state, so an address absent from it is an
-        # address the model will invent (live 2026-07-19: "123 Main Street").
-        known_address = (contact.address if contact else None) or search_address
-        if known_address and "address" not in details.lower():
-            details = f"{details.rstrip()}\nAddress if asked: {known_address}"
+        # The USER's own delivery/pickup address (when a business asks for it) is loaded
+        # from the caller's stored details by apply_call_context below (an IF_ASKED
+        # field). We deliberately do NOT put the BUSINESS's own address (contact/search
+        # address) in the brief: that made the model recite the pharmacy's own address
+        # back to them (live e0627e97: "The address is 1890 Route 88" — "Yep, that is
+        # our address"). A missing user address should be escalated, not invented.
 
         # The caller's own stored details (name, callback number, and — only
         # for calls in a matching category — things like insurance). General
@@ -453,6 +464,11 @@ async def create_call_plan(
         # card, where the chosen categories are shown and can be corrected
         # before anything dials.
         details = apply_call_context(details, user_id=user_id, categories=None)
+
+        # Context from earlier steps of this errand (what a prior call established, e.g.
+        # the medication a pharmacy confirmed), so a later call isn't starting blind.
+        if prior_context:
+            details = f"{details.rstrip()}\n\n{prior_context}"
 
         ttl_minutes = _int_setting("phone_calls.plan_ttl_minutes", household_id, 20)
         now = datetime.utcnow()
@@ -468,6 +484,8 @@ async def create_call_plan(
             dialed_number=None,
             # Prefer the phonebook's verified address; fall back to search.
             contact_address=(contact.address if contact else None) or search_address,
+            errand_id=errand_id,
+            errand_step=errand_step,
             line_type=line_type,
             state="draft",
             created_at=now,
@@ -540,6 +558,11 @@ async def create_call_plan(
             ),
             metadata=metadata,
         )
+        # The session is drafted + confirm card posted. Return its id so an
+        # errand-linked caller SUSPENDS on it; the call's terminal outcome later
+        # resumes the errand. (Early returns above — caps/DNC/number-miss — return
+        # None: nothing to wait on, so the caller fails the step immediately.)
+        return session_row.id
     except Exception as e:  # noqa: BLE001 — never vanish
         logger.exception("Call plan creation failed")
         _post_card(
@@ -550,6 +573,7 @@ async def create_call_plan(
             body="",
             metadata={"household_id": household_id},
         )
+        return None
     finally:
         db.close()
 

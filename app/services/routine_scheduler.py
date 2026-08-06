@@ -98,7 +98,10 @@ def _mark_fired(db: Session, routine: Routine, schedule: dict, when_utc: datetim
 
 async def run_due_routines(db: Session, now_utc: datetime | None = None) -> int:
     """Fire every scheduled routine that is due. Returns the number fired."""
-    from app.api.routines import execute_routine_on_node  # lazy: avoid import cycle
+    from app.api.routines import (  # lazy: avoid import cycle
+        _notify_routine_complete,
+        execute_routine_on_node,
+    )
 
     now_utc = now_utc or datetime.now(timezone.utc)
     fired = 0
@@ -145,11 +148,19 @@ async def run_due_routines(db: Session, now_utc: datetime | None = None) -> int:
                 "Scheduled routine '%s' skipped — target node %s unavailable",
                 routine.slug, node_id,
             )
+            # Don't vanish: a scheduled run that couldn't happen must say so.
+            _notify_routine_complete(
+                routine,
+                routine.household_id,
+                {"status": "failed", "message": None, "error": "the target node was offline"},
+            )
             _mark_fired(db, routine, schedule, now_utc)  # respect cadence, don't pile up
             continue
 
         logger.info("Firing scheduled routine '%s' on %s", routine.slug, node_id)
-        await execute_routine_on_node(db, routine.household_id, routine, node_id, "scheduled")
+        await execute_routine_on_node(
+            db, routine.household_id, routine, node_id, "scheduled", notify_on_complete=True
+        )
         _mark_fired(db, routine, schedule, now_utc)
         fired += 1
 

@@ -164,37 +164,34 @@ def flatten_date_context(nested_context: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def parse_time_string(time_str: str) -> Tuple[int, int]:
-    """
-    Parse a time string like "9am", "3pm", "9_30am", "3_45pm".
+    """Parse a time string to (hour, minute) in 24-hour form. Tolerant of the shapes the
+    model / STT actually produce — "9am", "3pm", "9_30am", "3_45pm", "7:30pm", "7.30pm",
+    and separator-less "730pm" / "1230pm" / "1930". ALWAYS returns a valid time; anything
+    unparseable or out of range → (0, 0), so a caller's ``dt.replace(hour=...)`` never
+    raises "hour must be in 0..23" (live bug: "730pm" gave hour=730)."""
+    s = time_str.strip().lower()
+    meridiem: Optional[str] = None
+    if s.endswith(("am", "pm")):
+        meridiem = s[-2:]
+        s = s[:-2].strip("_ ")
+    s = s.replace(".", "_").replace(":", "_")
 
-    Args:
-        time_str: The time string to parse
+    if "_" in s:  # H_MM (9_30, 19_30)
+        parts = s.split("_")
+        hour = int(parts[0]) if parts[0].isdigit() else 0
+        minute = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    elif s.isdigit():
+        hour, minute = (int(s[:-2]), int(s[-2:])) if len(s) >= 3 else (int(s), 0)  # 730 -> 7:30
+    else:
+        return 0, 0
 
-    Returns:
-        Tuple of (hour, minute) in 24-hour format
-    """
-    # Try format with minutes: 9_30am, 3_45pm
-    match = re.match(r"(\d+)_(\d+)(am|pm)", time_str)
-    if match:
-        hour = int(match.group(1))
-        minute = int(match.group(2))
-        if match.group(3) == "pm" and hour != 12:
-            hour += 12
-        elif match.group(3) == "am" and hour == 12:
-            hour = 0
-        return hour, minute
-
-    # Try format without minutes: 9am, 3pm
-    match = re.match(r"(\d+)(am|pm)", time_str)
-    if match:
-        hour = int(match.group(1))
-        if match.group(2) == "pm" and hour != 12:
-            hour += 12
-        elif match.group(2) == "am" and hour == 12:
-            hour = 0
-        return hour, 0
-
-    return 0, 0
+    if meridiem == "pm" and hour != 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return 0, 0
+    return hour, minute
 
 
 def apply_time_modifier(base_datetime: str, modifier: str) -> Optional[str]:

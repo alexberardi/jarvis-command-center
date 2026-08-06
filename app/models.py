@@ -945,6 +945,10 @@ class PhoneCallSession(Base):
     # Address discovered during resolution (web search); carried to the
     # phonebook row auto-save writes when the call succeeds.
     contact_address = Column(Text, nullable=True)
+    # When an errand step placed this call, link back so the call's terminal outcome
+    # (done/failed/…) can resume the waiting errand (durable wait-and-decide).
+    errand_id = Column(String(40), nullable=True, index=True)
+    errand_step = Column(Integer, nullable=True)      # index of the errand step that placed it
     goal = Column(Text, nullable=False)               # what the call should achieve
     details = Column(Text, nullable=True)             # the confirmed brief (guardrail boundary)
     constraints = Column(Text, nullable=True)         # constraint envelope (P2)
@@ -995,3 +999,140 @@ class PhoneContact(Base):
     __table_args__ = (
         UniqueConstraint('household_id', 'normalized_name', name='uq_phone_contact_household_name'),
     )
+
+
+class ErrandPlan(Base):
+    """A drafted, reviewable errand plan (Errand Runner POC — errand-runner PRD §2-§3).
+
+    "LLM proposes, card disposes": the background planner drafts routine-shaped
+    steps from a natural-language goal, we persist them here as a DRAFT, and the
+    plan card is the trust checkpoint — nothing runs until the user taps Run. CC
+    owns this row exclusively; the node holds no errand state (PRD §2.4). The
+    lifecycle mirrors the phone-call state machine (draft → confirmed → running →
+    done | failed, or cancelled/expired), with `transition()` semantics owned by
+    the callback layer rather than the DB.
+
+    JSON-bearing columns are Text (project convention — see Routine.steps):
+    - steps: JSON array of node-native {command, args:{k:v}, label} dicts. This IS
+      the plan — the errand executor (errand_executor.execute_errand) dispatches
+      each step to its plane at Run time (node command → the node over MQTT; server
+      tool → in-process). Produced by errand_planner.plan_errand(); the planner
+      validates every command against its menu, so hallucinated steps never land here.
+
+    `node_id` is the target node for the plan's NODE-command steps (server-tool
+    steps run in CC). `revision` backs the plan card's stale-approval guard: an
+    approve callback carrying an old revision is rejected, exactly like the phone
+    card refuses a non-draft session.
+    """
+    __tablename__ = 'errand_plans'
+
+    id = Column(String(40), primary_key=True, default=lambda: f"pl_{uuid4().hex}")
+    household_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True)          # initiating speaker; completion-notify target
+    node_id = Column(String, nullable=True)           # target node for the plan's node-command steps
+    goal = Column(Text, nullable=False)               # the user's natural-language errand goal
+    summary = Column(Text, nullable=True)             # planner's one-line plain-English plan
+    steps = Column(Text, nullable=False, default="[]")  # JSON array of node-native steps — the plan itself
+    routine_slug = Column(String(255), nullable=True)   # vestigial: no transient routine since per-step dispatch (unused)
+    inbox_item_id = Column(String(64), nullable=True)   # the plan card's inbox item — updated in place on revise
+    state = Column(String(16), nullable=False, default="draft", index=True)  # draft|running|waiting|done|partial|failed|timeout|cancelled|expired
+    revision = Column(Integer, nullable=False, default=1)  # bumps on edit; stale-approval guard
+    # Durable wait-and-decide execution: when a step places a phone call the errand
+    # SUSPENDS (state="waiting") until the call finishes, then resumes from `cursor`.
+    cursor = Column(Integer, nullable=False, default=0)          # next step index to run on resume
+    results_json = Column(Text, nullable=False, default="[]")    # accumulated per-step outcomes across suspends
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    confirmed_at = Column(DateTime, nullable=True)    # when the user tapped Run
+    expires_at = Column(DateTime, nullable=True)      # draft TTL
+    # The run/instance split (errand-runner PRD §2.5): once the user taps Run, the
+    # DRAFT (this row) spawns a Workflow RUN and links to it here; the run's
+    # execution state (running/waiting/done/…) lives on the Workflow, not here. This
+    # is what lets ONE definition drive MANY runs (scheduling fast-follow). The
+    # `cursor`/`results_json`/running-side `state` values above are vestigial after
+    # the split (kept, not dropped) — the Workflow owns them now.
+    workflow_id = Column(String(40), nullable=True, index=True)  # the run created on Run
+
+
+class Workflow(Base):
+    """A durable workflow RUN / INSTANCE — the engine's unit of execution (errand-
+    runner PRD §2.5-2.6). Extracted from ``ErrandPlan`` in the run/instance split:
+    an ``ErrandPlan`` is the DRAFT/DEFINITION (goal, steps, revision, plan card);
+    a ``Workflow`` is ONE run of a plan. Errands are the first consumer (``kind``),
+    but the table is consumer-agnostic so scheduling (one definition → many runs)
+    and future workflow kinds drop in without re-modeling.
+
+    The engine (``workflow_engine``) owns this row's lifecycle via the ``WorkflowStore``
+    seam: it runs the plan step-by-step, SUSPENDS (``state='waiting'``) on a deferred
+    step (a phone call) until an external signal resumes it, and lands terminal. The
+    recovery/timeout safety sweep operates on THIS table, so every consumer gets
+    restart-durability for free.
+
+    JSON-bearing columns are Text (project convention):
+    - steps: JSON array of node-native {command, args:{k:v}, label} — the plan running.
+    - results_json: accumulated per-step outcomes across suspends (for the summary).
+    """
+    __tablename__ = 'workflows'
+
+    id = Column(String(40), primary_key=True, default=lambda: f"wf_{uuid4().hex}")
+    kind = Column(String(40), nullable=False, index=True)  # "errand" today; selects the consumer
+    household_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True)          # initiating speaker; completion-notify target
+    node_id = Column(String, nullable=True)           # target node for the plan's node-command steps
+    goal = Column(Text, nullable=False, default="")   # the objective, for the completion summary
+    title = Column(Text, nullable=True)               # display label (the plan summary)
+    steps = Column(Text, nullable=False, default="[]")  # JSON array of node-native steps — the plan
+    cursor = Column(Integer, nullable=False, default=0)          # next step index to run on resume
+    results_json = Column(Text, nullable=False, default="[]")    # accumulated per-step outcomes
+    # Bumps on a mid-run replan (a request_replan step splices new steps in).
+    # The change/delta card carries the revision it was posted for, so a tap on
+    # a stale card (one the run already moved past) is rejected — same
+    # stale-guard the draft ErrandPlan uses.
+    revision = Column(Integer, nullable=False, default=1)
+    # The run's live card (plan/delta/status) in the notifications inbox, so an
+    # update posts IN PLACE instead of stacking a second card.
+    inbox_item_id = Column(String, nullable=True)
+    # running | waiting | done | partial | failed | timeout | cancelled
+    state = Column(String(16), nullable=False, default="running", index=True)
+    # When state == 'waiting', which wakeup source will resume it, and (for a timer)
+    # when. ``phone_call`` waits resume on the call's outcome; ``timer`` waits
+    # resume when ``wake_at`` passes (the wait_for step); ``approval`` waits on a
+    # human tapping the mid-run replan card (the request_replan step). Persisted
+    # so a wait survives a restart — the point of a durable engine.
+    waiting_on = Column(String(20), nullable=True)  # phone_call | timer | approval
+    wake_at = Column(DateTime, nullable=True, index=True)  # timer wait: UTC instant to resume
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Schedule(Base):
+    """A durable TRIGGER that fires the plan→card loop on a clock. A schedule is NOT a
+    plan or a run — at ``next_fire_at`` a sweep re-plans ``intent`` against fresh context
+    and posts a plan card the user must approve (design decision: re-plan + RE-CONFIRM
+    each run, so a schedule never acts autonomously). One-shot for now (``recurrence``
+    null); a recurring schedule re-arms ``next_fire_at`` after each fire.
+
+    ``timezone`` is the user's IANA zone — kept so recurrence math (e.g. "every Monday
+    8am") stays correct across DST; ``next_fire_at`` itself is a naive-UTC instant to
+    match ``workflows.wake_at`` and the due sweep. A later ``silent`` mode (per-schedule
+    opt-in, gated by blast-radius) would skip the card for low-risk recurrences.
+    """
+
+    __tablename__ = 'schedules'
+
+    id = Column(String(40), primary_key=True, default=lambda: f"sch_{uuid4().hex}")
+    household_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True)   # who scheduled it / plan-card + notify target
+    node_id = Column(String, nullable=True)    # target node for the planned errand's node steps
+    intent = Column(Text, nullable=False)      # the natural-language goal to re-plan at fire time
+    title = Column(Text, nullable=True)        # display label
+    timezone = Column(String(64), nullable=False, default="UTC")  # IANA zone for recurrence math
+    next_fire_at = Column(DateTime, nullable=False, index=True)    # naive UTC — the due sweep key
+    recurrence = Column(Text, nullable=True)   # JSON recurrence spec; NULL = one-shot (Slice 1)
+    # active | done | cancelled | paused
+    state = Column(String(16), nullable=False, default="active", index=True)
+    last_fired_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

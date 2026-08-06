@@ -87,14 +87,26 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         env_fallback="JARVIS_SMALL_MODEL_MODE",
     ),
     SettingDefinition(
-        key="model.advanced_thinking",
+        key="model.advanced_context",
         category="model",
         value_type="bool",
         default=False,
         description=(
-            "Enable chain-of-thought reasoning and proactive context injection "
-            "(weather, calendar, news). Adds ~2s latency but improves response "
-            "quality for complex queries."
+            "Enable proactive context injection — the background agents' weather, "
+            "calendar, news, and reminder memories are accepted and injected into the "
+            "prompt so the assistant can answer 'how's today looking?' proactively. "
+            "Decoupled from chain-of-thought (see model.include_thinking)."
+        ),
+    ),
+    SettingDefinition(
+        key="model.include_thinking",
+        category="model",
+        value_type="bool",
+        default=False,
+        description=(
+            "Allow the model to emit chain-of-thought (<think>) before answering "
+            "(/think vs /no_think on Qwen3). Improves hard queries but adds significant "
+            "latency (~500 tokens, several seconds), so it defaults off."
         ),
     ),
 
@@ -268,6 +280,20 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         value_type="float",
         default=0.25,
         description="Minimum cosine similarity for agent context vector search (0-1)",
+    ),
+    SettingDefinition(
+        key="ambient_context.enabled",
+        category="memory",
+        value_type="bool",
+        default=False,
+        description=(
+            "Inject an always-on ambient situational block (current time, weather, "
+            "today's calendar) into the CACHED prompt prefix — snapshotted once at "
+            "conversation start — so the assistant can answer 'how's today looking?' "
+            "proactively without a tool call. Opt-in; when on, consider turning "
+            "memory.agent_context_enabled off for this household to avoid double-"
+            "injecting weather/calendar."
+        ),
     ),
 
     # Web search settings

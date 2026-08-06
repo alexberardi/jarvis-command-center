@@ -19,28 +19,46 @@ Given conversation transcripts between Jarvis and a user, extract personal facts
 and habits worth remembering for future conversations.
 
 What TO extract:
-- Names of family members, pets, friends mentioned naturally
+- Names of family members, pets, friends mentioned naturally — capture the name even when it arrives indirectly across the conversation
 - Location preferences (city they check weather for = likely where they live)
-- Food preferences, dietary info
+- Food preferences, dietary info, and allergies
 - Music/entertainment preferences
-- Hobbies, activities, routines
+- Hobbies, activities, and recurring routines
 - Work/schedule patterns
+- Dated commitments the user mentions — appointments, trips, deadlines, visitors, events tied to a day or date ("dentist Friday", "flying to Denver Thursday", "brother staying this week"). Capture these with a short ttl_days so they expire after they pass.
 
 What to SKIP:
-- The specific request itself ("set a timer", "check weather") — those are ephemeral
+- The specific request/command itself ("set a timer", "check the weather", "remind me to…") — those are ephemeral
 - One-time facts with no future value
+- Verification codes, passwords, or other one-time secrets — never store these
 - Information already in the existing memories listed below
 
-Each memory can optionally include "ttl_days" — how long the memory stays relevant:
-- Permanent facts (family names, preferences): omit ttl_days (lasts forever)
+Each memory can optionally include "ttl_days" — how long it stays relevant (choose deliberately):
+- Durable identity facts & preferences (family names, allergies, "likes coffee black"): omit ttl_days (permanent)
 - Recurring habits ("picks up Emma from soccer Tuesdays"): ttl_days: 30
-- Time-bound notes ("has a dentist appointment Friday"): ttl_days: 7
+- Dated one-offs ("dentist appointment Friday", "flight Thursday"): ttl_days: 7
+Do NOT store a transient or administrative event (a one-off meeting, a today-only note) as a permanent fact — give it a short ttl_days, or skip it.
 
 Example — if the user says "Set a timer for 10 minutes, I am grilling steaks for my brother Mike":
 [{"category": "fact", "key": "brother_name", "content": "Has a brother named Mike"}, \
 {"category": "preference", "key": "cooking_style", "content": "Enjoys grilling"}]
 
-Return ONLY a valid JSON array. If nothing worth remembering, return []."""
+Output ONLY the JSON array — no reasoning, no explanation, and no <think> block. If nothing is worth remembering, output []."""
+
+
+def _expires_at_from_ttl(ttl_days: Any) -> datetime | None:
+    """Convert an optional ``ttl_days`` into a naive-UTC expiry ("for how long").
+
+    None/absent → permanent (no expiry). A positive int (or int-like string) → now
+    + that many days. Anything unparseable → permanent — fail SAFE by keeping the
+    memory rather than expiring it instantly.
+    """
+    if ttl_days is None:
+        return None
+    try:
+        return datetime.utcnow() + timedelta(days=int(ttl_days))
+    except (TypeError, ValueError):
+        return None
 
 
 async def run_extraction_batch() -> None:
@@ -121,9 +139,15 @@ async def _enqueue_extraction(
         {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
         {
             "role": "user",
+            # `/no_think` is Qwen3's control token to disable chain-of-thought — the
+            # ONLY reliable way to suppress it. The system prompt's "no <think> block"
+            # text is ignored: extraction jobs were emitting ~1.5k-token reasoning
+            # blocks (~9.5s each) that get stripped later anyway but burn the shared
+            # GPU while live voice turns wait behind them in the queue. Must live in a
+            # USER turn (system-prompt placement is ignored by Qwen3).
             "content": (
                 f"Existing memories for this user:\n{existing_memories}\n\n"
-                f"Recent conversations:\n{transcript_text}"
+                f"Recent conversations:\n{transcript_text}\n\n/no_think"
             ),
         },
     ]
@@ -157,7 +181,10 @@ async def _enqueue_extraction(
             "model": "background",
             "messages": messages,
             "sampling": {
-                "temperature": 0.3,
+                # Greedy: extraction is a structured factual task, and the eval showed
+                # temp 0.3 swung the pass rate 56–72% run-to-run while temp 0 was stable
+                # at ~67%. Consistency matters more than sampling diversity here.
+                "temperature": 0.0,
             },
         },
         "callback": callback,
@@ -223,17 +250,34 @@ async def handle_extraction_callback(payload: dict[str, Any]) -> None:
 
         if memories:
             memory_svc = MemoryService(db)
-            for mem in memories:
-                # Calculate expires_at from optional ttl_days
-                expires_at = None
-                ttl_days = mem.get("ttl_days")
-                if ttl_days is not None:
-                    try:
-                        expires_at = datetime.utcnow() + timedelta(days=int(ttl_days))
-                    except (TypeError, ValueError):
-                        pass
+            # Embed the extracted facts up front so we can (a) SKIP near-duplicates of
+            # the user's existing memories before creating a new row — the root cause of
+            # the duplicate pile-up, since the extractor emits the same fact under
+            # different keys — and (b) store the vector immediately so recall works and
+            # the NEXT extraction dedups against it. Best-effort: if embedding is
+            # unavailable, fall back to a plain save (the periodic sweep embeds later).
+            from app.core.llm_proxy_client import LLMProxyClient
+            try:
+                vectors = LLMProxyClient().create_embeddings_sync([m["content"] for m in memories])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Extraction dedup embed failed, saving without dedup: %s", e)
+                vectors = [None] * len(memories)
 
-                memory_svc.save_memory(
+            saved_count = skipped = 0
+            for mem, vec in zip(memories, vectors):
+                expires_at = _expires_at_from_ttl(mem.get("ttl_days"))
+
+                if vec:
+                    dup = memory_svc.check_content_similarity(
+                        household_id, vec, threshold=0.9, user_id=user_id
+                    )
+                    if dup is not None:
+                        skipped += 1
+                        logger.info("Skipping near-duplicate memory (~#%s): %r",
+                                    dup.id, mem["content"][:60])
+                        continue
+
+                saved = memory_svc.save_memory(
                     user_id=user_id,
                     household_id=household_id,
                     content=mem["content"],
@@ -242,9 +286,15 @@ async def handle_extraction_callback(payload: dict[str, Any]) -> None:
                     source="passive",
                     expires_at=expires_at,
                 )
+                saved_count += 1
+                if vec:
+                    try:
+                        memory_svc.update_embedding(saved.id, vec)
+                    except Exception:  # noqa: BLE001
+                        pass  # the periodic sweep will embed it
             logger.info(
-                "Extracted %d memories for user %d (job %s)",
-                len(memories), user_id, job_id,
+                "Extracted %d memories for user %d (job %s): %d saved, %d deduped",
+                len(memories), user_id, job_id, saved_count, skipped,
             )
         else:
             logger.info("No new memories extracted for user %d (job %s)", user_id, job_id)
@@ -265,6 +315,13 @@ def _parse_extraction_response(content: str) -> list[dict[str, str]]:
 
     # Strip <think> blocks (Qwen3 chain-of-thought)
     cleaned = re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
+
+    # A TRUNCATED <think> (opened, never closed) leaves reasoning text with no usable
+    # JSON — salvage by dropping everything before the first array bracket so a partial
+    # response that still reached the JSON can parse.
+    if "<think>" in cleaned:
+        start = cleaned.find("[")
+        cleaned = cleaned[start:] if start != -1 else ""
 
     # Strip markdown code fences
     cleaned = re.sub(r"```(?:json)?\s*\n?", "", cleaned).strip()

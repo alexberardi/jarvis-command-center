@@ -24,10 +24,9 @@ class IJarvisPromptProvider(ABC):
     app/core/prompt_providers/ and matching by the `name` property.
     """
 
-    # Set by ConversationHandler from the model.advanced_thinking setting.
-    # Providers that support thinking mode use this to decide /think vs
-    # /no_think suffix and whether to include agent context.
-    advanced_thinking: bool = False
+    # Set by ConversationHandler from the model.include_thinking setting.
+    # Providers that support thinking mode use this to decide /think vs /no_think.
+    include_thinking: bool = False
 
     # ── Shared context builders ──────────────────────────────────────
     # Room and user context are automatically extracted from node_context
@@ -60,6 +59,7 @@ class IJarvisPromptProvider(ABC):
             </personality>
         """
         from app.core.prompt_providers.shared.core_rules import (
+            build_ambient_context_block,
             build_identity_header,
             build_personality_block,
         )
@@ -72,6 +72,13 @@ class IJarvisPromptProvider(ABC):
         personality = build_personality_block(ctx.get("household_persona", ""))
         if personality:
             header = f"{header}\n\n{personality}"
+
+        # Household ambient situational snapshot (time/weather/calendar), frozen at
+        # warmup so it rides the cached prefix byte-stable. Household-wide → speaker-
+        # agnostic, safe here. Empty → header byte-identical to pre-feature.
+        ambient = build_ambient_context_block(ctx.get("ambient_context", ""))
+        if ambient:
+            header = f"{header}\n\n{ambient}"
         return header
 
     def build_speaker_context(self, node_context: Dict[str, Any]) -> str:

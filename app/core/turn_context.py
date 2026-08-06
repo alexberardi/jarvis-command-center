@@ -143,11 +143,19 @@ def _wake_hint(wake_confidence: float | None) -> str:
         else ""
     )
     return (
+        # "answer DIRECTLY from your User Profile … ONLY call recall when NOT
+        # already in your profile" — paired with the build_speaker_block change,
+        # this stops the model firing a redundant `recall` round-trip for a fact
+        # that's already in the injected profile (0/6 recall in a 12-tool A/B vs
+        # ~50% with the old "call recall — do not go silent" phrasing). The
+        # redundant recall doubled latency (~2.2s prefill/call on the cacheless 9B).
         f"[turn context: fresh wake — the user said your wake word{scored}. "
         f"This turn is addressed to you: answer it or run the tool it calls "
-        f"for. If it asks about the speaker's own life and you don't see the "
-        f"fact, call recall — do not go silent. Reserve <not_for_me/> for "
-        f"STT artifacts or speech explicitly aimed at another person.]"
+        f"for. If it asks about the speaker's own life, answer DIRECTLY from "
+        f"your User Profile when the fact is listed there; ONLY call recall when "
+        f"the fact is NOT already in your profile — never go silent. Reserve "
+        f"<not_for_me/> for STT artifacts or speech explicitly aimed at another "
+        f"person.]"
     )
 
 

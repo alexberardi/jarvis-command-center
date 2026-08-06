@@ -6,9 +6,15 @@ a given voice command.  Used during conversation processing to inject
 a "Current context" section into the LLM prompt.
 
 Retrieval strategy:
-1. Always include the latest from priority categories (weather, calendar)
-2. Fill remaining slots with vector-search results from other categories
-3. Fallback to word-overlap substring search if embedding fails
+1. Vector-search agent memories for ones that match the user's query
+2. Fallback to word-overlap substring search if embedding fails
+
+NOTE: this path used to FORCE the latest weather + calendar into every turn.
+The always-on situational snapshot now lives in the cached-prefix
+``<ambient_context>`` block (``ConversationHandler._assemble_ambient_bundle``),
+so forcing them here too double-injected weather and made the model bring it
+up in unrelated replies. Priority-forcing is disabled; weather/calendar now
+surface here only when the query actually matches them via vector search.
 """
 
 import logging
@@ -21,9 +27,11 @@ from app.services.memory_service import MemoryService
 
 logger = logging.getLogger("uvicorn")
 
-# Categories that are always included (most recent entry per category)
-# regardless of vector similarity — they're universally relevant context.
-PRIORITY_CATEGORIES = ["weather", "calendar"]
+# Previously ["weather", "calendar"] — force-included every turn. Now empty: the
+# ambient_context block owns the always-on situational snapshot, so this per-turn
+# path stays purely query-relevant (see module docstring). Kept as a list so the
+# vector-search exclude filter (exclude_categories=PRIORITY_CATEGORIES) is a no-op.
+PRIORITY_CATEGORIES: list[str] = []
 
 
 class AgentContextService:
@@ -45,7 +53,7 @@ class AgentContextService:
         Always includes the latest weather/calendar context, then fills
         remaining slots with vector-search results from other categories.
 
-        Gated behind ``model.advanced_thinking`` — returns empty when
+        Gated behind ``model.advanced_context`` — returns empty when
         disabled so vector search and embedding queries are skipped.
 
         Args:
@@ -64,7 +72,7 @@ class AgentContextService:
             from app.services.settings_service import get_settings_service
 
             settings = get_settings_service()
-            val = settings.get("model.advanced_thinking", household_id=household_id)
+            val = settings.get("model.advanced_context", household_id=household_id)
             if val is not None and str(val).lower() in ("false", "0"):
                 return ""
         except Exception:

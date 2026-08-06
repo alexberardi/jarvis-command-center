@@ -289,8 +289,17 @@ def build_speaker_block(speaker_name: str, user_memories: str = "") -> str:
     if user_memories:
         prefix = "\n\n" if block else ""
         block += (
-            f"{prefix}User Profile - If user asks a question about one of these "
-            f"items you must respond with an answer:\n{user_memories}"
+            # The "answer DIRECTLY … do NOT call recall" wording is load-bearing:
+            # with a full 30-tool voice prompt the model treats a profile question
+            # ("what are my dogs named?") as a lookup and fires the `recall` tool —
+            # a redundant 2nd LLM round-trip (~2.2s prefill each on the cacheless 9B,
+            # so ~6s total) since the fact is already listed right here. Telling it
+            # to answer from THIS list and not recall it dropped that to 0/6 in a
+            # realistic 12-tool A/B (paired with the matching turn-hint change).
+            f"{prefix}User Profile — these facts are already in front of you. If the "
+            f"user asks about any of them, answer DIRECTLY from this list. Do NOT "
+            f"call recall (or any other tool) to look up something already shown "
+            f"here:\n{user_memories}"
         )
     return block
 
@@ -316,6 +325,39 @@ def build_personality_block(persona_text: str | None) -> str:
         f"{PERSONA_FRAME}\n"
         f"{persona_text}\n"
         "</personality>"
+    )
+
+
+def build_ambient_context_block(ambient_text: str | None) -> str:
+    """Return the household ``<ambient_context>`` block for the cached identity header.
+
+    A SNAPSHOT of the household's situational context (current time, weather, today's
+    calendar) assembled ONCE at conversation warmup and frozen byte-stable for the whole
+    conversation, so the model can weave it into any reply WITHOUT a tool call. It's
+    household-wide (not per-speaker), so — like room/style/persona — it rides the cached
+    prefix and stays byte-identical across speakers and turns. Injected in
+    :meth:`IJarvisPromptProvider.build_context_header` after the personality block.
+
+    INVARIANT: no live/relative timestamps may reach this string — a value that changes
+    per turn would break the llama.cpp prefix cache (see
+    ``ConversationHandler._assemble_ambient_bundle``, which quantizes the clock). Returns
+    ``""`` for empty input → byte-identical to the pre-feature header (the safe fallback).
+    """
+    ambient_text = (ambient_text or "").strip()
+    if not ambient_text:
+        return ""
+    return (
+        "<ambient_context>\n"
+        "BACKGROUND on the user's day — NOT a to-do list to read out, and NOT something to "
+        "bring up on its own. Mention an item ONLY when the user's request is directly about "
+        "it (how their day looks, the weather itself, their schedule, or a reminder/task "
+        "listed below). For ANYTHING else — a fact about the user, controlling a device, a "
+        "calculation, a joke, a web search, a general question — IGNORE this block entirely; "
+        "do NOT mention the weather or their schedule. When an item genuinely is relevant, "
+        "weave it into one natural line; if it's actionable (a due reminder, a refill), OFFER "
+        "to take care of it. Never invent details that aren't listed here:\n"
+        f"{ambient_text}\n"
+        "</ambient_context>"
     )
 
 

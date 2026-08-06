@@ -305,13 +305,13 @@ def inject_memories(
                 status_code=409, detail="Memory system is disabled for this household"
             )
 
-        # Agent context injection is gated behind model.advanced_thinking.
+        # Agent context injection is gated behind model.advanced_context.
         # When disabled, skip storage entirely to save embedding compute.
-        adv_thinking = settings.get(
-            "model.advanced_thinking", household_id=household_id
+        adv_context = settings.get(
+            "model.advanced_context", household_id=household_id
         )
-        if adv_thinking is not None and str(adv_thinking).lower() in ("false", "0"):
-            logger.info("Inject skipped: model.advanced_thinking is disabled for %s", household_id)
+        if adv_context is not None and str(adv_context).lower() in ("false", "0"):
+            logger.info("Inject skipped: model.advanced_context is disabled for %s", household_id)
             return MemoryInjectResponse(
                 injected=0, updated=0, deduplicated=0, errors=[],
             )
