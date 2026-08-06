@@ -59,7 +59,6 @@ class IJarvisPromptProvider(ABC):
             </personality>
         """
         from app.core.prompt_providers.shared.core_rules import (
-            build_ambient_context_block,
             build_identity_header,
             build_personality_block,
         )
@@ -73,12 +72,16 @@ class IJarvisPromptProvider(ABC):
         if personality:
             header = f"{header}\n\n{personality}"
 
-        # Household ambient situational snapshot (time/weather/calendar), frozen at
-        # warmup so it rides the cached prefix byte-stable. Household-wide → speaker-
-        # agnostic, safe here. Empty → header byte-identical to pre-feature.
-        ambient = build_ambient_context_block(ctx.get("ambient_context", ""))
-        if ambient:
-            header = f"{header}\n\n{ambient}"
+        # Ambient situational context (time/weather/calendar) is DELIBERATELY not
+        # injected here. This header is the byte-stable cached prefix sent at warmup
+        # (messages[0]); the llama.cpp prefix cache is a single household-shared
+        # sequence, and ambient content is situational (it differs between two
+        # separate conversations — clock bucket, weather refresh, today's calendar).
+        # Putting it at the top of the prefix invalidated the cache on every new
+        # conversation → cold ~1.8s warmup re-prefill (prod TTFS 3s→5s regression,
+        # 2026-08-06). It is now injected per-turn as a TRAILING system message after
+        # the cached prefix — exactly like the speaker block — see
+        # ConversationHandler._process_voice_command.
         return header
 
     def build_speaker_context(self, node_context: Dict[str, Any]) -> str:

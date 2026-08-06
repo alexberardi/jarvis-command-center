@@ -1,10 +1,14 @@
-"""Ambient context bundle — the always-on situational snapshot injected into the
-cached prompt prefix.
+"""Ambient context bundle — the always-on situational snapshot injected as a
+TRAILING per-turn system message, kept OUT of the cached warmup prefix.
 
-Guards the two invariants that make it cache-safe: an empty bundle yields an empty
-block (so a household not using it keeps a byte-identical prefix), and the assembled
-snapshot is DETERMINISTIC (time quantized, no live seconds) so it doesn't differ
-turn-to-turn. Weather/calendar come from the household's priority agent memories.
+Guards the invariants that make it cache-safe:
+  - an empty bundle yields an empty block (a household not using it is a no-op);
+  - the assembled snapshot is DETERMINISTIC (time quantized, no live seconds);
+  - it does NOT enter the cached prefix (``build_context_header`` is byte-identical
+    with or without ambient) — putting it at the top of the prefix cold-prefilled
+    the whole prompt on every new conversation (prod TTFS 3s→5s, 2026-08-06);
+  - its block is transient (stripped + rebuilt each turn, never accumulates).
+Weather/calendar come from the household's priority agent memories.
 """
 import re
 from unittest.mock import patch
@@ -86,3 +90,39 @@ class TestAssembleBundle:
         with patch("app.db.get_session_local", side_effect=RuntimeError("db down")):
             out = h._assemble_ambient_bundle("hh-1", "UTC")
         assert out == ""
+
+
+class TestAmbientStaysOutOfCachedPrefix:
+    """The regression guard (prod TTFS 3s→5s, 2026-08-06): ambient is situational,
+    so it must NOT ride the byte-stable warmup prefix — else every new conversation
+    cold-prefills the whole ~9k-token prompt. It now rides a trailing per-turn block.
+    """
+
+    def _provider(self):
+        from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
+
+        class _P(IJarvisPromptProvider):
+            @property
+            def name(self) -> str:
+                return "TestProvider"
+
+            def build_system_prompt(self, node_context, timezone, tools, available_commands=None):
+                return "unused"
+
+        return _P()
+
+    def test_ambient_does_not_change_the_cached_header(self):
+        p = self._provider()
+        base = {"room": "kitchen", "voice_mode": "brief"}
+        with_ambient = {**base, "ambient_context": "As of 3:15 PM.\nWeather: 72°F clear"}
+        # Byte-identical with or without ambient → warmup prefix stays cacheable.
+        assert p.build_context_header(with_ambient) == p.build_context_header(base)
+        assert "<ambient_context>" not in p.build_context_header(with_ambient)
+
+    def test_ambient_block_is_a_transient_per_turn_block(self):
+        from app.core.conversation_handler import _is_transient_system_block
+
+        block = build_ambient_context_block("As of 3:15 PM.\nWeather: 72°F clear")
+        # Stripped + rebuilt each turn (like the speaker block) so it never accumulates.
+        assert _is_transient_system_block({"role": "system", "content": block}) is True
+        assert _is_transient_system_block({"role": "user", "content": block}) is False
