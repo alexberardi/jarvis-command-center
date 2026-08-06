@@ -480,15 +480,35 @@ async def refine_errand_plan(
     return _plan_from_data(data, allowed, summary, _risky_by_cmd(menu))
 
 
+def _compact_result_data(data: Any, cap: int = 320) -> str:
+    """A short string from a step's structured ``data`` payload — node commands return
+    their real result THERE (get_weather's forecast, etc.), not in ``message``, so the
+    cursor-aware replan MUST see it to make an outcome-dependent decision. Skips
+    bookkeeping keys; caps length."""
+    if not isinstance(data, dict):
+        return ""
+    skip = {"success", "error", "actions", "status", "message"}
+    parts: list[str] = []
+    for key, value in data.items():
+        if key in skip:
+            continue
+        parts.append(f"{key}={value if isinstance(value, (str, int, float, bool)) else json.dumps(value)}")
+        if sum(len(p) for p in parts) > cap:
+            break
+    return "; ".join(parts)[:cap]
+
+
 def _summarize_progress(done_steps: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
     """A short "what happened so far" block for the cursor-aware replan prompt, pairing
-    each already-run step with its outcome (message / call wrapup summary / error)."""
+    each already-run step with its outcome. Uses message / call-wrapup summary / the
+    structured ``data`` payload (a node command's real result lives there) / error — so
+    the replan actually sees e.g. the forecast and can branch on it."""
     lines: list[str] = []
     for i, step in enumerate(done_steps):
         label = step.get("label") or step.get("command") or f"step {i + 1}"
         r = results[i] if i < len(results) else {}
-        detail = (r.get("message") or r.get("summary") or r.get("error")
-                  or ("done" if r.get("success") else "no result"))
+        detail = (r.get("message") or r.get("summary") or _compact_result_data(r.get("data"))
+                  or r.get("error") or ("done" if r.get("success") else "no result"))
         lines.append(f"- {label}: {detail}")
     return "\n".join(lines) or "(nothing has run yet)"
 

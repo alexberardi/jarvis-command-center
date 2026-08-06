@@ -315,6 +315,20 @@ def test_replan_from_progress_returns_a_cursor_aware_continuation():
     assert "Rain tomorrow, 90%" in sent and "Check weather" in sent
 
 
+def test_summarize_progress_surfaces_step_data_not_just_done():
+    # A node command returns its real result in `data` (message is null), so the
+    # cursor-aware replan MUST see `data` — else it's told only "done" and can't
+    # branch on the outcome (the live umbrella bug: no forecast → no reminder step).
+    from app.services.errand_planner import _summarize_progress
+
+    done = [{"command": "get_weather", "label": "Check weather"}]
+    results = [{"label": "Check weather", "success": True, "message": None,
+                "data": {"forecast_summary": "Friday: 100% chance of rain"}}]
+    out = _summarize_progress(done, results)
+    assert "100% chance of rain" in out
+    assert out.strip() != "- Check weather: done"
+
+
 def test_replan_from_progress_allows_an_empty_continuation():
     from app.services.errand_planner import replan_from_progress
 
