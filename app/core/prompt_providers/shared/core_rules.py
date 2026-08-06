@@ -328,26 +328,31 @@ def build_personality_block(persona_text: str | None) -> str:
     )
 
 
+AMBIENT_CONTEXT_PREFIX = "<ambient_context>"
+
+
 def build_ambient_context_block(ambient_text: str | None) -> str:
     """Return the household ``<ambient_context>`` block for the cached identity header.
 
     A SNAPSHOT of the household's situational context (current time, weather, today's
-    calendar) assembled ONCE at conversation warmup and frozen byte-stable for the whole
-    conversation, so the model can weave it into any reply WITHOUT a tool call. It's
-    household-wide (not per-speaker), so — like room/style/persona — it rides the cached
-    prefix and stays byte-identical across speakers and turns. Injected in
-    :meth:`IJarvisPromptProvider.build_context_header` after the personality block.
+    calendar) assembled ONCE at conversation warmup and frozen for the conversation, so
+    the model can weave it into any reply WITHOUT a tool call.
 
-    INVARIANT: no live/relative timestamps may reach this string — a value that changes
-    per turn would break the llama.cpp prefix cache (see
-    ``ConversationHandler._assemble_ambient_bundle``, which quantizes the clock). Returns
-    ``""`` for empty input → byte-identical to the pre-feature header (the safe fallback).
+    Injected per-turn as a TRAILING system message AFTER the cached prefix (see
+    ``ConversationHandler._process_voice_command``), NOT into the warmup ``messages[0]``.
+    It used to ride the cached identity header, but ambient content is situational — it
+    differs between two separate conversations (clock bucket, weather refresh, today's
+    calendar) — and the llama.cpp prefix cache is a single household-shared sequence, so
+    sitting at the top of the prefix cold-prefilled the whole ~9k-token prompt on every
+    new conversation (prod TTFS 3s→5s regression, 2026-08-06). As a trailing block its
+    per-conversation variation no longer invalidates the warmed prefix. Returns ``""`` for
+    empty input → nothing is appended (the safe fallback).
     """
     ambient_text = (ambient_text or "").strip()
     if not ambient_text:
         return ""
     return (
-        "<ambient_context>\n"
+        f"{AMBIENT_CONTEXT_PREFIX}\n"
         "BACKGROUND on the user's day — NOT a to-do list to read out, and NOT something to "
         "bring up on its own. Mention an item ONLY when the user's request is directly about "
         "it (how their day looks, the weather itself, their schedule, or a reminder/task "
