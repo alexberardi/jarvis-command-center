@@ -1623,16 +1623,19 @@ class ConversationHandler:
         # generic filler ("Task completed.") — and it shaves the ~2-3s
         # formatting call off the turn. Excluded:
         #   • knowledge-delegation results (answer_question etc.) — they carry
-        #     no message and MUST still hit the LLM;
-        #   • native-tools providers — their cached history must preserve the
-        #     role="tool" message, so reuse the (correct) LLM commit path.
+        #     no message and MUST still hit the LLM.
+        # Native-tools providers ARE included (previously excluded): they skip
+        # the formatting LLM too, but commit the NATIVE history shape below
+        # (preserve the role="tool" messages keyed by tool_call_id) so a
+        # follow-up turn's history stays valid. Excluding them regressed the
+        # move to native (Qwen3.5-9B): every tool command paid a ~0.8s
+        # formatting call that produced no usable prose -> robotic fallback.
         fast_context = "\n".join(
             out if isinstance(out, str) else json.dumps(out)
             for out in (tr.get("output", {}) for tr in tool_results)
         )
         if (
             tool_results
-            and not use_native_continue
             and not self._is_knowledge_delegation(fast_context)
         ):
             fast_parts: List[str] = []
@@ -1660,7 +1663,24 @@ class ConversationHandler:
             if spoken:
                 # Commit the spoken turn to cache so follow-up turns see a
                 # coherent history (mirrors the LLM branch's commit below).
-                committed = [m for m in messages if m.get("role") != "tool"]
+                # Native-tools providers MUST keep the role="tool" messages
+                # (keyed by tool_call_id, appended after the assistant tool_call
+                # already in `messages`) or the next turn's history is invalid;
+                # text-based providers drop them (text-mode shape). This mirrors
+                # the native vs text commit in the LLM path below.
+                if use_native_continue:
+                    committed = list(messages)
+                    for result in tool_results:
+                        _out = result["output"]
+                        if not isinstance(_out, str):
+                            _out = json.dumps(_out)
+                        committed.append({
+                            "role": "tool",
+                            "tool_call_id": result["tool_call_id"],
+                            "content": _out,
+                        })
+                else:
+                    committed = [m for m in messages if m.get("role") != "tool"]
                 committed.append({"role": "assistant", "content": spoken})
                 conversation_cache.update_messages(conversation_id, committed)
                 logger.info(

@@ -883,13 +883,16 @@ class TestStreamingContinueFastPathAndGuard:
             assert not committed[-1]["content"].strip().startswith("{")
 
     @pytest.mark.asyncio
-    async def test_native_provider_skips_fast_path(self):
-        """Native-tools providers must not use the fast-path (their cached
-        history must preserve the role='tool' message) — they fall through to
-        the LLM commit path even when a clean message is present."""
-        rec = _StreamRecorder(["Added eggplant to your list."])
+    async def test_native_provider_fast_path_preserves_tool_message(self):
+        """Native-tools providers NOW use the fast-path too (skip the formatting
+        LLM) — but MUST commit the native history shape, preserving the
+        role='tool' message keyed by tool_call_id so a follow-up turn's history
+        stays valid. Previously excluded, which regressed the move to the
+        native Qwen3.5-9B: every tool command paid a wasted ~0.8s formatting
+        call that produced no usable prose -> robotic fallback."""
+        rec = _StreamRecorder(["should not be used"])
         handler = self._handler()
-        handler.llm_client.chat_completion_stream = rec
+        handler.llm_client.chat_completion_stream = rec  # must NOT be called
         provider = MagicMock()
         provider.supports_native_tools = True
         provider.think_delimiters = ("<think>", "</think>")
@@ -906,7 +909,17 @@ class TestStreamingContinueFastPathAndGuard:
             assert gen is not None
             await self._drain(gen)
 
-        assert rec.called, "native provider must not be fast-pathed"
+        assert not rec.called, "native provider should now be fast-pathed (no formatting LLM)"
+        assert spoken == ["Added eggplant to your shopping list."]
+        mock_cache.update_messages.assert_called_once()
+        committed = mock_cache.update_messages.call_args[0][1]
+        tool_msgs = [m for m in committed if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1 and tool_msgs[0]["tool_call_id"] == "t1", \
+            f"native commit must preserve the role='tool' message: {committed}"
+        assert committed[-1] == {
+            "role": "assistant",
+            "content": "Added eggplant to your shopping list.",
+        }
 
     def test_transient_system_block_identification_and_dedup(self):
         """Per-turn transient system blocks (speaker, router hint, stream
