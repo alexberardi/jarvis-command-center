@@ -742,6 +742,12 @@ class CallbackJob(Base):
     command_name = Column(String(128), nullable=False)
     callback_name = Column(String(128), nullable=False)
     data_json = Column(Text, nullable=True)  # opaque per-callback payload from the inbox item
+    # Stable dedup handle for proposable-action jobs (e.g. "appt:<message_id>").
+    # NULL for ordinary callback jobs. The dispatcher short-circuits a second job
+    # with the same (household_id, idempotency_key) that already completed, so a
+    # double-tap / re-post never runs the target callback twice. (The command
+    # itself must still no-op on a timeout-after-success — see ProposableAction.)
+    idempotency_key = Column(String(255), nullable=True, index=True)
     # Renderer hint chosen by the command at element-creation time.
     # "new_notification" → result endpoint creates an inbox item server-side
     #                      (back-compat default; mobile fire-and-forget).

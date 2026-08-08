@@ -29,6 +29,11 @@ class CommandDefinition(BaseModel):
     critical_rules: Optional[List[str]] = None  # Critical rules that must be followed
     allow_direct_answer: Optional[bool] = None  # If False, must call tool for this command
     antipatterns: Optional[List[CommandAntipattern]] = None  # Anti-patterns for tool selection
+    # Callbacks this command opts in to being proposed as a tap-to-confirm card
+    # by any agent (the proposable-action contract). Opaque passthrough of the
+    # SDK ProposableAction.to_dict() wire form; the capability registry + the
+    # proposable-action dispatcher read it. None/absent = nothing proposable.
+    proposable_actions: Optional[List[Dict[str, Any]]] = None
 
 class VoiceCommandRequest(BaseModel):
     voice_command: str

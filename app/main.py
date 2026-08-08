@@ -476,6 +476,12 @@ async def startup_event():
     register_errand_callbacks()
     register_schedule_callbacks()  # "your scheduled errands" card Cancel taps
 
+    # Proposable actions (server plane): the single generic dispatcher that runs
+    # an agent-proposed command's @callback on the node after a Confirm tap.
+    from app.services.proposable_action_service import register_proposable_action_callbacks
+
+    register_proposable_action_callbacks()
+
     async def _periodic_phone_reaper() -> None:
         while True:
             await asyncio.sleep(30)
