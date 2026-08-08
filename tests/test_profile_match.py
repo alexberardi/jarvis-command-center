@@ -80,6 +80,40 @@ class TestNoMatch:
         assert build_profile_match_hint("Who is Leo?", "You are speaking with Alex.") is None
 
 
+class TestActionVsQuestion:
+    """An utterance that merely MENTIONS a profile entity while asking the
+    assistant to DO something ("I gave Leo his medication") must not be told
+    to answer from the profile — that suppressed the medication tool call in
+    prod 2026-08 (the model spoke a fake "I'll mark it" with tool_calls=0).
+    Questions about a profile fact keep the original strong wording.
+    """
+
+    def test_action_statement_omits_answer_directly(self):
+        hint = build_profile_match_hint("I gave Leo his medication.", PROFILE_BLOCK)
+        assert hint is not None
+        assert "Leo and Groot" in hint            # fact still restated (recency)
+        assert "answer from it directly" not in hint
+        assert "still call" in hint               # tool-calling preserved
+
+    def test_first_person_action_no_period(self):
+        hint = build_profile_match_hint("I fed Leo his dinner", PROFILE_BLOCK)
+        assert hint is not None
+        assert "answer from it directly" not in hint
+
+    def test_question_keeps_answer_directly(self):
+        hint = build_profile_match_hint("Who is Leo?", PROFILE_BLOCK)
+        assert "answer from it directly" in hint
+
+    def test_question_without_mark_still_answers_directly(self):
+        # STT frequently drops the '?'. "who is leo" still reads as a question.
+        hint = build_profile_match_hint("who is leo", PROFILE_BLOCK)
+        assert "answer from it directly" in hint
+
+    def test_info_request_imperative_keeps_answer_directly(self):
+        hint = build_profile_match_hint("Tell me about Kaitlyn", PROFILE_BLOCK)
+        assert "answer from it directly" in hint
+
+
 class TestShape:
     def test_single_bracketed_line(self):
         hint = build_profile_match_hint("Who is Leo?", PROFILE_BLOCK)
