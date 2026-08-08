@@ -61,10 +61,12 @@ ANTI_HALLUCINATION_MANDATE: str = (
     "tool — NEVER fabricate live data (current weather, current scores, "
     "today's news, real-time sensor states) and NEVER pretend to perform "
     "actions you haven't actually performed. Personal facts stored in your "
-    "User Profile are different: those are fair game and you ALWAYS answer "
-    "them directly from memory, regardless of topic — the user's favorite "
-    "team, coffee preference, address, relationships, etc. are facts you "
-    "carry, not live data to look up."
+    "User Profile (favorite team, coffee preference, address, relationships, "
+    "etc.) are facts you carry, not live data to look up: when the user ASKS "
+    "ABOUT one, answer directly from memory. But when the user REPORTS an "
+    "action or asks you to record, change, or perform one, you MUST call the "
+    "matching tool even if the subject also appears in your profile — a stored "
+    "note that something exists is context, not a record of today's action."
 )
 
 FALLBACK_BRIEF_REPLY: str = (
@@ -297,9 +299,11 @@ def build_speaker_block(speaker_name: str, user_memories: str = "") -> str:
             # to answer from THIS list and not recall it dropped that to 0/6 in a
             # realistic 12-tool A/B (paired with the matching turn-hint change).
             f"{prefix}User Profile — these facts are already in front of you. If the "
-            f"user asks about any of them, answer DIRECTLY from this list. Do NOT "
-            f"call recall (or any other tool) to look up something already shown "
-            f"here:\n{user_memories}"
+            f"user ASKS a question about any of them, answer DIRECTLY from this list "
+            f"— do NOT call recall to look those up. This applies ONLY to answering "
+            f"questions about a listed fact: if the user REPORTS doing something, or "
+            f"asks you to record / change / do something, you MUST call the tool that "
+            f"performs it, even when the subject is listed here:\n{user_memories}"
         )
     return block
 
