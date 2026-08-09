@@ -1142,3 +1142,25 @@ class Schedule(Base):
     last_fired_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProposalSuppression(Base):
+    """A user's "never suggest this again" blocklist entry for proposable actions.
+
+    Written by the ``jarvis.proposable_action.suppress`` handler when a user taps
+    "Never suggest this" on a proposable-action card; consulted by the detector
+    agent each run — it deterministically skips a candidate whose ``source_key``
+    matches, and injects ``descriptor`` into its extraction prompt as a negative
+    example so the LLM also skips look-alikes. Scoped per (household, user,
+    command).
+    """
+
+    __tablename__ = "proposal_suppressions"
+
+    id = Column(String(40), primary_key=True, default=lambda: f"sup_{uuid4().hex}")
+    household_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True, index=True)   # whose blocklist this is
+    command = Column(String(128), nullable=False)          # target command, e.g. "add_event"
+    source_key = Column(String(512), nullable=True)        # deterministic hard key (e.g. sender)
+    descriptor = Column(Text, nullable=True)               # semantic example for prompt injection
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

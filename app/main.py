@@ -693,6 +693,13 @@ from app.api import attention as attention_api
 
 app.include_router(attention_api.router, prefix="/api/v0", tags=["attention"])
 
+# Proposal suppressions: the 'never suggest this again' blocklist —
+# node plane (agent reads its signals) + mobile plane (user manages the list).
+from app.api import proposals as proposals_api
+
+app.include_router(proposals_api.node_router, prefix="/api/v0", tags=["proposals"])
+app.include_router(proposals_api.mobile_router, prefix="/api/v0", tags=["proposals"])
+
 # Include ambient-noise calibration router (mobile-triggered, node-fulfilled)
 app.include_router(ambient_noise.router, prefix="/api/v0", tags=["ambient-noise"])
 

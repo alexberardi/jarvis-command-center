@@ -324,8 +324,46 @@ async def _handle_dismiss(ctx: ServerCallbackContext) -> ServerCallbackResult:
     return ServerCallbackResult(success=True)
 
 
+async def _handle_suppress(ctx: ServerCallbackContext) -> ServerCallbackResult:
+    """'Never suggest this' tap — record a blocklist entry for this user.
+
+    Captures the deterministic ``source`` (a hard key, e.g. the sender) and the
+    semantic ``descriptor`` (a negative example for the detector's prompt),
+    scoped to the ``target_command``. The detector agent consults these each run
+    so it stops proposing this — and look-alikes. Nothing is executed.
+    """
+    from app.services.proposal_suppressions import record_suppression
+
+    action_meta = (ctx.data or {}).get("_action", {}) or {}
+    command = action_meta.get("target_command")
+    source = (ctx.data or {}).get("source") or None
+    descriptor = (ctx.data or {}).get("descriptor") or None
+    if not command or (not source and not descriptor):
+        return ServerCallbackResult(success=False, error="nothing to suppress")
+
+    record_suppression(
+        household_id=ctx.household_id,
+        user_id=ctx.user_id,
+        command=command,
+        source_key=source,
+        descriptor=descriptor,
+    )
+    return ServerCallbackResult(
+        success=True,
+        context_data=_inbox(
+            "Won't suggest that again",
+            "You won't get more cards like this one. Manage these in the app.",
+            household_id=ctx.household_id,
+        ),
+    )
+
+
 def register_proposable_action_callbacks() -> None:
-    """Register the single generic dispatcher pair. Called once at startup."""
+    """Register the single generic dispatcher's callbacks. Called once at startup."""
     register_server_callback(COMMAND_NAME, "execute", _handle_execute)
     register_server_callback(COMMAND_NAME, "dismiss", _handle_dismiss)
-    logger.info("Registered proposable-action server callbacks (%s.execute/dismiss)", COMMAND_NAME)
+    register_server_callback(COMMAND_NAME, "suppress", _handle_suppress)
+    logger.info(
+        "Registered proposable-action server callbacks (%s.execute/dismiss/suppress)",
+        COMMAND_NAME,
+    )

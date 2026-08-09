@@ -181,10 +181,41 @@ class TestHandleDismiss:
         assert res.context_data is None
 
 
+class TestHandleSuppress:
+    def test_records_suppression_and_confirms(self):
+        rec = None
+
+        def _fake_record(**kw):
+            nonlocal rec
+            rec = kw
+            return "sup_1"
+
+        data = {
+            "_action": {"target_command": "add_event", "idempotency_key": "appt:1"},
+            "source": "notifications@github.com",
+            "descriptor": "CI/build-failure notification",
+        }
+        with patch("app.services.proposal_suppressions.record_suppression", new=_fake_record):
+            res = asyncio.run(svc._handle_suppress(_ctx(data)))
+        assert res.success is True
+        assert res.context_data["inbox"]["title"] == "Won't suggest that again"
+        assert rec["household_id"] == "hh-1" and rec["user_id"] == 7
+        assert rec["command"] == "add_event"
+        assert rec["source_key"] == "notifications@github.com"
+        assert rec["descriptor"] == "CI/build-failure notification"
+
+    def test_nothing_to_suppress_is_rejected(self):
+        data = {"_action": {"target_command": "add_event"}}  # no source, no descriptor
+        res = asyncio.run(svc._handle_suppress(_ctx(data)))
+        assert res.success is False
+        assert "nothing to suppress" in (res.error or "")
+
+
 class TestRegistration:
-    def test_registers_execute_and_dismiss(self):
+    def test_registers_execute_dismiss_and_suppress(self):
         from app.services.server_callback_registry import get_server_callback
 
         svc.register_proposable_action_callbacks()
         assert get_server_callback("jarvis.proposable_action", "execute") is not None
         assert get_server_callback("jarvis.proposable_action", "dismiss") is not None
+        assert get_server_callback("jarvis.proposable_action", "suppress") is not None
