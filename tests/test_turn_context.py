@@ -39,6 +39,15 @@ class TestWakeMode:
         assert "recall" in hint
         assert "silent" in hint.lower() or "silence" in hint.lower()
 
+    def test_confident_wake_action_report_still_calls_tool(self):
+        # Load-bearing carve-out: the "answer directly from profile" guidance
+        # must NOT suppress the tool on an action report whose subject is a
+        # profile fact ("I gave Leo his medicine" — profile has the Keppra
+        # routine). Verbatim-prompt A/B vs the prod 9B: 31% -> 98% tool calls.
+        hint = build_turn_hint("wake", wake_confidence=0.9)
+        assert "REPORTS or REQUESTS an action" in hint
+        assert "call the tool that does it" in hint
+
     def test_confident_wake_does_not_claim_false_wake(self):
         hint = build_turn_hint("wake", wake_confidence=0.9)
         assert "false wake" not in hint.lower()
