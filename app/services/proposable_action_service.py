@@ -78,8 +78,17 @@ def _first_household_node_id(household_id: str) -> str | None:
 
         db = get_session_local()()
         try:
-            q = db.query(Node).filter(Node.household_id == household_id)
-            node = q.order_by(Node.node_id).first()
+            base = db.query(Node).filter(Node.household_id == household_id)
+            # A card with no explicit node_id must NOT resolve to a long-dead
+            # node (households have many): prefer an active node we've heard from
+            # most recently. Falls back to any node if none are marked active.
+            node = (
+                base.filter(Node.is_active.is_(True), Node.last_seen.isnot(None))
+                .order_by(Node.last_seen.desc())
+                .first()
+            )
+            if node is None:
+                node = base.order_by(Node.last_seen.desc()).first()
             return node.node_id if node else None
         finally:
             db.close()
