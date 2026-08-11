@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.deps import get_db, verify_api_key
+from app.services import capability_registry, proposal_matcher
+from app.services.proposal_card import emit_proposal_card
 from app.services.signal_service import CacheableSignalError, SignalService
 
 logger = logging.getLogger("uvicorn")
@@ -150,25 +152,64 @@ def _emit_directed_proposal(
 ) -> bool:
     """Resolve the named command against the node's advertised proposable actions.
 
-    Returns True if a proposal was emitted, False if the command isn't advertised
-    (refused). The real proposable-card emission is wired with the matcher in
-    Phase 3 — this is the patchable seam the ingress calls.
+    Returns True if a card was emitted, False if the command isn't advertised
+    (refused) or emission failed. On Confirm the card re-validates at the
+    jarvis.proposable_action.execute dispatcher before anything runs on the node.
     """
+    import asyncio
+
     try:
-        import asyncio
-
-        from app.services import capability_registry
-
-        action = asyncio.run(
-            capability_registry.resolve_proposable_action(node_id, command)
-        )
+        if not node_id:
+            # External/app directed signal with no node in scope → the household's
+            # default (active) node defines the command boundary.
+            from app.services.proposable_action_service import _first_household_node_id
+            node_id = _first_household_node_id(household_id)
+        if not node_id:
+            return False  # no node to resolve the command against
+        actions = asyncio.run(capability_registry.list_proposable_actions(node_id))
     except Exception as e:  # noqa: BLE001
         logger.warning("Directed proposal resolve failed for %s: %s", command, e)
         return False
+    # The signal names a command; resolve it to that command's proposable action
+    # (accept "command" → its first proposable action, or explicit "command.callback").
+    action = None
+    if "." in command:
+        _cmd, _cb = command.split(".", 1)
+        action = next((a for a in (actions or [])
+                       if a.get("command") == _cmd and a.get("callback") == _cb), None)
+        command = _cmd
+    else:
+        action = next((a for a in (actions or []) if a.get("command") == command), None)
     if not action:
+        return False  # not advertised by the node → refused, no card
+
+    try:
+        callback = action.get("callback") or command
+        declared = {p.get("name") for p in action.get("params", []) if p.get("name")}
+        idem_param = action.get("idempotency_param")
+        params = {
+            k: v
+            for k, v in (args or {}).items()
+            if k in declared and k != idem_param
+        }
+        idem = proposal_matcher._stable_idempotency_key(
+            {"items": [args or {}]}, command, callback
+        )
+        title = action.get("card_title") or f"Run {command}?"
+        return emit_proposal_card(
+            household_id=household_id,
+            node_id=node_id,
+            command=command,
+            callback=callback,
+            params=params,
+            idempotency_key=idem,
+            card_title=title,
+            summary=title,
+            source=source_key,
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort; never break ingest
+        logger.warning("Directed proposal emit failed for %s: %s", command, e)
         return False
-    logger.info("Directed proposal accepted: command=%s source_key=%s", command, source_key)
-    return True  # Phase 3 posts the card
 
 
 # --- endpoint ---------------------------------------------------------------
