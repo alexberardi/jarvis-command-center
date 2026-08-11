@@ -48,6 +48,15 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         env_fallback="JARVIS_TOOL_CLASSIFIER_MIN_CONFIDENCE",
     ),
 
+    # Signal Bus settings
+    SettingDefinition(
+        key="signals.enabled",
+        category="signals",
+        value_type="bool",
+        default=True,
+        description="Enable the Signal Bus ingress + reactive rendering for this household",
+    ),
+
     # Tool router settings
     # Transcription settings
     SettingDefinition(

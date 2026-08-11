@@ -375,6 +375,25 @@ async def startup_event():
 
     asyncio.create_task(_periodic_memory_cleanup())
 
+    # Schedule expired Signal cleanup (Signal Bus TTL sweep — mirrors memory cleanup)
+    async def _periodic_signal_cleanup() -> None:
+        await asyncio.sleep(90)
+        while True:
+            await asyncio.sleep(1800)  # every 30 min
+            try:
+                from app.services.signal_service import SignalService
+                db = SessionLocal()
+                try:
+                    cleaned = SignalService(db).cleanup_expired()
+                    if cleaned:
+                        logger.info("Cleaned up %d expired signals", cleaned)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("Signal cleanup failed: %s", e)
+
+    asyncio.create_task(_periodic_signal_cleanup())
+
     # Node-update task sweeper — fails any update task that's clearly dead.
     # Two thresholds:
     #   - ANY_STATE_CEILING (created_at): 15 min outer ceiling regardless
@@ -721,6 +740,9 @@ app.include_router(node_mqtt.router, prefix="/api/v0", tags=["node-mqtt"])
 # Include memory CRUD router
 from app.api import memories
 app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
+
+from app.api import signals
+app.include_router(signals.router, prefix="/api/v0", tags=["signals"])
 
 # Mobile-facing memory CRUD (user JWT, role-scoped)
 from app.api import mobile_memories
