@@ -54,35 +54,46 @@ def _build_menu(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return menu
 
 
-def _build_match_prompt(data: dict[str, Any], menu: list[dict[str, Any]]) -> str:
+def _build_situation_prompt(
+    bundle: list[dict[str, Any]], menu: list[dict[str, Any]]
+) -> str:
     menu_text = "\n".join(
         f"- {m['command']}.{m['action']}: {m['description']} | args: {json.dumps(m['args'])}"
         for m in menu
     )
+    items_text = "\n".join(
+        f"#{i}: {json.dumps(item.get('data', {}), default=str)}"
+        for i, item in enumerate(bundle)
+    )
     return (
-        "You route detected data to an available ACTION. Given the DATA and the list of "
-        "ACTIONS, choose the single best action that genuinely helps with this data, or "
-        "NONE if nothing fits. Fill the chosen action's args from the data using the "
-        "user's own values. NEVER invent an action or an arg name not listed.\n\n"
+        "You watch the household SITUATION (a list of current observations) and an "
+        "available ACTION menu. Choose the single best action that genuinely helps "
+        "right now, or NONE if nothing fits. Fill the chosen action's args from the "
+        "observations using the user's own values. Cite the observation indices you "
+        'used in a "sources" list. NEVER invent an action or an arg name not listed.\n\n'
         f"ACTIONS:\n{menu_text}\n\n"
-        f"DATA:\n{json.dumps(data, default=str)}\n\n"
-        'Return JSON: {"matches": [{"command": "<name>", "action": "<name>", "args": {...}}]}. '
+        f"SITUATION:\n{items_text}\n\n"
+        'Return JSON: {"matches": [{"command": "<name>", "action": "<name>", '
+        '"args": {...}, "sources": [<indices>]}]}. '
         "Return an empty matches list if nothing fits. No markdown, no prose."
     )
 
 
-async def match_proposals(
+async def match_situation(
     *,
-    data: dict[str, Any],
+    bundle: list[dict[str, Any]],
     node_id: str,
     llm_client: Any = None,
     fetch: Any = None,
 ) -> list[dict[str, Any]]:
-    """Match ``data`` against ``node_id``'s advertised proposable actions.
+    """Match a BUNDLE of observations against ``node_id``'s advertised proposable
+    actions.
 
-    Returns a list of ``{command, action, args, idempotency_key, spec}`` — each
-    already validated against the declared param schema, with the idempotency
-    key stamped in. Empty when nothing is advertised or nothing fits.
+    Each bundle item is ``{"source_key": <str|None>, "data": {...}}``. Returns a
+    list of ``{command, action, args, idempotency_key, source_keys, spec}`` — each
+    validated against the declared param schema, with the idempotency key stamped
+    in and scoped to ONLY the observations the LLM cited (``source_keys``). Empty
+    when nothing is advertised or nothing fits.
     """
     actions = await list_proposable_actions(node_id, fetch=fetch)
     if not actions:
@@ -97,9 +108,9 @@ async def match_proposals(
     from app.services.errand_planner import _run_planner
 
     try:
-        parsed = await _run_planner(_build_match_prompt(data, menu), llm_client)
+        parsed = await _run_planner(_build_situation_prompt(bundle, menu), llm_client)
     except Exception:  # noqa: BLE001 — a planner failure is "no match", never a crash
-        logger.warning("proposal_matcher: planner call failed", exc_info=True)
+        logger.warning("match_situation: planner call failed", exc_info=True)
         return []
 
     results: list[dict[str, Any]] = []
@@ -107,16 +118,33 @@ async def match_proposals(
         key = (m.get("command"), m.get("action"))
         spec = by_key.get(key)
         if spec is None:
-            logger.info("proposal_matcher: dropping unadvertised match %s", key)
+            logger.info("match_situation: dropping unadvertised match %s", key)
             continue  # hallucinated / not advertised — the anti-invention guard
+
+        raw = m.get("sources")
+        if raw:  # the LLM cited specific observations
+            contributing = [i for i in raw if isinstance(i, int) and 0 <= i < len(bundle)]
+        else:  # none cited → treat every observation as contributing
+            contributing = list(range(len(bundle)))
+        contributing_keys = [
+            bundle[i].get("source_key") for i in contributing if bundle[i].get("source_key")
+        ]
+
+        # Idempotency scoped to ONLY the contributing observations' data: the same
+        # situation proposing the same action collapses to one key, while unrelated
+        # noise elsewhere in the bundle never changes it.
+        idem_key = _stable_idempotency_key(
+            {"items": [bundle[i].get("data", {}) for i in contributing]},
+            spec["command"],
+            spec["callback"],
+        )
         raw_args = dict(m.get("args", {}) or {})
         idem_param = spec.get("idempotency_param")
-        idem_key = _stable_idempotency_key(data, spec["command"], spec["callback"])
         if idem_param:
             raw_args[idem_param] = idem_key  # system-injected, not from the LLM
         ok, args, verr = validate_against_params(raw_args, spec.get("params", []))
         if not ok:
-            logger.info("proposal_matcher: dropping invalid match %s: %s", key, verr)
+            logger.info("match_situation: dropping invalid match %s: %s", key, verr)
             continue
         results.append(
             {
@@ -124,7 +152,26 @@ async def match_proposals(
                 "action": spec["callback"],
                 "args": args,
                 "idempotency_key": idem_key,
+                "source_keys": contributing_keys,
                 "spec": spec,
             }
         )
     return results
+
+
+async def match_proposals(
+    *,
+    data: dict[str, Any],
+    node_id: str,
+    llm_client: Any = None,
+    fetch: Any = None,
+) -> list[dict[str, Any]]:
+    """Single-observation adapter over :func:`match_situation` — the shipped
+    open-mode entry point (one opaque ``data`` dict). Kept so the email→calendar
+    pilot is untouched."""
+    return await match_situation(
+        bundle=[{"source_key": None, "data": data}],
+        node_id=node_id,
+        llm_client=llm_client,
+        fetch=fetch,
+    )
