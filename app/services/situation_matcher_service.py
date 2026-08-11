@@ -102,7 +102,7 @@ def _gather_bundle(household_id: str) -> list[dict[str, Any]]:
                 data = {}
             if s.summary and "summary" not in data:
                 data = {**data, "summary": s.summary}
-            out.append({"source_key": s.source_key, "data": data})
+            out.append({"source_key": s.source_key, "kind": s.kind, "data": data})
         return out
     finally:
         db.close()

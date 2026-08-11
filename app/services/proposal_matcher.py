@@ -53,18 +53,42 @@ def _build_menu(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "action": a["callback"],
                 "description": a.get("card_title") or f"{a['command']} {a['callback']}",
                 "args": args,
+                "listening_signal_types": a.get("listening_signal_types") or [],
             }
         )
     return menu
 
 
+def _render_menu(items: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        f"- {m['command']}.{m['action']}: {m['description']} | args: {json.dumps(m['args'])}"
+        for m in items
+    )
+
+
 def _build_situation_prompt(
     bundle: list[dict[str, Any]], menu: list[dict[str, Any]]
 ) -> str:
-    menu_text = "\n".join(
-        f"- {m['command']}.{m['action']}: {m['description']} | args: {json.dumps(m['args'])}"
-        for m in menu
-    )
+    # Group the menu by which commands are DESIGNED for the signal kinds present
+    # (their declared ``listening_signal_types``) vs the general pool — a precision
+    # hint for the model, never a gate. Kind-less bundles (the match_proposals
+    # adapter) leave everything general, preserving the email pilot's prompt.
+    bundle_kinds = {item.get("kind") for item in bundle if item.get("kind")}
+    designed: list[dict[str, Any]] = []
+    general: list[dict[str, Any]] = []
+    for m in menu:
+        listens = set(m.get("listening_signal_types") or [])
+        (designed if (listens & bundle_kinds) else general).append(m)
+
+    if designed:
+        actions_text = (
+            "ACTIONS designed for the current signals:\n" + _render_menu(designed)
+            + "\n\nOther available actions (general-purpose — use only if genuinely a "
+            "better fit):\n" + _render_menu(general)
+        )
+    else:
+        actions_text = "ACTIONS:\n" + _render_menu(general)
+
     items_text = "\n".join(
         f"#{i}: {json.dumps(item.get('data', {}), default=str)}"
         for i, item in enumerate(bundle)
@@ -72,10 +96,11 @@ def _build_situation_prompt(
     return (
         "You watch the household SITUATION (a list of current observations) and an "
         "available ACTION menu. Choose the single best action that genuinely helps "
-        "right now, or NONE if nothing fits. Fill the chosen action's args from the "
-        "observations using the user's own values. Cite the observation indices you "
-        'used in a "sources" list. NEVER invent an action or an arg name not listed.\n\n'
-        f"ACTIONS:\n{menu_text}\n\n"
+        "right now, or NONE if nothing fits. Prefer an action DESIGNED for the current "
+        "signals when one fits. Fill the chosen action's args from the observations "
+        "using the user's own values. Cite the observation indices you used in a "
+        '"sources" list. NEVER invent an action or an arg name not listed.\n\n'
+        f"{actions_text}\n\n"
         f"SITUATION:\n{items_text}\n\n"
         'Return JSON: {"matches": [{"command": "<name>", "action": "<name>", '
         '"args": {...}, "sources": [<indices>]}]}. '

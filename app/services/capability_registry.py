@@ -80,6 +80,7 @@ async def list_proposable_actions(
     out: list[dict[str, Any]] = []
     for cmd in report.get("available_commands", []) or []:
         name = cmd.get("command_name")
+        listening = cmd.get("listening_signal_types") or []
         for action in cmd.get("proposable_actions", []) or []:
-            out.append({**action, "command": name})
+            out.append({**action, "command": name, "listening_signal_types": listening})
     return out
