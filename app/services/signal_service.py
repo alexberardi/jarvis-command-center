@@ -149,3 +149,37 @@ class SignalService:
                 "cacheable Signal must be quantized/absolute — it may not contain a "
                 "live float, a seconds-precision time, or a relative-time phrase"
             )
+
+
+def record_voice_presence(
+    db: Session,
+    *,
+    household_id: str,
+    user_id: int | None,
+    node_id: str | None,
+    speaker_name: str | None,
+    ttl_seconds: int = 900,
+) -> Signal | None:
+    """Write a ``presence.seen`` Signal from a confidently-resolved voice speaker.
+
+    The cheapest presence producer: someone spoke to a node, so they are here.
+    Returns None for an unresolved speaker (``user_id`` is None) — presence can't
+    be attributed without an identity. UPSERT on ``presence:{user_id}`` means a
+    person is one row that moves between nodes as they are heard.
+    """
+    if user_id is None:
+        return None
+    where = f" at the {node_id} node" if node_id else ""
+    summary = f"{speaker_name or 'Someone'} was recently heard{where}"
+    return SignalService(db).save_signal(
+        kind="presence.seen",
+        source_key=f"presence:{user_id}",
+        household_id=household_id,
+        user_id=user_id,
+        node_id=node_id,
+        subject=f"user:{user_id}",
+        summary=summary,
+        ttl_seconds=ttl_seconds,
+        cacheable=False,
+        source_agent="voice",
+    )

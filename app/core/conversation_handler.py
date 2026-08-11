@@ -30,6 +30,7 @@ from app.core.prompt_providers.shared.core_rules import (
     build_ambient_context_block,
     build_characterization_section,
     render_referenced_items_block,
+    render_signal_block,
 )
 from app.core.transcript_filter import is_stt_noise
 from app.core.tts_text import clean_for_tts
@@ -2781,7 +2782,7 @@ class ConversationHandler:
             lines = [f"As of {clock.strftime('%-I:%M %p')}, {clock.strftime('%A, %b %-d')}."]
 
             from app.db import get_session_local
-            from app.models import UserMemory
+            from app.models import UserMemory, Signal
 
             # Latest non-expired household (user_id IS NULL) memory per category, labeled.
             # Weather + calendar are fed by the node's agents today; reminders arrive once
@@ -2817,6 +2818,18 @@ class ConversationHandler:
                         content = row.content.strip()
                         lines.append(content if content.lower().startswith(label.lower())
                                      else f"{label}: {content}")
+
+                # Signal Bus: append every live household Signal (presence, device
+                # state, external producers) as its summary line. Rides this
+                # trailing ambient snapshot — never the cached prefix.
+                sig_rows = db.query(Signal).filter(
+                    Signal.household_id == household_id,
+                    Signal.is_active == True,  # noqa: E712
+                    (Signal.expires_at.is_(None)) | (Signal.expires_at > utcnow),
+                ).all()
+                sig_text = render_signal_block(sig_rows)
+                if sig_text:
+                    lines.append(sig_text)
             finally:
                 db.close()
 
@@ -3089,6 +3102,33 @@ class ConversationHandler:
             len(memories),
             "yes" if block else "none",
         )
+
+        # Signal Bus (Phase 2): a confident STT speaker at a node is a free
+        # presence observation → write a presence.seen Signal. ONLY the confident
+        # STT id (speaker_user_id), never the sticky session fallback. Gated on
+        # the ambient opt-in (same switch that renders it), best-effort — never
+        # blocks or breaks the turn.
+        if speaker_user_id is not None:
+            _household_id = ctx.get("household_id")
+            if _household_id and self._get_ambient_context_enabled(str(_household_id)):
+                try:
+                    from app.db import get_session_local
+                    from app.services.signal_service import record_voice_presence
+
+                    _pdb = get_session_local()()
+                    try:
+                        record_voice_presence(
+                            _pdb,
+                            household_id=str(_household_id),
+                            user_id=speaker_user_id,
+                            node_id=ctx.get("node_id"),
+                            speaker_name=ctx.get("speaker_name"),
+                        )
+                    finally:
+                        _pdb.close()
+                except Exception as e:  # noqa: BLE001 — presence is best-effort
+                    logger.debug("voice presence emit skipped: %s", e)
+
         return block or None
 
     async def _resolve_speaker_into_context(
