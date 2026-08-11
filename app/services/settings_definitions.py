@@ -332,6 +332,19 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         ),
     ),
     SettingDefinition(
+        key="proposals.proactive_enabled",
+        category="proposals",
+        value_type="bool",
+        default=False,
+        description=(
+            "Enable the PROACTIVE Signal reasoner (situation matcher). When off "
+            "(default), Signal edges never trigger a background reason pass; the "
+            "reactive 'who's home' rendering still works. Requires proposals.enabled "
+            "as well. Runs on the background model, only ever proposes a card. Keep "
+            "off until the offline precision harness clears the model. Fail-closed."
+        ),
+    ),
+    SettingDefinition(
         key="web_scraping.allow_external",
         category="web_search",
         value_type="bool",

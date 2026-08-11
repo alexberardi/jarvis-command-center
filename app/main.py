@@ -501,6 +501,11 @@ async def startup_event():
 
     register_proposable_action_callbacks()
 
+    # Signal Bus proactive reasoner: capture the main loop so a SYNC endpoint
+    # (threadpool, no running loop) can still schedule the debounced reason pass.
+    from app.services.situation_matcher_service import set_main_loop
+    set_main_loop(asyncio.get_running_loop())
+
     async def _periodic_phone_reaper() -> None:
         while True:
             await asyncio.sleep(30)
@@ -1869,6 +1874,26 @@ async def memory_extraction_callback(request: Request):
         await handle_extraction_callback(payload)
     except Exception as e:
         logger.error("Memory extraction callback failed: %s", e, exc_info=True)
+
+    return {"status": "ok"}
+
+
+@v0_router.post("/situation-matcher/callback", name="situation_matcher_callback")
+async def situation_matcher_callback(request: Request):
+    """Receive the background-model queue callback for a proactive situation match."""
+    _verify_callback_auth(request)
+
+    payload = await request.json()
+    logger.info(
+        "Situation matcher callback: job_id=%s status=%s",
+        payload.get("job_id"), payload.get("status"),
+    )
+
+    from app.services.situation_matcher_service import handle_match_callback
+    try:
+        await handle_match_callback(payload)
+    except Exception as e:
+        logger.error("Situation matcher callback failed: %s", e, exc_info=True)
 
     return {"status": "ok"}
 

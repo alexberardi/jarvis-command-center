@@ -13,6 +13,10 @@ registry is dropped, and params are validated against the declared schema
 (`proposable_action_service.validate_against_params`) before anything is
 proposed. The system-injected idempotency key is stamped here, not asked of the
 LLM.
+
+The post-processing loop is factored into ``finalize_situation_matches`` so the
+LIVE path (``match_situation``) and the BACKGROUND proactive path (the situation
+matcher's queue callback) apply identical rules to the LLM's raw output.
 """
 
 from __future__ import annotations
@@ -79,40 +83,21 @@ def _build_situation_prompt(
     )
 
 
-async def match_situation(
-    *,
+def finalize_situation_matches(
+    parsed: dict[str, Any],
     bundle: list[dict[str, Any]],
-    node_id: str,
-    llm_client: Any = None,
-    fetch: Any = None,
+    actions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Match a BUNDLE of observations against ``node_id``'s advertised proposable
-    actions.
+    """Turn a parsed LLM ``{"matches": [...]}`` into validated proposal results.
 
-    Each bundle item is ``{"source_key": <str|None>, "data": {...}}``. Returns a
-    list of ``{command, action, args, idempotency_key, source_keys, spec}`` — each
-    validated against the declared param schema, with the idempotency key stamped
-    in and scoped to ONLY the observations the LLM cited (``source_keys``). Empty
-    when nothing is advertised or nothing fits.
+    Pure (no I/O). Shared by :func:`match_situation` (live) and the proactive
+    queue callback (background) so both apply the same rules: drop matches not in
+    ``actions`` (anti-hallucination), resolve the contributing observation indices
+    (the LLM's cited ``sources``, out-of-range dropped; none cited → all), collect
+    their ``source_keys``, stamp an idempotency key scoped to ONLY the contributing
+    observations' data, and validate the args against the declared schema.
     """
-    actions = await list_proposable_actions(node_id, fetch=fetch)
-    if not actions:
-        return []
     by_key = {(a["command"], a["callback"]): a for a in actions}
-    menu = _build_menu(actions)
-
-    if llm_client is None:
-        from app.core.llm_proxy_client import LLMProxyClient
-
-        llm_client = LLMProxyClient()
-    from app.services.errand_planner import _run_planner
-
-    try:
-        parsed = await _run_planner(_build_situation_prompt(bundle, menu), llm_client)
-    except Exception:  # noqa: BLE001 — a planner failure is "no match", never a crash
-        logger.warning("match_situation: planner call failed", exc_info=True)
-        return []
-
     results: list[dict[str, Any]] = []
     for m in parsed.get("matches", []) or []:
         key = (m.get("command"), m.get("action"))
@@ -157,6 +142,42 @@ async def match_situation(
             }
         )
     return results
+
+
+async def match_situation(
+    *,
+    bundle: list[dict[str, Any]],
+    node_id: str,
+    llm_client: Any = None,
+    fetch: Any = None,
+) -> list[dict[str, Any]]:
+    """Match a BUNDLE of observations against ``node_id``'s advertised proposable
+    actions.
+
+    Each bundle item is ``{"source_key": <str|None>, "data": {...}}``. Returns a
+    list of ``{command, action, args, idempotency_key, source_keys, spec}`` — each
+    validated against the declared param schema, with the idempotency key stamped
+    in and scoped to ONLY the observations the LLM cited (``source_keys``). Empty
+    when nothing is advertised or nothing fits.
+    """
+    actions = await list_proposable_actions(node_id, fetch=fetch)
+    if not actions:
+        return []
+    menu = _build_menu(actions)
+
+    if llm_client is None:
+        from app.core.llm_proxy_client import LLMProxyClient
+
+        llm_client = LLMProxyClient()
+    from app.services.errand_planner import _run_planner
+
+    try:
+        parsed = await _run_planner(_build_situation_prompt(bundle, menu), llm_client)
+    except Exception:  # noqa: BLE001 — a planner failure is "no match", never a crash
+        logger.warning("match_situation: planner call failed", exc_info=True)
+        return []
+
+    return finalize_situation_matches(parsed, bundle, actions)
 
 
 async def match_proposals(

@@ -270,6 +270,16 @@ def post_signal(
             db, household_id, node_id, body.command, body.data, body.signal.source_key
         )
 
+    # Signal Bus: a new/changed Signal is an edge — schedule a debounced proactive
+    # reason pass (fire-and-forget; gated + off-by-default downstream). Adds no
+    # latency to ingest and never raises.
+    try:
+        from app.services.situation_matcher_service import signal_situation_edge
+
+        signal_situation_edge(household_id, node_id)
+    except Exception:  # noqa: BLE001 — edge scheduling is best-effort
+        pass
+
     return SignalPostResponse(
         signal_id=sig.id,
         mode="directed" if body.command else "open",
