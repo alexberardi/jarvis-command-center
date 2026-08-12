@@ -143,6 +143,7 @@ async def _enqueue(
     household_id: str, node_id: str, bundle: list[dict[str, Any]], prompt: str
 ) -> None:
     from app.core.utils.rest_client import post
+    from app.services.proposal_matcher import SITUATION_MATCH_EXTRA_BODY
 
     job_id = f"situation-{uuid.uuid4().hex[:16]}"
     callback: dict[str, str] = {
@@ -172,6 +173,10 @@ async def _enqueue(
             "model": "background",  # <-- off the live voice slot
             "messages": [{"role": "user", "content": prompt}],
             "sampling": {"temperature": 0.0},
+            # Bound the thinking model's reasoning (Qwen3.5 runs away on this prompt).
+            # Parity with the live match_situation path; forwarded to the sidecar by
+            # the model service. Harmless on models/templates that don't use it.
+            **SITUATION_MATCH_EXTRA_BODY,
         },
         "callback": callback,
     }

@@ -31,6 +31,14 @@ from app.services.proposable_action_service import validate_against_params
 
 logger = logging.getLogger("uvicorn")
 
+# Bound the background model's chain-of-thought for situation matching. Qwen3.5
+# exhibits RUNAWAY reasoning on this prompt — it fills any max_tokens budget with
+# reasoning and never emits the answer (measured: 13k chars @3500 tok, 27k @8000,
+# always finish=length + empty content). Passed as a chat-template kwarg the sidecar
+# honors; harmlessly ignored by models/templates that don't use it. The durable fix
+# is serving-side (a reasoning budget on the background slot); this is the CC lever.
+SITUATION_MATCH_EXTRA_BODY: dict[str, Any] = {"chat_template_kwargs": {"enable_thinking": False}}
+
 
 def _stable_idempotency_key(data: dict[str, Any], command: str, action: str) -> str:
     """Deterministic dedup key for an open-mode match, so the same detected data
@@ -96,7 +104,11 @@ def _build_situation_prompt(
     return (
         "You watch the household SITUATION (a list of current observations) and an "
         "available ACTION menu. Choose the single best action that genuinely helps "
-        "right now, or NONE if nothing fits. Prefer an action DESIGNED for the current "
+        "right now, or NONE if nothing fits. Do NOT propose an action that merely "
+        "repeats what an observation says is ALREADY happening or already true (e.g. "
+        "do not propose playing music when music is already playing); an observation "
+        "that is only a status update with nothing to act on is NONE. "
+        "Prefer an action DESIGNED for the current "
         "signals when one fits. Fill the chosen action's args from the observations "
         "using the user's own values. Cite the observation indices you used in a "
         '"sources" list. NEVER invent an action or an arg name not listed.\n\n'
@@ -220,7 +232,11 @@ async def match_situation(
     from app.services.errand_planner import _run_planner
 
     try:
-        parsed = await _run_planner(_build_situation_prompt(bundle, menu), llm_client)
+        parsed = await _run_planner(
+            _build_situation_prompt(bundle, menu),
+            llm_client,
+            extra_body=SITUATION_MATCH_EXTRA_BODY,
+        )
     except Exception:  # noqa: BLE001 — a planner failure is "no match", never a crash
         logger.warning("match_situation: planner call failed", exc_info=True)
         return []

@@ -392,23 +392,34 @@ label into *both* JSON fields, so `finalize_situation_matches` dropped every
 match. Fixed in `proposal_matcher._resolve_match_key` (splits a dotted value onto
 a real advertised key only). Recall **0.14 → 0.57**.
 
-**First baseline (Qwen3.5-9B, sidecar :7799):**
+**Baselines (Qwen3.5-9B, sidecar :7799), two configs measured:**
 
-| metric | value | gate |
-|---|---|---|
-| false-positive (nag) rate | **0.00** (0/11 negatives) | ✓ ≤ 0.05 |
-| precision (of fires) | **1.00** (4/4) | — |
-| recall | **0.57** (4/7) | ✗ ≥ 0.80 |
-| errors | 0 | ✓ |
+| config | recall | false-positive (nag) rate | precision |
+|---|---|---|---|
+| thinking ON (unbounded) | 0.57 (4/7) | **0.00** (0/11) | 1.00 |
+| **thinking OFF + duplication guard** | **0.86** (6/7) | 0.09 (1/11) | 0.86 |
 
-Profile is **safe-but-under-eager** — the model never nags (the feared failure
-mode) but misses ~43% of real appointments. The misses are **Qwen3.5 runaway
-reasoning**: it fills any `max_tokens` budget with `reasoning_content` and never
-emits the answer (`finish=length`, empty content). More headroom is futile;
-`/no_think` in the prompt is not honored by the current sidecar build. **The
-remaining recall fix is model-serving (bound/disable reasoning on the background
-slot), not CC.** Note thinking *helps* the negatives' restraint, so bounding —
-not killing — it is preferable.
+**Why two configs:** with thinking ON, Qwen3.5 exhibits **runaway reasoning** —
+it fills any `max_tokens` budget with `reasoning_content` and never emits the
+answer (`finish=length`, empty; measured 13k chars @3500 tok → 27k @8000), so real
+appointments are missed. `reasoning_budget=0` is **not** honored by this sidecar
+build; only the Qwen chat-template kwarg `enable_thinking:false` bounds it (wired
+through `LLMProxyClient.extra_body` → `match_situation` +
+`SITUATION_MATCH_EXTRA_BODY`; the errand planner keeps thinking). Turning thinking
+OFF lifts recall to 0.86, and a one-line prompt guard ("don't act on an
+already-happening state") removes the music-already-playing nag.
+
+**Residual tradeoff — a real decision, not a bug:** neither config passes the gate.
+Thinking OFF leaves exactly **one** nag: `appt.detected` arriving at a node with
+**no calendar command installed** → the model shoehorns an unrelated `start_timer`
+rather than choosing NONE. Thinking used to catch this; without it, prompt guards
+don't (an added anti-shoehorn guard failed to stop it and cost a real positive).
+The clean resolution is a **bounded (not zero) reasoning budget on the background
+slot** — enough to reason "nothing fits" without running away — which needs the
+sidecar/model-service to honor a reasoning budget (this build does not). Until then
+the choice is: thinking-off (recall 0.86, one edge-case nag) vs thinking-on (zero
+nags, recall 0.57). Proactive is off-by-default regardless, so this is the
+foundation to iterate on, not a live regression.
 
 ### Gate before enabling proactive for real users
 Run the offline precision harness (Section 12) on replayed real bundles against the **9B worst case**; confirm NONE-rate / false-positive-rate meet the agreed threshold **before** turning `proposals.enabled` on for daily use.

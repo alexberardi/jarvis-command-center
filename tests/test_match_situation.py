@@ -112,6 +112,22 @@ def test_merged_form_still_dropped_when_split_is_not_a_real_key():
     assert out == []
 
 
+def test_situation_match_disables_thinking():
+    # Qwen3.5 runs away reasoning on this prompt, so the situation matcher pins
+    # enable_thinking=false via extra_body (the errand planner keeps thinking on).
+    llm = _llm([])
+    asyncio.run(pm.match_situation(bundle=_bundle(), node_id="n", llm_client=llm, fetch=_fetch_report()))
+    extra = llm.chat_completion.call_args.kwargs.get("extra_body") or {}
+    assert extra.get("chat_template_kwargs", {}).get("enable_thinking") is False
+
+
+def test_situation_prompt_guards_against_acting_on_ongoing_state():
+    prompt = pm._build_situation_prompt([{"source_key": "m", "data": {"summary": "music playing"}}],
+                                        [{"command": "play_music", "action": "play",
+                                          "description": "Play music?", "args": {}}])
+    assert "already playing" in prompt   # the don't-duplicate-ongoing-state guard
+
+
 def test_hallucinated_action_dropped():
     out = asyncio.run(pm.match_situation(
         bundle=_bundle(), node_id="n",
