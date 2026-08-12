@@ -108,6 +108,28 @@ def _build_situation_prompt(
     )
 
 
+def _resolve_match_key(
+    command: Any, action: Any, by_key: dict[tuple[str, str], Any]
+) -> tuple[Any, Any]:
+    """Recover the intended ``(command, action)`` from an LLM match.
+
+    Small models sometimes echo the menu's rendered ``command.action`` label into
+    the command and/or action field (rather than splitting it into the two fields
+    the schema asks for), e.g. ``{"command": "add_event.create_event", "action":
+    "add_event.create_event"}``. If the literal pair isn't an advertised key, try
+    splitting a dotted value on its first ``.`` — but ONLY accept a split that lands
+    on a real advertised key, so this can never invent a match that wasn't offered.
+    """
+    if (command, action) in by_key:
+        return (command, action)
+    for field in (command, action):
+        if isinstance(field, str) and "." in field:
+            head, tail = field.split(".", 1)
+            if (head, tail) in by_key:
+                return (head, tail)
+    return (command, action)
+
+
 def finalize_situation_matches(
     parsed: dict[str, Any],
     bundle: list[dict[str, Any]],
@@ -125,10 +147,11 @@ def finalize_situation_matches(
     by_key = {(a["command"], a["callback"]): a for a in actions}
     results: list[dict[str, Any]] = []
     for m in parsed.get("matches", []) or []:
-        key = (m.get("command"), m.get("action"))
+        key = _resolve_match_key(m.get("command"), m.get("action"), by_key)
         spec = by_key.get(key)
         if spec is None:
-            logger.info("match_situation: dropping unadvertised match %s", key)
+            logger.info("match_situation: dropping unadvertised match %s",
+                        (m.get("command"), m.get("action")))
             continue  # hallucinated / not advertised — the anti-invention guard
 
         raw = m.get("sources")

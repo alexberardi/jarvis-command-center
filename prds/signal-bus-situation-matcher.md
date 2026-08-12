@@ -377,5 +377,38 @@ A by-hand runbook so the live system can be validated end-to-end on the dev node
 1. From **cron/curl** (self-hoster) with the node key, POST `meal_plan.completed` → it lands and, if a matching command is installed, proposes a card. **No CC change was needed to add this producer.**
 2. From **jarvis-recipes-server** (app-to-app), POST `meal_plan.completed` → proposes `create_shopping_list` as a card.
 
+## 15. Precision harness + first baseline (built 2026-08-12)
+
+The gate below is now an executable harness: **`evals/signal_precision/`** (run
+`python -m evals.signal_precision`). It replays a labeled corpus of Signal bundles
+through the real `match_situation` matcher on the background model and scores the
+**false-positive (nag) rate** and **recall**, exiting nonzero unless the gate
+passes (`--max-fp 0.05 --min-recall 0.80`). It is hardened so an empty/errored
+model response is an `ERROR` outcome (excluded from the rates and forcing a gate
+fail) — otherwise a dead model would score a perfect 0% nag rate.
+
+**Bug it caught + fix:** Qwen3.5-9B echoes the menu's rendered `command.action`
+label into *both* JSON fields, so `finalize_situation_matches` dropped every
+match. Fixed in `proposal_matcher._resolve_match_key` (splits a dotted value onto
+a real advertised key only). Recall **0.14 → 0.57**.
+
+**First baseline (Qwen3.5-9B, sidecar :7799):**
+
+| metric | value | gate |
+|---|---|---|
+| false-positive (nag) rate | **0.00** (0/11 negatives) | ✓ ≤ 0.05 |
+| precision (of fires) | **1.00** (4/4) | — |
+| recall | **0.57** (4/7) | ✗ ≥ 0.80 |
+| errors | 0 | ✓ |
+
+Profile is **safe-but-under-eager** — the model never nags (the feared failure
+mode) but misses ~43% of real appointments. The misses are **Qwen3.5 runaway
+reasoning**: it fills any `max_tokens` budget with `reasoning_content` and never
+emits the answer (`finish=length`, empty content). More headroom is futile;
+`/no_think` in the prompt is not honored by the current sidecar build. **The
+remaining recall fix is model-serving (bound/disable reasoning on the background
+slot), not CC.** Note thinking *helps* the negatives' restraint, so bounding —
+not killing — it is preferable.
+
 ### Gate before enabling proactive for real users
 Run the offline precision harness (Section 12) on replayed real bundles against the **9B worst case**; confirm NONE-rate / false-positive-rate meet the agreed threshold **before** turning `proposals.enabled` on for daily use.

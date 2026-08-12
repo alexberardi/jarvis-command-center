@@ -89,6 +89,29 @@ def test_injects_idempotency_and_lists_indices_omits_injected_param():
     assert "#0" in prompt and "#1" in prompt            # indices listed so the LLM can cite sources
 
 
+def test_recovers_merged_command_dot_action():
+    # Small models sometimes echo the menu's rendered "command.action" label into
+    # BOTH fields instead of splitting it. Recover it — but only onto a real key.
+    out = asyncio.run(pm.match_situation(
+        bundle=_bundle(), node_id="n",
+        llm_client=_llm([{"command": "add_event.create_event", "action": "add_event.create_event",
+                          "args": {"title": "Dentist", "start": "2026-08-10T09:00:00"}, "sources": [0]}]),
+        fetch=_fetch_report()))
+    assert len(out) == 1
+    assert out[0]["command"] == "add_event" and out[0]["action"] == "create_event"
+
+
+def test_merged_form_still_dropped_when_split_is_not_a_real_key():
+    # The recovery must never invent a match: a dotted value that doesn't split onto
+    # an advertised (command, action) is still dropped.
+    out = asyncio.run(pm.match_situation(
+        bundle=_bundle(), node_id="n",
+        llm_client=_llm([{"command": "wire_money.send", "action": "wire_money.send",
+                          "args": {}, "sources": [0]}]),
+        fetch=_fetch_report()))
+    assert out == []
+
+
 def test_hallucinated_action_dropped():
     out = asyncio.run(pm.match_situation(
         bundle=_bundle(), node_id="n",
