@@ -167,11 +167,29 @@ class TestHandleExecute:
         data = _card_data()
         data["_action"]["node_id"] = None
         with patch.object(svc, "_proposals_enabled", return_value=True), patch.object(
-            svc, "_first_household_node_id", return_value=None
+            svc, "resolve_household_node_for_command", new=AsyncMock(return_value=None)
         ):
             res = asyncio.run(svc._handle_execute(_ctx(data)))
         assert res.success is False
         assert "no node" in (res.error or "")
+
+    def test_resolves_household_node_when_card_has_no_node_id(self):
+        # No explicit node on the card → the command-aware resolver picks a node that
+        # advertises the command, and the callback executes on THAT node end-to-end.
+        data = _card_data()
+        data["_action"]["node_id"] = None
+        exec_mock = AsyncMock(return_value=(True, {"message": "Added to your calendar."}, None))
+        with patch.object(svc, "_proposals_enabled", return_value=True), patch.object(
+            svc, "resolve_household_node_for_command", new=AsyncMock(return_value="calendar-node")
+        ), patch(
+            "app.services.capability_registry.resolve_proposable_action",
+            new=AsyncMock(return_value=_spec()),
+        ), patch.object(svc, "_already_completed", return_value=False), patch.object(
+            svc, "_execute_target_callback_on_node", new=exec_mock
+        ):
+            res = asyncio.run(svc._handle_execute(_ctx(data)))
+        assert res.success is True
+        assert exec_mock.call_args.kwargs["node_id"] == "calendar-node"  # the resolved node
 
 
 class TestHandleDismiss:

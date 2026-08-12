@@ -158,30 +158,52 @@ def _emit_directed_proposal(
     """
     import asyncio
 
+    # The signal names a command as "command" or explicit "command.callback"; parse it
+    # up front so node resolution can be command-aware.
+    if "." in command:
+        cmd_name, cb_name = command.split(".", 1)
+    else:
+        cmd_name, cb_name = command, None
+
+    async def _resolve_and_list() -> tuple[str | None, list[dict[str, Any]]]:
+        from app.services.proposable_action_service import (
+            _household_node_ids_by_recency,
+            _probe_node_tools,
+            resolve_household_node_for_command,
+        )
+        nid = node_id
+        # scope.node_id is client-supplied and NOT validated upstream against the
+        # household. Honor it ONLY if it belongs to this household — a foreign/bogus
+        # id must never be contacted (cross-household targeting) nor blindly fetched
+        # (a 10s round-trip to an arbitrary id). Otherwise fall to the resolver.
+        if nid and nid not in set(_household_node_ids_by_recency(household_id)):
+            nid = None
+        if not nid:
+            # No (valid) node in scope → pick a household node that actually
+            # ADVERTISES this command, so multi-node households route correctly.
+            nid = await resolve_household_node_for_command(household_id, cmd_name, cb_name)
+        if not nid:
+            return None, []
+        # Short-timeout fetch — _emit_directed_proposal runs on the SYNC /signals
+        # threadpool worker, so this must not block on the interactive 10s default.
+        return nid, await capability_registry.list_proposable_actions(nid, fetch=_probe_node_tools)
+
     try:
-        if not node_id:
-            # External/app directed signal with no node in scope → the household's
-            # default (active) node defines the command boundary.
-            from app.services.proposable_action_service import _first_household_node_id
-            node_id = _first_household_node_id(household_id)
-        if not node_id:
-            return False  # no node to resolve the command against
-        actions = asyncio.run(capability_registry.list_proposable_actions(node_id))
+        node_id, actions = asyncio.run(_resolve_and_list())
     except Exception as e:  # noqa: BLE001
         logger.warning("Directed proposal resolve failed for %s: %s", command, e)
         return False
-    # The signal names a command; resolve it to that command's proposable action
-    # (accept "command" → its first proposable action, or explicit "command.callback").
-    action = None
-    if "." in command:
-        _cmd, _cb = command.split(".", 1)
+    if not node_id:
+        return False  # no node in the household advertises the command → refused
+    # Resolve the parsed command to the node's advertised proposable action.
+    if cb_name:
         action = next((a for a in (actions or [])
-                       if a.get("command") == _cmd and a.get("callback") == _cb), None)
-        command = _cmd
+                       if a.get("command") == cmd_name and a.get("callback") == cb_name), None)
     else:
-        action = next((a for a in (actions or []) if a.get("command") == command), None)
+        action = next((a for a in (actions or []) if a.get("command") == cmd_name), None)
+    command = cmd_name
     if not action:
-        return False  # not advertised by the node → refused, no card
+        return False  # not advertised by the resolved node → refused, no card
 
     try:
         callback = action.get("callback") or command

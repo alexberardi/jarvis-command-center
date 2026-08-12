@@ -53,4 +53,5 @@ def test_fetch_error_returns_none():
 def test_list_stamps_owning_command():
     fetch = AsyncMock(return_value=_report())
     actions = asyncio.run(cr.list_proposable_actions("node-7", fetch=fetch))
-    assert actions == [{"callback": "create_event", "params": [{"name": "title", "required": True}], "command": "add_event"}]
+    assert actions == [{"callback": "create_event", "params": [{"name": "title", "required": True}],
+                        "command": "add_event", "listening_signal_types": []}]

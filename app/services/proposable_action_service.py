@@ -69,32 +69,118 @@ def _proposals_enabled(household_id: str) -> bool:
 # ── node resolution ──────────────────────────────────────────────────────────
 
 
-def _first_household_node_id(household_id: str) -> str | None:
-    """A node in the household to run the write on (v0 fallback when the card
-    carries no explicit node_id). Prefers the household's primary node."""
+def _household_node_ids_by_recency(household_id: str) -> list[str]:
+    """Household node ids in preference order: active nodes we've heard from,
+    most-recent first, then any remaining nodes (inactive / never-seen) in last_seen
+    order. Empty on lookup failure. This is the order the directed resolvers below
+    walk when deciding which node should run a command."""
     try:
         from app.db import get_session_local
         from app.models import Node
 
         db = get_session_local()()
         try:
-            base = db.query(Node).filter(Node.household_id == household_id)
-            # A card with no explicit node_id must NOT resolve to a long-dead
-            # node (households have many): prefer an active node we've heard from
-            # most recently. Falls back to any node if none are marked active.
-            node = (
-                base.filter(Node.is_active.is_(True), Node.last_seen.isnot(None))
+            rows = (
+                db.query(Node)
+                .filter(Node.household_id == household_id)
                 .order_by(Node.last_seen.desc())
-                .first()
+                .all()
             )
-            if node is None:
-                node = base.order_by(Node.last_seen.desc()).first()
-            return node.node_id if node else None
+            # Active + recently-seen first (preserving last_seen order), then the rest —
+            # a card with no explicit node must NOT resolve to a long-dead node.
+            preferred = [n.node_id for n in rows if n.is_active and n.last_seen is not None]
+            remaining = [n.node_id for n in rows if n.node_id not in preferred]
+            return preferred + remaining
         finally:
             db.close()
     except Exception:  # noqa: BLE001
-        logger.warning("proposable_action: could not resolve a household node")
+        logger.warning("proposable_action: could not list household nodes")
+        return []
+
+
+def _first_household_node_id(household_id: str) -> str | None:
+    """The single best household node when the caller has no specific target AND no
+    command to match against (v0 fallback). Command-aware callers should use
+    ``resolve_household_node_for_command`` so a multi-node household routes to a node
+    that can actually run the command."""
+    ids = _household_node_ids_by_recency(household_id)
+    return ids[0] if ids else None
+
+
+# Node-resolution probes must fail FAST. In the directed-ingest case the resolver
+# runs on the SYNC /signals threadpool, so a slow/offline node must not pin a worker.
+# We probe candidates CONCURRENTLY with a short per-node timeout AND an overall cap —
+# otherwise K offline nodes would serialize into K×(interactive 10s) of blocking, a
+# threadpool-exhaustion risk (a stream of directed signals naming an unadvertised
+# command would walk every node). Concurrency also avoids false refusals: the overall
+# cap can't cut the walk off before the advertiser is reached.
+_RESOLVE_PROBE_TIMEOUT_S = 4.0
+_RESOLVE_TOTAL_TIMEOUT_S = 6.0
+
+
+async def _probe_node_tools(node_id: str) -> dict[str, Any] | None:
+    """A capability fetch with a short timeout — an offline node should fail fast
+    during resolution, not block for the interactive default."""
+    from app.api.node_tools import _request_tools_from_node
+
+    return await _request_tools_from_node(node_id, timeout=_RESOLVE_PROBE_TIMEOUT_S)
+
+
+async def resolve_household_node_for_command(
+    household_id: str,
+    command_name: str,
+    callback_name: str | None = None,
+    *,
+    fetch: Any = None,
+) -> str | None:
+    """A household node that currently ADVERTISES ``command_name`` (and
+    ``callback_name`` when given), preferring the most-recently-seen active node.
+
+    A household can have several nodes with different installed commands, so 'the
+    most recent node' (``_first_household_node_id``) may not be the one that can run
+    the target. Nodes are probed CONCURRENTLY (see the timeout constants above) and
+    the first in preference order that advertises the command wins. Returns ``None``
+    if NO reachable node advertises it — so the caller refuses visibly rather than
+    dispatching to a node that can't run it (or silently dropping a directed proposal).
+    """
+    from app.services.capability_registry import (
+        list_proposable_actions,
+        resolve_proposable_action,
+    )
+
+    node_ids = _household_node_ids_by_recency(household_id)
+    if not node_ids:
         return None
+    probe = fetch or _probe_node_tools
+
+    async def _advertises(node_id: str) -> bool:
+        try:
+            if callback_name:
+                return bool(
+                    await resolve_proposable_action(
+                        node_id, command_name, callback_name, fetch=probe
+                    )
+                )
+            actions = await list_proposable_actions(node_id, fetch=probe)
+            return any(a.get("command") == command_name for a in actions)
+        except Exception:  # noqa: BLE001 — an unreachable node is simply not a match
+            return False
+
+    try:
+        flags = await asyncio.wait_for(
+            asyncio.gather(*(_advertises(nid) for nid in node_ids)),
+            timeout=_RESOLVE_TOTAL_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "proposable_action: node resolution timed out for command %s", command_name
+        )
+        return None
+    # First node in preference order that advertises the command.
+    for node_id, advertises in zip(node_ids, flags):
+        if advertises:
+            return node_id
+    return None
 
 
 # ── param validation ─────────────────────────────────────────────────────────
@@ -260,8 +346,13 @@ async def _handle_execute(ctx: ServerCallbackContext) -> ServerCallbackResult:
             ),
         )
 
-    # (B) resolve the node
-    node_id = action_meta.get("node_id") or _first_household_node_id(ctx.household_id)
+    # (B) resolve the node — prefer the card's explicit node, else a household node
+    # that actually ADVERTISES this command (not merely the most-recent one).
+    node_id = action_meta.get("node_id")
+    if not node_id:
+        node_id = await resolve_household_node_for_command(
+            ctx.household_id, target_command, target_callback
+        )
     if not node_id:
         return ServerCallbackResult(
             success=False,
