@@ -283,6 +283,19 @@ async def execute_errand(
                 args = {}
             label = step.get("label") or command
 
+            # Inter-step value resolution: an arg may be a $-directive computed from an
+            # EARLIER step's result (e.g. reminder.relative_minutes from a prior
+            # get_drive_time). A skip means the arithmetic no longer makes sense (the
+            # leave-by time already passed) — record it and move on, not a failure.
+            from app.services.step_value_resolver import resolve_step_args
+
+            args, skip_reason = resolve_step_args(args, results)
+            if skip_reason is not None:
+                logger.info("Errand step %d (%r) skipped: %s", i, command, skip_reason)
+                results.append({"command": command, "label": label, "success": True,
+                                "message": None, "error": None, "data": {"skipped": skip_reason}})
+                continue
+
             # Dispatch the step to its plane via the engine (SEAM 2). A SYNC step
             # returns an outcome dict; a DEFERRED step (a phone call) returns a
             # Suspend, at which point the errand pauses until the call's outcome

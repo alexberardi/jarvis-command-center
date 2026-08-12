@@ -302,6 +302,19 @@ def post_signal(
     except Exception:  # noqa: BLE001 — edge scheduling is best-effort
         pass
 
+    # Signal Bus AUTORUN mode: certain signals (appt.upcoming) trigger a low-blast
+    # multi-step plan directly (drive-time → leave reminder), gated by
+    # errands.autonomous_enabled + the blast gate. Fire-and-forget; never blocks
+    # ingest. A no-op for kinds without a reaction.
+    try:
+        from app.services.signal_reaction_bridge import schedule_appt_upcoming_reaction
+
+        schedule_appt_upcoming_reaction(
+            household_id, node_id, scope.get("user_id"), body.signal.kind, body.data
+        )
+    except Exception:  # noqa: BLE001 — edge scheduling is best-effort
+        pass
+
     return SignalPostResponse(
         signal_id=sig.id,
         mode="directed" if body.command else "open",

@@ -345,6 +345,22 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         ),
     ),
     SettingDefinition(
+        key="errands.autonomous_enabled",
+        category="errands",
+        value_type="bool",
+        default=False,
+        description=(
+            "Allow a Signal to AUTORUN a low-blast multi-step plan without a "
+            "tap-to-confirm card (e.g. an upcoming appointment auto-checks drive time "
+            "and sets a leave-by reminder). When off (default), a signal-triggered "
+            "plan is proposed as a card instead of executed. Even when on, only plans "
+            "that pass the plan-start blast gate (allowlisted, non-risky, no outbound "
+            "counterparty, few steps) autorun; anything else falls back to a card. "
+            "Fail-closed — any settings error disables autorun — because it lets a "
+            "background signal originate real writes with no human confirmation."
+        ),
+    ),
+    SettingDefinition(
         key="web_scraping.allow_external",
         category="web_search",
         value_type="bool",
