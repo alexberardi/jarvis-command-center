@@ -883,6 +883,19 @@ async def start_conversation(
             "household_id": node_context_provider.household_id,
         }
 
+        # Household home context (currently the locality from household.location) so
+        # node commands + agents can read the household's location without a
+        # duplicated per-command secret or an HTTP round-trip back here. Keyed on the
+        # server-trusted household_id; None when unset → the consumer falls back to
+        # its own secret. Captured in a local so it survives warmup re-enriching
+        # node_context, and delivered to the node on the return below.
+        from app.services.phone_number_search import household_location
+
+        _home_loc = household_location(node_context_provider.household_id)
+        home_context = {"location": _home_loc} if _home_loc else None
+        if home_context:
+            node_context["home_context"] = home_context
+
         # Phase 5: household-level adapter deployment takes precedence over the
         # legacy per-node adapter_hash column. A household-active adapter wins
         # because it's the one gated by the scheduler's eval run.
@@ -1040,8 +1053,11 @@ async def start_conversation(
             )
 
         latency_logger.end_request(request.conversation_id)
-        # Return success immediately - LLM warm-up and cache population will happen in background
-        return {"status": "success", "conversation_id": request.conversation_id}
+        # Return success immediately - LLM warm-up and cache population will happen in background.
+        # home_context rides this response so the node can cache the household's location
+        # (self-healing: every conversation/start reasserts the current value).
+        return {"status": "success", "conversation_id": request.conversation_id,
+                "home_context": home_context}
 
     except Exception as e:
         latency_logger.end_request(request.conversation_id)
