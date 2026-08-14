@@ -39,12 +39,42 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 # hitting many lines must not paste the whole profile back into the turn.
 MAX_MATCHED_LINES: int = 3
 
+# Utterance leads that mean the speaker is ASKING ABOUT a profile fact
+# ("who is Leo?", "tell me about Kaitlyn"). Only these keep the strong
+# "answer from it directly" instruction — the original 2026-07-27 fix for a
+# model that wouldn't read a mid-context profile. Everything else — notably a
+# first-person action statement like "I gave Leo his medication" — is a
+# request that may need a TOOL, and telling the model to "answer directly"
+# there made the native-tools model narrate a fake confirmation instead of
+# calling the tool (prod 2026-08: medication doses silently never marked).
+_ASK_LEADS: frozenset[str] = frozenset({
+    "who", "whos", "whose", "what", "whats", "which", "when", "where", "why",
+    "how", "is", "are", "was", "were", "do", "does", "did", "can", "could",
+    "will", "would", "should", "have", "has", "had", "am", "may",
+    "tell", "describe", "list", "show", "remind", "explain",
+})
+
 
 def _content_words(text: str) -> set[str]:
     return {
         w for w in _WORD_RE.findall(text.lower())
         if len(w) >= 3 and w not in _STOPWORDS
     }
+
+
+def _asks_about_profile(utterance: str) -> bool:
+    """True when the utterance reads as a question about a profile fact.
+
+    Lenient because STT routinely drops the question mark: a leading
+    interrogative/info-request word counts too ("who is leo", "tell me …").
+    A first-person action statement ("I gave …", "I took …") is neither and
+    must not be told to answer from the profile.
+    """
+    text = utterance.strip()
+    if text.endswith("?"):
+        return True
+    words = _WORD_RE.findall(text.lower())
+    return bool(words) and words[0] in _ASK_LEADS
 
 
 def build_profile_match_hint(
@@ -84,7 +114,17 @@ def build_profile_match_hint(
         return None
 
     facts = "; ".join(matched)
+    if _asks_about_profile(utterance):
+        return (
+            f"[profile match: {facts} — this is stored about this speaker; "
+            f"answer from it directly]"
+        )
+    # A statement/command that merely mentions a profile entity ("I gave Leo
+    # his medication"): restate the fact for recency (helps pick the right
+    # item), but NEVER tell the model to answer from it — it must still run the
+    # tool the request calls for, not narrate that it did.
     return (
-        f"[profile match: {facts} — this is stored about this speaker; "
-        f"answer from it directly]"
+        f"[profile match: {facts} — this is stored about this speaker; use it "
+        f"as context, but still call whatever tool the request needs — don't "
+        f"just say you did it]"
     )

@@ -258,7 +258,10 @@ class TestBuildSpeakerBlock:
         # facts DIRECTLY, never fire a redundant `recall` round-trip for a fact
         # already listed here (the ~2.2s-per-call latency fix on the 9B).
         assert "answer DIRECTLY from this list" in result
-        assert "Do NOT call recall" in result
+        assert "do NOT call recall" in result
+        # Action carve-out: a REPORT/REQUEST to do something must still call the
+        # tool even when its subject is a listed profile fact (medication bug).
+        assert "MUST call the tool" in result
         assert "- Likes coffee black" in result
 
     def test_default_name_no_memories_is_empty(self):

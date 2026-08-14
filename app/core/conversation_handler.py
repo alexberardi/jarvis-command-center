@@ -23,9 +23,11 @@ from app.core.exchange_complete import apply_to_result as apply_exchange_complet
 from app.core.errors import ConversationPreconditionError
 from app.core.not_for_me import contains_sentinel
 from app.core.prompt_providers.shared.core_rules import (
+    AMBIENT_CONTEXT_PREFIX,
     EXCHANGE_COMPLETE_INSTRUCTION,
     NOT_FOR_ME_INSTRUCTION,
     RECENTLY_SHOWN_PREFIX,
+    build_ambient_context_block,
     build_characterization_section,
     render_referenced_items_block,
 )
@@ -108,6 +110,8 @@ def _is_transient_system_block(msg: Dict[str, Any]) -> bool:
       - "You are speaking with …" / "User Profile - If user asks …"  (speaker)
       - "Router hint:"                                                (router)
       - "Respond naturally in plain text"                            (stream override)
+      - "RECENTLY SHOWN …"                                           (referenced items)
+      - "<ambient_context> …"                                        (situational bundle)
 
     Does NOT match the cached system prompt (messages[0]) — including the
     static "User Profile are different…" rule baked inside it — nor genuine
@@ -122,6 +126,7 @@ def _is_transient_system_block(msg: Dict[str, Any]) -> bool:
         or content.startswith("Router hint:")
         or content.startswith("Respond naturally in plain text")
         or content.startswith(RECENTLY_SHOWN_PREFIX)
+        or content.startswith(AMBIENT_CONTEXT_PREFIX)
     )
 
 
@@ -448,10 +453,12 @@ class ConversationHandler:
                 logger.warning(f"⚠️ Failed to load characterization: {e}")
 
         # Assemble the household's ambient situational snapshot (time + weather +
-        # today's calendar) ONCE at warmup and freeze it onto node_context so it rides
-        # the cached prefix byte-stable across the conversation (see
-        # build_ambient_context_block). Opt-in per household (default off → no prefix
-        # change for anyone).
+        # today's calendar) ONCE at warmup and freeze it onto node_context. It is NOT
+        # put into the warmup system prompt (messages[0]) — that must stay byte-stable
+        # across conversations for the llama.cpp prefix cache. Instead the real turn
+        # re-wraps this cached text into a TRAILING system message (see
+        # _process_voice_command / build_ambient_context_block). Opt-in per household
+        # (default off → node_context unchanged for anyone).
         if household_id and _memory_enabled and self._get_ambient_context_enabled(household_id):
             ambient = self._assemble_ambient_bundle(household_id, timezone)
             if ambient:
@@ -693,12 +700,24 @@ class ConversationHandler:
         # Reconcile messages[0]'s characterization tail for the confirmed speaker —
         # a no-op (full KV-cache hit) when the warmup prediction was already right.
         _apply_characterization_swap(messages, conversation_id)
+        _turn_node_ctx = conversation_cache.get_node_context(conversation_id)
         _speaker_msg = await self._build_turn_speaker_message(
-            conversation_id, speaker_user_id,
-            conversation_cache.get_node_context(conversation_id),
+            conversation_id, speaker_user_id, _turn_node_ctx,
         )
         if _speaker_msg:
             messages.append({"role": "system", "content": _speaker_msg})
+
+        # Ambient situational block (time/weather/calendar) as a TRAILING per-turn
+        # system message AFTER the cached prefix — never in messages[0]. The bundle
+        # was assembled + frozen onto node_context at warmup; here we only re-wrap the
+        # cached text. Keeping it out of the warmup prefix preserves the llama.cpp
+        # prefix cache across conversations (ambient is situational, so it differs
+        # between conversations; at the top of the prefix it cold-prefilled the whole
+        # prompt — prod TTFS 3s→5s regression, 2026-08-06). Stripped + rebuilt each
+        # turn via _is_transient_system_block so it never accumulates.
+        _ambient_msg = build_ambient_context_block((_turn_node_ctx or {}).get("ambient_context", ""))
+        if _ambient_msg:
+            messages.append({"role": "system", "content": _ambient_msg})
 
         # Per-turn "recently shown" block (mirrors the speaker block): lets the
         # model resolve "those"/"#3"/"the one from abc" to a ref_id for act_on_items.
@@ -968,12 +987,24 @@ class ConversationHandler:
         # Reconcile messages[0]'s characterization tail for the confirmed speaker —
         # a no-op (full KV-cache hit) when the warmup prediction was already right.
         _apply_characterization_swap(messages, conversation_id)
+        _turn_node_ctx = conversation_cache.get_node_context(conversation_id)
         _speaker_msg = await self._build_turn_speaker_message(
-            conversation_id, speaker_user_id,
-            conversation_cache.get_node_context(conversation_id),
+            conversation_id, speaker_user_id, _turn_node_ctx,
         )
         if _speaker_msg:
             messages.append({"role": "system", "content": _speaker_msg})
+
+        # Ambient situational block (time/weather/calendar) as a TRAILING per-turn
+        # system message AFTER the cached prefix — never in messages[0]. The bundle
+        # was assembled + frozen onto node_context at warmup; here we only re-wrap the
+        # cached text. Keeping it out of the warmup prefix preserves the llama.cpp
+        # prefix cache across conversations (ambient is situational, so it differs
+        # between conversations; at the top of the prefix it cold-prefilled the whole
+        # prompt — prod TTFS 3s→5s regression, 2026-08-06). Stripped + rebuilt each
+        # turn via _is_transient_system_block so it never accumulates.
+        _ambient_msg = build_ambient_context_block((_turn_node_ctx or {}).get("ambient_context", ""))
+        if _ambient_msg:
+            messages.append({"role": "system", "content": _ambient_msg})
 
         # Per-turn "recently shown" block (mirrors the speaker block): lets the
         # model resolve "those"/"#3"/"the one from abc" to a ref_id for act_on_items.
@@ -1301,12 +1332,24 @@ class ConversationHandler:
         # Reconcile messages[0]'s characterization tail for the confirmed speaker —
         # a no-op (full KV-cache hit) when the warmup prediction was already right.
         _apply_characterization_swap(messages, conversation_id)
+        _turn_node_ctx = conversation_cache.get_node_context(conversation_id)
         _speaker_msg = await self._build_turn_speaker_message(
-            conversation_id, speaker_user_id,
-            conversation_cache.get_node_context(conversation_id),
+            conversation_id, speaker_user_id, _turn_node_ctx,
         )
         if _speaker_msg:
             messages.append({"role": "system", "content": _speaker_msg})
+
+        # Ambient situational block (time/weather/calendar) as a TRAILING per-turn
+        # system message AFTER the cached prefix — never in messages[0]. The bundle
+        # was assembled + frozen onto node_context at warmup; here we only re-wrap the
+        # cached text. Keeping it out of the warmup prefix preserves the llama.cpp
+        # prefix cache across conversations (ambient is situational, so it differs
+        # between conversations; at the top of the prefix it cold-prefilled the whole
+        # prompt — prod TTFS 3s→5s regression, 2026-08-06). Stripped + rebuilt each
+        # turn via _is_transient_system_block so it never accumulates.
+        _ambient_msg = build_ambient_context_block((_turn_node_ctx or {}).get("ambient_context", ""))
+        if _ambient_msg:
+            messages.append({"role": "system", "content": _ambient_msg})
 
         # Per-turn "recently shown" block (mirrors the speaker block): lets the
         # model resolve "those"/"#3"/"the one from abc" to a ref_id for act_on_items.
@@ -1580,16 +1623,19 @@ class ConversationHandler:
         # generic filler ("Task completed.") — and it shaves the ~2-3s
         # formatting call off the turn. Excluded:
         #   • knowledge-delegation results (answer_question etc.) — they carry
-        #     no message and MUST still hit the LLM;
-        #   • native-tools providers — their cached history must preserve the
-        #     role="tool" message, so reuse the (correct) LLM commit path.
+        #     no message and MUST still hit the LLM.
+        # Native-tools providers ARE included (previously excluded): they skip
+        # the formatting LLM too, but commit the NATIVE history shape below
+        # (preserve the role="tool" messages keyed by tool_call_id) so a
+        # follow-up turn's history stays valid. Excluding them regressed the
+        # move to native (Qwen3.5-9B): every tool command paid a ~0.8s
+        # formatting call that produced no usable prose -> robotic fallback.
         fast_context = "\n".join(
             out if isinstance(out, str) else json.dumps(out)
             for out in (tr.get("output", {}) for tr in tool_results)
         )
         if (
             tool_results
-            and not use_native_continue
             and not self._is_knowledge_delegation(fast_context)
         ):
             fast_parts: List[str] = []
@@ -1617,7 +1663,24 @@ class ConversationHandler:
             if spoken:
                 # Commit the spoken turn to cache so follow-up turns see a
                 # coherent history (mirrors the LLM branch's commit below).
-                committed = [m for m in messages if m.get("role") != "tool"]
+                # Native-tools providers MUST keep the role="tool" messages
+                # (keyed by tool_call_id, appended after the assistant tool_call
+                # already in `messages`) or the next turn's history is invalid;
+                # text-based providers drop them (text-mode shape). This mirrors
+                # the native vs text commit in the LLM path below.
+                if use_native_continue:
+                    committed = list(messages)
+                    for result in tool_results:
+                        _out = result["output"]
+                        if not isinstance(_out, str):
+                            _out = json.dumps(_out)
+                        committed.append({
+                            "role": "tool",
+                            "tool_call_id": result["tool_call_id"],
+                            "content": _out,
+                        })
+                else:
+                    committed = [m for m in messages if m.get("role") != "tool"]
                 committed.append({"role": "assistant", "content": spoken})
                 conversation_cache.update_messages(conversation_id, committed)
                 logger.info(

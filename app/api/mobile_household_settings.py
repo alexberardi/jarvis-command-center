@@ -37,6 +37,9 @@ router = APIRouter(tags=["mobile-household-settings"])
 HOUSEHOLD_CONTROLLABLE_SETTINGS: dict[str, str] = {
     "web_search.enabled": "bool",
     "web_scraping.allow_external": "bool",
+    # Proposable actions: household toggle for agent-proposed confirm cards
+    # (e.g. an email agent's "Add to calendar?"). Fail-closed, default off.
+    "proposals.enabled": "bool",
     # Phone calls (phone-calls PRD): the gate + user-tunable caps. The
     # attempt cap stays out — it's a compliance posture knob, not a
     # household preference.

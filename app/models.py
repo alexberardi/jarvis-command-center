@@ -742,6 +742,12 @@ class CallbackJob(Base):
     command_name = Column(String(128), nullable=False)
     callback_name = Column(String(128), nullable=False)
     data_json = Column(Text, nullable=True)  # opaque per-callback payload from the inbox item
+    # Stable dedup handle for proposable-action jobs (e.g. "appt:<message_id>").
+    # NULL for ordinary callback jobs. The dispatcher short-circuits a second job
+    # with the same (household_id, idempotency_key) that already completed, so a
+    # double-tap / re-post never runs the target callback twice. (The command
+    # itself must still no-op on a timeout-after-success — see ProposableAction.)
+    idempotency_key = Column(String(255), nullable=True, index=True)
     # Renderer hint chosen by the command at element-creation time.
     # "new_notification" → result endpoint creates an inbox item server-side
     #                      (back-compat default; mobile fire-and-forget).
@@ -1136,3 +1142,25 @@ class Schedule(Base):
     last_fired_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProposalSuppression(Base):
+    """A user's "never suggest this again" blocklist entry for proposable actions.
+
+    Written by the ``jarvis.proposable_action.suppress`` handler when a user taps
+    "Never suggest this" on a proposable-action card; consulted by the detector
+    agent each run — it deterministically skips a candidate whose ``source_key``
+    matches, and injects ``descriptor`` into its extraction prompt as a negative
+    example so the LLM also skips look-alikes. Scoped per (household, user,
+    command).
+    """
+
+    __tablename__ = "proposal_suppressions"
+
+    id = Column(String(40), primary_key=True, default=lambda: f"sup_{uuid4().hex}")
+    household_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True, index=True)   # whose blocklist this is
+    command = Column(String(128), nullable=False)          # target command, e.g. "add_event"
+    source_key = Column(String(512), nullable=True)        # deterministic hard key (e.g. sender)
+    descriptor = Column(Text, nullable=True)               # semantic example for prompt injection
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
