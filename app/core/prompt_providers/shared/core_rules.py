@@ -61,10 +61,12 @@ ANTI_HALLUCINATION_MANDATE: str = (
     "tool — NEVER fabricate live data (current weather, current scores, "
     "today's news, real-time sensor states) and NEVER pretend to perform "
     "actions you haven't actually performed. Personal facts stored in your "
-    "User Profile are different: those are fair game and you ALWAYS answer "
-    "them directly from memory, regardless of topic — the user's favorite "
-    "team, coffee preference, address, relationships, etc. are facts you "
-    "carry, not live data to look up."
+    "User Profile (favorite team, coffee preference, address, relationships, "
+    "etc.) are facts you carry, not live data to look up: when the user ASKS "
+    "ABOUT one, answer directly from memory. But when the user REPORTS an "
+    "action or asks you to record, change, or perform one, you MUST call the "
+    "matching tool even if the subject also appears in your profile — a stored "
+    "note that something exists is context, not a record of today's action."
 )
 
 FALLBACK_BRIEF_REPLY: str = (
@@ -297,9 +299,11 @@ def build_speaker_block(speaker_name: str, user_memories: str = "") -> str:
             # to answer from THIS list and not recall it dropped that to 0/6 in a
             # realistic 12-tool A/B (paired with the matching turn-hint change).
             f"{prefix}User Profile — these facts are already in front of you. If the "
-            f"user asks about any of them, answer DIRECTLY from this list. Do NOT "
-            f"call recall (or any other tool) to look up something already shown "
-            f"here:\n{user_memories}"
+            f"user ASKS a question about any of them, answer DIRECTLY from this list "
+            f"— do NOT call recall to look those up. This applies ONLY to answering "
+            f"questions about a listed fact: if the user REPORTS doing something, or "
+            f"asks you to record / change / do something, you MUST call the tool that "
+            f"performs it, even when the subject is listed here:\n{user_memories}"
         )
     return block
 
@@ -328,26 +332,31 @@ def build_personality_block(persona_text: str | None) -> str:
     )
 
 
+AMBIENT_CONTEXT_PREFIX = "<ambient_context>"
+
+
 def build_ambient_context_block(ambient_text: str | None) -> str:
     """Return the household ``<ambient_context>`` block for the cached identity header.
 
     A SNAPSHOT of the household's situational context (current time, weather, today's
-    calendar) assembled ONCE at conversation warmup and frozen byte-stable for the whole
-    conversation, so the model can weave it into any reply WITHOUT a tool call. It's
-    household-wide (not per-speaker), so — like room/style/persona — it rides the cached
-    prefix and stays byte-identical across speakers and turns. Injected in
-    :meth:`IJarvisPromptProvider.build_context_header` after the personality block.
+    calendar) assembled ONCE at conversation warmup and frozen for the conversation, so
+    the model can weave it into any reply WITHOUT a tool call.
 
-    INVARIANT: no live/relative timestamps may reach this string — a value that changes
-    per turn would break the llama.cpp prefix cache (see
-    ``ConversationHandler._assemble_ambient_bundle``, which quantizes the clock). Returns
-    ``""`` for empty input → byte-identical to the pre-feature header (the safe fallback).
+    Injected per-turn as a TRAILING system message AFTER the cached prefix (see
+    ``ConversationHandler._process_voice_command``), NOT into the warmup ``messages[0]``.
+    It used to ride the cached identity header, but ambient content is situational — it
+    differs between two separate conversations (clock bucket, weather refresh, today's
+    calendar) — and the llama.cpp prefix cache is a single household-shared sequence, so
+    sitting at the top of the prefix cold-prefilled the whole ~9k-token prompt on every
+    new conversation (prod TTFS 3s→5s regression, 2026-08-06). As a trailing block its
+    per-conversation variation no longer invalidates the warmed prefix. Returns ``""`` for
+    empty input → nothing is appended (the safe fallback).
     """
     ambient_text = (ambient_text or "").strip()
     if not ambient_text:
         return ""
     return (
-        "<ambient_context>\n"
+        f"{AMBIENT_CONTEXT_PREFIX}\n"
         "BACKGROUND on the user's day — NOT a to-do list to read out, and NOT something to "
         "bring up on its own. Mention an item ONLY when the user's request is directly about "
         "it (how their day looks, the weather itself, their schedule, or a reminder/task "

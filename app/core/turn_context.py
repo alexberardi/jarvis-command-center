@@ -149,13 +149,23 @@ def _wake_hint(wake_confidence: float | None) -> str:
         # that's already in the injected profile (0/6 recall in a 12-tool A/B vs
         # ~50% with the old "call recall — do not go silent" phrasing). The
         # redundant recall doubled latency (~2.2s prefill/call on the cacheless 9B).
+        #
+        # The "if it merely ASKS … but if the user REPORTS/REQUESTS an action,
+        # call the tool" carve-out is load-bearing too: without it, an action
+        # statement whose subject is in the profile ("I gave Leo his medicine" —
+        # profile has "Administers Keppra to Leo") reads as a profile topic, and
+        # the 9B narrates a fake confirmation instead of calling the tool
+        # (prod 2026-08). Verbatim-prompt A/B vs the prod 9B: 1–2/8 tool calls
+        # without this line, 8/8 with it (+ the mandate/speaker carve-outs);
+        # "Who is Leo?" still answers directly 8/8 (no recall regression).
         f"[turn context: fresh wake — the user said your wake word{scored}. "
         f"This turn is addressed to you: answer it or run the tool it calls "
-        f"for. If it asks about the speaker's own life, answer DIRECTLY from "
-        f"your User Profile when the fact is listed there; ONLY call recall when "
-        f"the fact is NOT already in your profile — never go silent. Reserve "
-        f"<not_for_me/> for STT artifacts or speech explicitly aimed at another "
-        f"person.]"
+        f"for. If it merely ASKS about the speaker's own life, answer DIRECTLY "
+        f"from your User Profile when the fact is listed there (only call recall "
+        f"when it's NOT — never go silent); but if the user REPORTS or REQUESTS "
+        f"an action, call the tool that does it — never just say you did it. "
+        f"Reserve <not_for_me/> for STT artifacts or speech explicitly aimed at "
+        f"another person.]"
     )
 
 

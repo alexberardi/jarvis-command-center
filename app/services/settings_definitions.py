@@ -308,6 +308,20 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
             "internet. Default OFF so local-only households never egress."
         ),
     ),
+    # Proposable actions (agent → command confirm cards)
+    SettingDefinition(
+        key="proposals.enabled",
+        category="proposals",
+        value_type="bool",
+        default=False,
+        description=(
+            "Master toggle for agent-proposed action cards. Gates the "
+            "proposable-action dispatcher: when off (default), a tapped 'agent "
+            "proposes a command' card (e.g. an email agent's 'Add to calendar?') "
+            "is refused server-side. Fail-closed — any settings error disables it "
+            "— because it lets background agents originate real writes."
+        ),
+    ),
     SettingDefinition(
         key="web_scraping.allow_external",
         category="web_search",

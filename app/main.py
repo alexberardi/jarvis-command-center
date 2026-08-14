@@ -476,6 +476,12 @@ async def startup_event():
     register_errand_callbacks()
     register_schedule_callbacks()  # "your scheduled errands" card Cancel taps
 
+    # Proposable actions (server plane): the single generic dispatcher that runs
+    # an agent-proposed command's @callback on the node after a Confirm tap.
+    from app.services.proposable_action_service import register_proposable_action_callbacks
+
+    register_proposable_action_callbacks()
+
     async def _periodic_phone_reaper() -> None:
         while True:
             await asyncio.sleep(30)
@@ -686,6 +692,13 @@ app.include_router(node_commands.router, prefix="/api/v0", tags=["node-commands"
 from app.api import attention as attention_api
 
 app.include_router(attention_api.router, prefix="/api/v0", tags=["attention"])
+
+# Proposal suppressions: the 'never suggest this again' blocklist —
+# node plane (agent reads its signals) + mobile plane (user manages the list).
+from app.api import proposals as proposals_api
+
+app.include_router(proposals_api.node_router, prefix="/api/v0", tags=["proposals"])
+app.include_router(proposals_api.mobile_router, prefix="/api/v0", tags=["proposals"])
 
 # Include ambient-noise calibration router (mobile-triggered, node-fulfilled)
 app.include_router(ambient_noise.router, prefix="/api/v0", tags=["ambient-noise"])
@@ -1155,7 +1168,7 @@ async def handle_voice(
                     stop_reason=stop_reason,
                     assistant_message=_msg or None,
                     reasoning=result.get("reasoning"),
-                    end_of_exchange=result.get("end_of_exchange"),
+                    end_of_exchange=bool(result.get("end_of_exchange")),
                     tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
                     validation_request=(
                         ValidationRequest(**result["validation_request"])
@@ -1436,7 +1449,7 @@ async def handle_voice_stream(
             ),
             stop_reason=stop_reason_enum,
             assistant_message=assistant_message,
-            end_of_exchange=result.get("end_of_exchange"),
+            end_of_exchange=bool(result.get("end_of_exchange")),
             tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
             validation_request=(
                 ValidationRequest(**result["validation_request"])
@@ -2040,7 +2053,7 @@ async def continue_voice_command(
             ),
             stop_reason=StopReason(result.get("stop_reason", "complete")),
             assistant_message=result.get("assistant_message"),
-            end_of_exchange=result.get("end_of_exchange"),
+            end_of_exchange=bool(result.get("end_of_exchange")),
             tool_calls=[ToolCall(**tc) for tc in result.get("tool_calls", [])],
             validation_request=(
                 ValidationRequest(**result["validation_request"])
