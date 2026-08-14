@@ -30,6 +30,12 @@ DEBOUNCE_SECONDS = 5.0
 _COOLDOWN_SECONDS = 6 * 3600.0   # per (household, source_key, command)
 _DAILY_CAP = 12                  # per household
 
+# Signal kinds the SignalReactionBridge already handles DETERMINISTICALLY (it runs
+# get_drive_time and proposes reminder.set_at directly). They are excluded from the
+# proactive matcher's bundle so that, if the matcher is ever enabled, it never
+# proposes a SECOND leave-by card on top of the bridge's. See signal_reaction_bridge.
+_BRIDGE_HANDLED_KINDS = frozenset({"appt.upcoming", "leave_by.suggested"})
+
 # In-process state (single-worker; a restart simply re-arms).
 _main_loop: asyncio.AbstractEventLoop | None = None
 _pending: dict[str, "asyncio.Task[Any]"] = {}          # household -> debounce task
@@ -96,6 +102,10 @@ def _gather_bundle(household_id: str) -> list[dict[str, Any]]:
         )
         out: list[dict[str, Any]] = []
         for s in rows:
+            # Skip signals the bridge handles deterministically — the matcher must
+            # not double-propose a leave-by reminder on top of the bridge's card.
+            if s.kind in _BRIDGE_HANDLED_KINDS:
+                continue
             try:
                 data = json.loads(s.facts) if s.facts else {}
             except Exception:  # noqa: BLE001

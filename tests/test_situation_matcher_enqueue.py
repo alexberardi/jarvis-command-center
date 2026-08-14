@@ -58,3 +58,28 @@ def test_debounce_coalesces_edges():
             await asyncio.sleep(0.15)          # only the last debounce survives
             rmb.assert_awaited_once()
     asyncio.run(go())
+
+
+def test_gather_bundle_excludes_bridge_handled_kinds():
+    """appt.upcoming + leave_by.suggested are handled DETERMINISTICALLY by the
+    SignalReactionBridge, so the proactive matcher must never see them (else it
+    would propose a second leave-by card on top of the bridge's)."""
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    rows = [
+        SimpleNamespace(kind="presence.seen", source_key="presence:1",
+                        facts=json.dumps({"user": "A"}), summary="A is home"),
+        SimpleNamespace(kind="appt.upcoming", source_key="appt:1:e1",
+                        facts=json.dumps({"title": "D"}), summary="upcoming"),
+        SimpleNamespace(kind="leave_by.suggested", source_key="leaveby:e1",
+                        facts=json.dumps({"title": "D"}), summary="leave by"),
+    ]
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = rows
+
+    with patch("app.db.get_session_local", return_value=lambda: session):
+        bundle = sm._gather_bundle("hh-1")
+
+    assert {b["kind"] for b in bundle} == {"presence.seen"}

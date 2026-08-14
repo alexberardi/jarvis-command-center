@@ -34,6 +34,7 @@ class SignalsAuthContext:
     """Auth result for the signals ingress."""
     auth_type: str            # "node" or "app"
     household_id: str | None = None
+    node_id: str | None = None   # the authenticated node (node auth only)
 
 
 def _get_auth_base_url() -> str:
@@ -54,7 +55,11 @@ def _verify_signals_auth(
     if x_api_key:
         try:
             node_ctx = verify_api_key(x_api_key=x_api_key, db=db)
-            return SignalsAuthContext(auth_type="node", household_id=node_ctx.household_id)
+            return SignalsAuthContext(
+                auth_type="node",
+                household_id=node_ctx.household_id,
+                node_id=getattr(getattr(node_ctx, "node", None), "node_id", None),
+            )
         except HTTPException:
             pass  # fall through to app-to-app
 
@@ -264,7 +269,10 @@ def post_signal(
         )
 
     scope = body.signal.scope or {}
-    node_id = scope.get("node_id")
+    # A producer may omit scope.node_id (an agent rarely knows its own node id). Fall
+    # back to the authenticated node — the node that POSTed the signal is the natural
+    # target for a node-scoped reaction (e.g. running get_drive_time for leave-by).
+    node_id = scope.get("node_id") or auth.node_id
 
     service = SignalService(db)
     try:
@@ -302,17 +310,25 @@ def post_signal(
     except Exception:  # noqa: BLE001 — edge scheduling is best-effort
         pass
 
-    # Signal Bus AUTORUN mode: certain signals (appt.upcoming) trigger a low-blast
-    # multi-step plan directly (drive-time → leave reminder), gated by
-    # errands.autonomous_enabled + the blast gate. Fire-and-forget; never blocks
-    # ingest. A no-op for kinds without a reaction.
+    # Signal Bus DETERMINISTIC reactions: fan the signal out to every reaction
+    # registered for its kind (generic — ingest names no kind and no reaction).
+    # Fire-and-forget; never blocks ingest. A no-op for kinds with no reaction.
     try:
-        from app.services.signal_reaction_bridge import schedule_appt_upcoming_reaction
-
-        schedule_appt_upcoming_reaction(
-            household_id, node_id, scope.get("user_id"), body.signal.kind, body.data
+        from app.services.signal_reaction_registry import (
+            ReactionContext,
+            schedule_signal_reactions,
         )
-    except Exception:  # noqa: BLE001 — edge scheduling is best-effort
+
+        schedule_signal_reactions(
+            ReactionContext(
+                household_id=household_id,
+                node_id=node_id,
+                user_id=scope.get("user_id"),
+                kind=body.signal.kind,
+                facts=body.data or {},
+            )
+        )
+    except Exception:  # noqa: BLE001 — reaction scheduling is best-effort
         pass
 
     return SignalPostResponse(

@@ -505,9 +505,13 @@ async def startup_event():
     # (threadpool, no running loop) can still schedule the debounced reason pass.
     from app.services.situation_matcher_service import set_main_loop
     set_main_loop(asyncio.get_running_loop())
-    # Same for the signal→autorun bridge (schedules its reaction off the sync ingest path).
-    from app.services.signal_reaction_bridge import set_main_loop as set_reaction_loop
+    # Same for the generic signal-reaction registry (schedules deterministic reactions
+    # off the sync ingest path), then register the reactions — each names its own kind,
+    # so ingest and dispatch stay kind-agnostic.
+    from app.services.signal_reaction_registry import set_main_loop as set_reaction_loop
     set_reaction_loop(asyncio.get_running_loop())
+    from app.services.signal_reaction_bridge import register_leave_by_reaction
+    register_leave_by_reaction()
 
     async def _periodic_phone_reaper() -> None:
         while True:
