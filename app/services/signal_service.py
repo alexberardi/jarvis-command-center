@@ -151,6 +151,54 @@ class SignalService:
             )
 
 
+def record_presence(
+    db: Session,
+    *,
+    household_id: str,
+    user_id: int | None,
+    state: str = "home",
+    source_agent: str,
+    node_id: str | None = None,
+    room: str | None = None,
+    name: str | None = None,
+    ttl_seconds: int | None = 900,
+    summary: str | None = None,
+) -> Signal | None:
+    """The CANONICAL presence writer — the one place a presence Signal is shaped, so
+    every producer (voice, mobile, future agents) stays consistent instead of each
+    re-deriving the kind/key/scope.
+
+    ``state == "home"`` → ``presence.seen``; anything else → ``presence.left``. One
+    upserting row per person (``source_key = presence:{user_id}``) that moves between
+    nodes/producers. Returns None for an unidentified user — presence is
+    identity-bound. ``cacheable`` is always False (the summary is live). Always
+    stamps BOTH ``subject`` and ``facts`` (the two prior producers had drifted —
+    voice set subject-only, the SDK set facts-only).
+    """
+    if user_id is None:
+        return None
+    home = state == "home"
+    kind = "presence.seen" if home else "presence.left"
+    if summary is None:
+        who = name or "Someone"
+        where = f" in the {room}" if room else ""
+        summary = f"{who} is home{where}" if home else f"{who} is away"
+    return SignalService(db).save_signal(
+        kind=kind,
+        source_key=f"presence:{user_id}",
+        household_id=household_id,
+        user_id=user_id,
+        node_id=node_id,
+        room=room,
+        subject=f"user:{user_id}",
+        summary=summary,
+        facts={"user_id": user_id, "state": state, "room": room},
+        ttl_seconds=ttl_seconds,
+        cacheable=False,
+        source_agent=source_agent,
+    )
+
+
 def record_voice_presence(
     db: Session,
     *,
@@ -160,26 +208,21 @@ def record_voice_presence(
     speaker_name: str | None,
     ttl_seconds: int = 900,
 ) -> Signal | None:
-    """Write a ``presence.seen`` Signal from a confidently-resolved voice speaker.
-
-    The cheapest presence producer: someone spoke to a node, so they are here.
-    Returns None for an unresolved speaker (``user_id`` is None) — presence can't
-    be attributed without an identity. UPSERT on ``presence:{user_id}`` means a
-    person is one row that moves between nodes as they are heard.
-    """
+    """Presence from a confidently-resolved voice speaker: someone spoke to a node,
+    so they are here. Thin wrapper over :func:`record_presence` (``source_agent
+    'voice'``, a node-scoped "recently heard" summary). Returns None for an
+    unresolved speaker (``user_id`` is None)."""
     if user_id is None:
         return None
     where = f" at the {node_id} node" if node_id else ""
-    summary = f"{speaker_name or 'Someone'} was recently heard{where}"
-    return SignalService(db).save_signal(
-        kind="presence.seen",
-        source_key=f"presence:{user_id}",
+    return record_presence(
+        db,
         household_id=household_id,
         user_id=user_id,
-        node_id=node_id,
-        subject=f"user:{user_id}",
-        summary=summary,
-        ttl_seconds=ttl_seconds,
-        cacheable=False,
+        state="home",
         source_agent="voice",
+        node_id=node_id,
+        name=speaker_name,
+        ttl_seconds=ttl_seconds,
+        summary=f"{speaker_name or 'Someone'} was recently heard{where}",
     )

@@ -300,36 +300,19 @@ def post_signal(
             db, household_id, node_id, body.command, body.data, body.signal.source_key
         )
 
-    # Signal Bus: a new/changed Signal is an edge — schedule a debounced proactive
-    # reason pass (fire-and-forget; gated + off-by-default downstream). Adds no
-    # latency to ingest and never raises.
-    try:
-        from app.services.situation_matcher_service import signal_situation_edge
+    # Signal Bus: fan the persisted Signal out to the generic dispatch planes
+    # (proactive matcher edge + deterministic reaction registry) via the shared
+    # helper — the SAME dispatch the mobile presence endpoint uses, so neither
+    # duplicates the wiring. Best-effort; never blocks ingest.
+    from app.services.signal_dispatch import dispatch_signal_edges
 
-        signal_situation_edge(household_id, node_id)
-    except Exception:  # noqa: BLE001 — edge scheduling is best-effort
-        pass
-
-    # Signal Bus DETERMINISTIC reactions: fan the signal out to every reaction
-    # registered for its kind (generic — ingest names no kind and no reaction).
-    # Fire-and-forget; never blocks ingest. A no-op for kinds with no reaction.
-    try:
-        from app.services.signal_reaction_registry import (
-            ReactionContext,
-            schedule_signal_reactions,
-        )
-
-        schedule_signal_reactions(
-            ReactionContext(
-                household_id=household_id,
-                node_id=node_id,
-                user_id=scope.get("user_id"),
-                kind=body.signal.kind,
-                facts=body.data or {},
-            )
-        )
-    except Exception:  # noqa: BLE001 — reaction scheduling is best-effort
-        pass
+    dispatch_signal_edges(
+        household_id=household_id,
+        node_id=node_id,
+        user_id=scope.get("user_id"),
+        kind=body.signal.kind,
+        facts=body.data or {},
+    )
 
     return SignalPostResponse(
         signal_id=sig.id,

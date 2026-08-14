@@ -834,6 +834,9 @@ app.include_router(mobile_command_data.router, prefix="/api/v0/mobile", tags=["m
 from app.api import mobile_household_settings
 app.include_router(mobile_household_settings.router, prefix="/api/v0/mobile", tags=["mobile-household-settings"])
 
+from app.api import mobile_presence
+app.include_router(mobile_presence.router, prefix="/api/v0/mobile", tags=["mobile-presence"])
+
 from app.api import mobile_phone_contacts
 app.include_router(mobile_phone_contacts.router, prefix="/api/v0/mobile", tags=["mobile-phone-contacts"])
 from app.api import mobile_call_context
