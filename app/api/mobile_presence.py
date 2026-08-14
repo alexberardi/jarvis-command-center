@@ -26,6 +26,7 @@ from app.deps import (
     verify_household_role,
     verify_user_jwt,
 )
+from app.api.signals import _rate_ok, _signals_enabled
 from app.services.signal_dispatch import dispatch_signal_edges
 from app.services.signal_service import record_presence
 
@@ -48,6 +49,11 @@ class PresenceIn(BaseModel):
     state: str = Field("home")                # "home" (arrived) | "away" (left)
     room: str | None = Field(None, max_length=255)
     ttl_seconds: int | None = Field(None, gt=0, le=604800)  # <= 7 days
+    # Display-only name for the signal summary ("Alex is home"). NOT identity:
+    # the signal is bound to the JWT's user_id regardless. Worst case a caller
+    # mislabels their OWN presence summary, which is harmless — so it's safe to
+    # accept from the client instead of paying an auth round-trip per report.
+    name: str | None = Field(None, max_length=255)
 
 
 @router.post("/presence", status_code=200)
@@ -66,6 +72,17 @@ def post_mobile_presence(
     # else), so there's nothing to spoof beyond the household, which this guards.
     verify_household_role(user.user_id, body.household_id, required_role=_PRESENCE_ROLE)
 
+    # Honor the same two gates as the /signals ingress (consolidated, not
+    # duplicated): the per-household kill-switch and the rate limit. Without
+    # these a phone could inject presence into a household that has disabled the
+    # bus, or hammer the reaction/matcher fan-out.
+    if not _signals_enabled(body.household_id):
+        raise HTTPException(
+            status_code=409, detail="Signal bus is disabled for this household"
+        )
+    if not _rate_ok(body.household_id, "mobile"):
+        raise HTTPException(status_code=429, detail="Too many presence updates")
+
     sig = record_presence(
         db,
         household_id=body.household_id,
@@ -73,6 +90,7 @@ def post_mobile_presence(
         state=body.state,
         source_agent="mobile",
         room=body.room,
+        name=(body.name.strip() or None) if body.name else None,
         ttl_seconds=body.ttl_seconds or _DEFAULT_MOBILE_TTL_SECONDS,
     )
     if sig is None:  # user_id is always set here, so this is defensive

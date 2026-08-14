@@ -19,6 +19,16 @@ TOKEN_UID = 42
 ROLE = "app.api.mobile_presence.verify_household_role"
 REC = "app.api.mobile_presence.record_presence"
 FANOUT = "app.api.mobile_presence.dispatch_signal_edges"
+ENABLED = "app.api.mobile_presence._signals_enabled"
+RATE = "app.api.mobile_presence._rate_ok"
+
+
+@pytest.fixture(autouse=True)
+def _gates_open():
+    # Default the two Signal-Bus gates to open so the existing behavioural tests
+    # exercise the happy path; the gate tests patch them explicitly.
+    with patch(ENABLED, return_value=True), patch(RATE, return_value=True):
+        yield
 
 
 @pytest.fixture
@@ -82,3 +92,40 @@ def test_user_id_cannot_be_spoofed_via_body(client):
         r = client.post(URL, json={"household_id": HH, "state": "home", "user_id": 999})
     assert r.status_code == 200
     assert rec.call_args.kwargs["user_id"] == TOKEN_UID
+
+
+def test_display_name_is_forwarded_for_summary(client):
+    # The optional display name flows to the writer ("Alex is home"); it's
+    # display-only and does not change the token-bound identity.
+    rec = MagicMock(return_value=_sig())
+    with patch(ROLE), patch(REC, rec), patch(FANOUT):
+        r = client.post(URL, json={"household_id": HH, "state": "home", "name": "  Alex  "})
+    assert r.status_code == 200
+    assert rec.call_args.kwargs["name"] == "Alex"  # trimmed
+
+
+def test_missing_or_blank_name_forwards_none(client):
+    rec = MagicMock(return_value=_sig())
+    with patch(ROLE), patch(REC, rec), patch(FANOUT):
+        r = client.post(URL, json={"household_id": HH, "state": "home", "name": "   "})
+    assert r.status_code == 200
+    assert rec.call_args.kwargs["name"] is None
+
+
+def test_disabled_bus_is_409_and_writes_nothing(client):
+    # A household that turned the Signal Bus off must not receive phone presence.
+    with patch(ROLE), patch(ENABLED, return_value=False), \
+         patch(REC) as rec, patch(FANOUT) as fan:
+        r = client.post(URL, json={"household_id": HH, "state": "home"})
+    assert r.status_code == 409
+    rec.assert_not_called()
+    fan.assert_not_called()
+
+
+def test_rate_limited_is_429_and_writes_nothing(client):
+    with patch(ROLE), patch(RATE, return_value=False), \
+         patch(REC) as rec, patch(FANOUT) as fan:
+        r = client.post(URL, json={"household_id": HH, "state": "home"})
+    assert r.status_code == 429
+    rec.assert_not_called()
+    fan.assert_not_called()
