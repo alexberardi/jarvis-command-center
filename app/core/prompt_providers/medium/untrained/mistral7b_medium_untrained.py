@@ -27,7 +27,6 @@ from app.core.prompt_providers.shared.context_builders import (
     build_agent_context_summary,
     build_direct_answer_section,
 )
-from app.core.prompt_providers.shared.tool_formatters import format_tools_for_prompt
 from app.core.tool_builder import ToolBuilder
 
 logger = logging.getLogger("uvicorn")
@@ -84,12 +83,54 @@ class Mistral7bMediumUntrained(IJarvisPromptProvider):
 
     @staticmethod
     def _build_tools_xml(tools: List[Dict[str, Any]]) -> str:
-        """Build <tools> XML block from tool definitions."""
-        clean_tools: List[Dict[str, Any]] = ToolBuilder.build(tools)
+        """Build a compact, single-render <tools> block.
+
+        This is the ONLY place the toolset is rendered. Previously
+        ``build_system_prompt`` emitted the tools twice — once here as
+        pretty-printed (``indent=2``) JSON and again as a human-readable
+        "Tools:" section — which for a 30-37 tool prod set was ~11k of a
+        ~14k-token prompt (~79%). We now render once, minified, matching the
+        Qwen "compressed" providers: tool-level descriptions are kept (they
+        carry routing hints) but per-parameter descriptions and ``format``
+        hints are stripped (types/enum/required survive), and each tool is a
+        single minified JSON line. Refinable params are intentionally KEPT —
+        the Mistral text path does not run a Stage-2 refinement pass, so
+        dropping them would strand params the model could never set.
+        """
+        clean_tools: List[Dict[str, Any]] = ToolBuilder.build(
+            tools,
+            include_param_descriptions=False,
+            include_format_hints=False,
+        )
         if not clean_tools:
             return "<tools>\n</tools>"
-        tool_json: str = json.dumps(clean_tools, indent=2)
-        return f"<tools>\n{tool_json}\n</tools>"
+        lines: List[str] = [
+            json.dumps(t, separators=(",", ":")) for t in clean_tools
+        ]
+        return "<tools>\n" + "\n".join(lines) + "\n</tools>"
+
+    @staticmethod
+    def _build_antipattern_hints(tools: List[Dict[str, Any]]) -> str:
+        """Preserve cross-tool disambiguation hints ("NOT X → use Y").
+
+        These lived in the removed redundant "Tools:" section and are the one
+        piece of routing signal there that the ``<tools>`` schema block does
+        NOT carry. They are a few lines total (only tools with antipatterns
+        contribute), so keeping them costs almost nothing while guarding
+        against tool-vs-tool confusion. Returns "" when no tool declares an
+        antipattern.
+        """
+        lines: List[str] = []
+        for tool in tools:
+            name: str = tool.get("function", {}).get("name", "unknown")
+            for ap in tool.get("antipatterns", []):
+                cmd: str = ap.get("command_name", "")
+                desc: str = ap.get("description", "")
+                if cmd and desc:
+                    lines.append(f"- NOT {name} → use {cmd}: {desc}")
+        if not lines:
+            return ""
+        return "Disambiguation:\n" + "\n".join(lines)
 
     def build_system_prompt(
         self,
@@ -117,13 +158,11 @@ class Mistral7bMediumUntrained(IJarvisPromptProvider):
         direct_answer_section: str = build_direct_answer_section(available_commands)
         agent_context_section: str = build_agent_context_summary(node_context)
 
-        # Tool descriptions with primary examples only (for intent guidance)
-        tools_section: str = format_tools_for_prompt(
-            tools, available_commands, primary_examples_only=True
-        )
-
-        # Build <tools> XML block (same format as Hermes/Gemma)
+        # Single compact <tools> render (was double-rendered: full JSON here
+        # PLUS a redundant human-readable "Tools:" section — see _build_tools_xml).
         tools_xml: str = Mistral7bMediumUntrained._build_tools_xml(tools)
+        # The one bit of routing signal the schema block lacks: keep it, cheaply.
+        antipattern_hints: str = Mistral7bMediumUntrained._build_antipattern_hints(tools)
 
         system_prompt: str = f"""You are Jarvis, a function calling voice assistant.
 Context: room={room}, user={user}, style={voice_mode}
@@ -151,10 +190,8 @@ Rules:
 - Always populate required tool parameters from the user's request.
 {direct_answer_section}
 {agent_context_section}
+{antipattern_hints}
 For final answers with no tool needed, respond with a brief spoken reply.
-
-Tools:
-{tools_section}
 """
 
         logger.info(
