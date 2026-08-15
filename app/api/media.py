@@ -5,6 +5,7 @@ through command-center, which handles app-to-app authentication and passes
 context headers (household_id, node_id) to downstream services.
 """
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Response
@@ -82,6 +83,7 @@ async def whisper_transcribe(
     speaker_audio: UploadFile | None = File(default=None),
     language: str | None = Form(None),
     task: str | None = Form(None),
+    conversation_id: str | None = Form(None),
     node_context: NodeContextProvider = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Transcribe audio to text.
@@ -118,6 +120,21 @@ async def whisper_transcribe(
     if speaker_audio is not None:
         speaker_audio_bytes = await speaker_audio.read()
         speaker_audio_filename = speaker_audio.filename or "speaker.wav"
+
+    # Wake-clip verification: the leading ~2s of speaker_audio is the wake
+    # snapshot. Fire-and-forget — the command turn reads the verdict from the
+    # conversation cache with a bounded fail-open wait. Only when the node
+    # provided a conversation_id (new nodes) and the mode isn't off.
+    if speaker_audio_bytes and conversation_id:
+        from app.core.wake_verification import _get_mode, run_wake_verification
+        if _get_mode(node_context.household_id, node_context.node.node_id) != "off":
+            asyncio.create_task(run_wake_verification(
+                speaker_audio_bytes,
+                conversation_id,
+                node_context.household_id,
+                node_context.node.node_id,
+                node_context.household_member_ids,
+            ))
 
     # Build extra params
     params: dict[str, Any] = {}

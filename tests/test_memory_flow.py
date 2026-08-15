@@ -262,3 +262,17 @@ class TestSemanticRecallRealPgvector:
         assert svc.check_content_similarity(hh, _close_vec(), threshold=0.5, user_id=BOB) is None
         # Household pool (user_id IS NULL) → does not match a USER memory.
         assert svc.check_content_similarity(hh, _close_vec(), threshold=0.5) is None
+
+
+class TestExtractionPromptGuardrails:
+    """The relationship guardrails exist because the extractor once stored
+    'Brother Leo takes Keppra' from a conversation about the family dog —
+    and the live model then told the user's wife that Leo was her brother
+    (prod 2026-08-15). Keep the rules pinned in the prompt."""
+
+    def test_prompt_forbids_inferred_relationships(self):
+        from app.services.memory_extraction_service import _EXTRACTION_SYSTEM_PROMPT
+        assert "NEVER infer" in _EXTRACTION_SYSTEM_PROMPT
+        assert "pet" in _EXTRACTION_SYSTEM_PROMPT.lower()
+        # The literal failure case stays documented as a counter-example.
+        assert "Counter-example" in _EXTRACTION_SYSTEM_PROMPT

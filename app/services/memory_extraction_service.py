@@ -39,9 +39,25 @@ Each memory can optionally include "ttl_days" — how long it stays relevant (ch
 - Dated one-offs ("dentist appointment Friday", "flight Thursday"): ttl_days: 7
 Do NOT store a transient or administrative event (a one-off meeting, a today-only note) as a permanent fact — give it a short ttl_days, or skip it.
 
+RELATIONSHIP RULES — get these wrong and Jarvis says something absurd to the family:
+- Record a relationship (brother, mom, wife, …) ONLY when the transcript states it \
+explicitly ("my brother Mike"). NEVER infer one from context, from who administers \
+medicine, or from how affectionately someone is discussed.
+- A name with no stated relationship is stored as just a name: "Knows someone named \
+Leo" — not "Brother Leo".
+- Pets are family members too, and they get medicine, appointments, and birthdays. If \
+the transcript doesn't make clear whether a name belongs to a person or a pet, do NOT \
+guess a human relationship. When the transcript DOES identify a pet, say so: "Leo is \
+the family dog".
+
 Example — if the user says "Set a timer for 10 minutes, I am grilling steaks for my brother Mike":
 [{"category": "fact", "key": "brother_name", "content": "Has a brother named Mike"}, \
 {"category": "preference", "key": "cooking_style", "content": "Enjoys grilling"}]
+
+Counter-example — if the user says "Leo took his medicine": there is NO stated \
+relationship and no species; the most you may store is \
+[{"category": "fact", "key": "leo_medication", "content": "Someone in the household named Leo takes medicine"}] \
+— never "Brother Leo" or any other invented relationship.
 
 Output ONLY the JSON array — no reasoning, no explanation, and no <think> block. If nothing is worth remembering, output []."""
 
