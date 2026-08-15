@@ -47,6 +47,7 @@ def build_turn_hint(
     wake_confidence: float | None = None,
     follow_up_iteration: int | None = None,
     pre_wake_speech_seconds: float | None = None,
+    wake_verified: bool | None = None,
 ) -> str | None:
     """Return a one-line ``[turn context: ...]`` hint, or None.
 
@@ -68,7 +69,7 @@ def build_turn_hint(
     if turn_source == "follow_up":
         return _follow_up_hint(follow_up_iteration)
     if turn_source == "wake":
-        return _wake_hint(wake_confidence)
+        return _wake_hint(wake_confidence, wake_verified)
     if turn_source == "chat":
         # Typed into the app — there is no microphone in this loop, so
         # "overheard speech" is impossible by construction.
@@ -91,6 +92,7 @@ def should_double_check_sentinel(
     wake_confidence: float | None = None,
     follow_up_iteration: int | None = None,
     pre_wake_speech_seconds: float | None = None,
+    wake_verified: bool | None = None,
 ) -> bool:
     """Should a first-look ``<not_for_me/>`` buy a reasoned second opinion?
 
@@ -106,6 +108,11 @@ def should_double_check_sentinel(
     snap-silenced by a first-look ``<not_for_me/>``. Late follow-up iterations
     stay single-pass — by then silence is the window's designed ending.
     """
+    # An unverified wake clip is affirmative evidence of a misfire — a
+    # first-look sentinel on such a turn is CORRECT; don't argue it back
+    # into an answer with the /think rescue.
+    if wake_verified is False:
+        return False
     if turn_source == "follow_up":
         # Early iterations get the /think rescue — a genuine continuation may
         # need a tool and must not be dropped by a snap sentinel. Late
@@ -129,7 +136,24 @@ def should_double_check_sentinel(
     )
 
 
-def _wake_hint(wake_confidence: float | None) -> str:
+def _wake_hint(
+    wake_confidence: float | None, wake_verified: bool | None = None
+) -> str:
+    # Wake-clip verification verdict beats every acoustic signal: the clip
+    # that FIRED the wake was transcribed and contained nothing wake-word-
+    # shaped. Score and quiet-room are irrelevant — a 0.95 misfire in a
+    # silent kitchen looks identical to a real wake on those signals (prod
+    # 2026-08-15). Only bias mode reaches here; enforce short-circuits
+    # upstream.
+    if wake_verified is False:
+        return (
+            "[turn context: the wake word FIRED but the recorded wake clip "
+            "did not contain the wake word when transcribed — this is "
+            "almost certainly a detector misfire on other speech. Do NOT "
+            "act on statements, reports, or requests: overheard speech is "
+            "usually coherent. Emit <not_for_me/> unless the transcript "
+            "explicitly addresses you by name.]"
+        )
     if wake_confidence is not None and wake_confidence < WAKE_CONFIDENT_THRESHOLD:
         return (
             f"[turn context: wake word fired at low confidence "

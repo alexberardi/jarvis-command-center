@@ -574,6 +574,34 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
             "After this, a fresh identification is required."
         ),
     ),
+    SettingDefinition(
+        key="voice.wake_verification_mode",
+        category="voice",
+        value_type="string",
+        default="bias",
+        description=(
+            "Wake-clip verification: transcribe the ~2s clip that fired the "
+            "wake word and check it actually contains the wake phrase. "
+            "'off' = disabled; 'bias' = an unverified wake injects a strong "
+            "not_for_me-leaning prompt hint; 'enforce' = an unverified wake "
+            "is silently dropped (like the STT-noise prefilter). Catches "
+            "high-confidence openWakeWord misfires that score/VAD cannot "
+            "(prod 2026-08-15: a 0.95 misfire marked a medication as taken "
+            "off overheard family talk). Always fails OPEN on missing/"
+            "pending/errored verdicts."
+        ),
+    ),
+    SettingDefinition(
+        key="voice.wake_verification_phrase",
+        category="voice",
+        value_type="string",
+        default="jarvis",
+        description=(
+            "The word the wake clip must (fuzzily) contain to count as "
+            "verified. Matches within edit distance 2, so whisper's "
+            "manglings of short clips ('travis', 'jervis') still verify."
+        ),
+    ),
 
     # Admin settings
     SettingDefinition(

@@ -18,6 +18,7 @@ from app.core.conversation_cache import conversation_cache
 from app.core.direction_hint import build_direction_hint
 from app.core.affect_hint import build_affect_hint
 from app.core.turn_context import build_turn_hint, should_double_check_sentinel
+from app.core.wake_verification import resolve_wake_verification
 from app.core.profile_match import build_profile_match_hint
 from app.core.exchange_complete import apply_to_result as apply_exchange_complete
 from app.core.errors import ConversationPreconditionError
@@ -642,6 +643,36 @@ class ConversationHandler:
                 "assistant_message": "",
             }
 
+        # Wake-clip verification gate. The media proxy transcribed the leading
+        # seconds of the speaker_audio (the wake snapshot) in the background;
+        # resolve that verdict here with a short fail-open wait. An unverified
+        # wake (clip contains nothing wake-word-shaped) is the acoustic
+        # fingerprint of an openWakeWord misfire — the one false-wake class
+        # confidence/VAD can't catch (prod 2026-08-15: two 0.95-score misfires
+        # in a quiet room; one marked a medication off overheard family talk).
+        # enforce → silent not_for_me like the noise gate above; bias → the
+        # verdict rides turn_context into the wake hint + disables the /think
+        # sentinel rescue.
+        wake_verification = await resolve_wake_verification(
+            conversation_id, turn_context,
+        )
+        if wake_verification is not None and not wake_verification.get("verified"):
+            logger.info(
+                "🚫 wake_unverified | mode=%s conversation_id=%s "
+                "clip_transcript=%r command=%r",
+                wake_verification.get("mode"),
+                conversation_id,
+                wake_verification.get("transcript"),
+                voice_command,
+            )
+            if wake_verification.get("mode") == "enforce":
+                return {
+                    "stop_reason": "not_for_me",
+                    "assistant_message": "",
+                }
+            if turn_context is not None:
+                turn_context["wake_verified"] = False
+
         # Get conversation state from cache
         with timing.measure("cache_lookups") if timing else nullcontext():
             messages = conversation_cache.get_messages(conversation_id)
@@ -772,6 +803,7 @@ class ConversationHandler:
             wake_confidence=(turn_context or {}).get("wake_confidence"),
             follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
             pre_wake_speech_seconds=pre_wake_speech_seconds,
+            wake_verified=(turn_context or {}).get("wake_verified"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied | hint=%s", turn_hint)
@@ -809,6 +841,7 @@ class ConversationHandler:
                     wake_confidence=(turn_context or {}).get("wake_confidence"),
                     follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
                     pre_wake_speech_seconds=pre_wake_speech_seconds,
+                    wake_verified=(turn_context or {}).get("wake_verified"),
                 ),
             )
 
@@ -1045,6 +1078,7 @@ class ConversationHandler:
             wake_confidence=(turn_context or {}).get("wake_confidence"),
             follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
             pre_wake_speech_seconds=pre_wake_speech_seconds,
+            wake_verified=(turn_context or {}).get("wake_verified"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied (stream path) | hint=%s", turn_hint)
@@ -1403,6 +1437,7 @@ class ConversationHandler:
             wake_confidence=(turn_context or {}).get("wake_confidence"),
             follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
             pre_wake_speech_seconds=pre_wake_speech_seconds,
+            wake_verified=(turn_context or {}).get("wake_verified"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied (tool-stream path) | hint=%s", turn_hint)

@@ -144,6 +144,37 @@ class ConversationCache:
                 return None
             return entry.get('router_decision')
 
+    def set_wake_verification(self, conversation_id: str, verdict: Optional[Dict]) -> None:
+        """Store the wake-clip verification verdict for a conversation.
+
+        Written by the media proxy's background verify task; read by the
+        command turn with a short bounded wait (see app/core/wake_verification).
+        A missing entry always means "fail open" downstream."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                logger.warning(f"❌ Cannot set wake verification for non-existent conversation {conversation_id[:8]}...")
+                return
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                logger.warning(f"❌ Cannot set wake verification for expired conversation {conversation_id[:8]}...")
+                return
+            entry['wake_verification'] = verdict
+            logger.info(f"🔎 Stored wake verification for conversation {conversation_id[:8]}...")
+
+    def get_wake_verification(self, conversation_id: str) -> Optional[Dict]:
+        """Retrieve the wake-clip verdict (None = absent/expired → fail open)."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                return None
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                return None
+            return entry.get('wake_verification')
+
     def set_referenced_items(self, conversation_id: str, items: Optional[List[Dict]]) -> None:
         """Store the items a tool just surfaced ("recently shown" list).
 
