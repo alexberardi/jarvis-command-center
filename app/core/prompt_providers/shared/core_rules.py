@@ -370,6 +370,30 @@ def build_ambient_context_block(ambient_text: str | None) -> str:
     )
 
 
+def render_signal_block(signals: list) -> str:
+    """Render Signal rows into deterministic situational lines for the ambient bundle.
+
+    Accepts anything with ``.kind`` / ``.subject`` / ``.summary`` (real Signal rows
+    or test stand-ins). Skips blank summaries; stable-sorts by ``(kind, subject)`` so
+    the bundle text does not churn between assemblies; joins the summaries one per
+    line (each is already a full natural-language sentence). Returns ``""`` when
+    nothing is renderable — the caller then appends nothing.
+    """
+    items = [
+        s for s in signals
+        if getattr(s, "summary", None) and str(s.summary).strip()
+    ]
+    if not items:
+        return ""
+    items.sort(
+        key=lambda s: (
+            (getattr(s, "kind", "") or ""),
+            (getattr(s, "subject", "") or ""),
+        )
+    )
+    return "\n".join(str(s.summary).strip() for s in items)
+
+
 def build_personality_reminder(persona_text: str | None) -> str:
     """Return the END-OF-PROMPT voice reminder that restates the household voice.
 

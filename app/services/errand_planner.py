@@ -385,17 +385,22 @@ def _strip_think(text: str) -> str:
     return text
 
 
-async def _run_planner(prompt: str, llm_client: Any) -> dict[str, Any]:
+async def _run_planner(
+    prompt: str, llm_client: Any, *, extra_body: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Single planner LLM call → parsed JSON dict. Raises ValueError on an empty
-    or unparseable response. Thinking is ON (the model decomposes multi-part
-    instructions), so we strip the <think> block and give max_tokens headroom for
-    both the reasoning and the JSON."""
+    or unparseable response. Thinking is ON by default (the model decomposes
+    multi-part instructions), so we strip the <think> block and give max_tokens
+    headroom for both the reasoning and the JSON. Callers whose task does NOT want
+    thinking (e.g. the situation matcher, where Qwen3.5 reasons without bound) pass
+    ``extra_body={"chat_template_kwargs": {"enable_thinking": False}}``."""
     response = await llm_client.chat_completion(
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         # Room for the <think> reasoning pass (measured up to ~1900 tokens) AND the
         # JSON that follows. Too tight and the JSON is truncated (finish=length).
         max_tokens=3500,
+        extra_body=extra_body,
     )
     raw = _extract_content(response)
     if not raw:

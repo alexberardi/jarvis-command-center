@@ -420,6 +420,44 @@ class PersonCharacterization(Base):
     )
 
 
+class Signal(Base):
+    """A generic, self-describing world-state observation for the Signal Bus.
+
+    Any producer (node agent, phone geofence, an internal microservice, or an
+    external system via the API) writes a Signal; the reactive renderer surfaces
+    it to the LLM and the proactive matcher reasons over it. ``kind`` is a
+    descriptive label, NEVER control flow. ``source_key`` is the stable dedup +
+    suppression key: the same logical fact re-observed UPSERTs one row.
+
+    Stored in its OWN table (not ``user_memories``) so situational/location
+    facts never leak into the recall tool or the embedding sweep.
+    """
+    __tablename__ = 'signals'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    household_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True, index=True)     # NULL = household-wide
+    node_id = Column(String(255), nullable=True)
+    room = Column(String(255), nullable=True)
+    kind = Column(String(255), nullable=False, index=True)   # label only, never control flow
+    subject = Column(String(255), nullable=True)             # sub-key within a kind
+    source_key = Column(String(512), nullable=False)         # stable dedup + suppression key
+    summary = Column(Text, nullable=True)                    # the NL line the matcher reads
+    facts = Column(Text, nullable=True)                      # typed payload, JSON-serialized
+    source_agent = Column(String(255), nullable=True)        # self-declared producer id
+    cacheable = Column(Boolean, nullable=False, default=False)   # may ride the cached prefix?
+    salience = Column(Float, nullable=True)                  # capped ranking hint
+    observed_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True, index=True)  # NULL = never expires
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('household_id', 'source_key', name='uq_signals_household_source'),
+    )
+
+
 class ConversationTranscript(Base):
     """Buffered voice conversation transcript for passive memory extraction.
 

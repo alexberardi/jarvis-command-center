@@ -375,6 +375,25 @@ async def startup_event():
 
     asyncio.create_task(_periodic_memory_cleanup())
 
+    # Schedule expired Signal cleanup (Signal Bus TTL sweep — mirrors memory cleanup)
+    async def _periodic_signal_cleanup() -> None:
+        await asyncio.sleep(90)
+        while True:
+            await asyncio.sleep(1800)  # every 30 min
+            try:
+                from app.services.signal_service import SignalService
+                db = SessionLocal()
+                try:
+                    cleaned = SignalService(db).cleanup_expired()
+                    if cleaned:
+                        logger.info("Cleaned up %d expired signals", cleaned)
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("Signal cleanup failed: %s", e)
+
+    asyncio.create_task(_periodic_signal_cleanup())
+
     # Node-update task sweeper — fails any update task that's clearly dead.
     # Two thresholds:
     #   - ANY_STATE_CEILING (created_at): 15 min outer ceiling regardless
@@ -481,6 +500,18 @@ async def startup_event():
     from app.services.proposable_action_service import register_proposable_action_callbacks
 
     register_proposable_action_callbacks()
+
+    # Signal Bus proactive reasoner: capture the main loop so a SYNC endpoint
+    # (threadpool, no running loop) can still schedule the debounced reason pass.
+    from app.services.situation_matcher_service import set_main_loop
+    set_main_loop(asyncio.get_running_loop())
+    # Same for the generic signal-reaction registry (schedules deterministic reactions
+    # off the sync ingest path), then register the reactions — each names its own kind,
+    # so ingest and dispatch stay kind-agnostic.
+    from app.services.signal_reaction_registry import set_main_loop as set_reaction_loop
+    set_reaction_loop(asyncio.get_running_loop())
+    from app.services.signal_reaction_bridge import register_leave_by_reaction
+    register_leave_by_reaction()
 
     async def _periodic_phone_reaper() -> None:
         while True:
@@ -722,6 +753,9 @@ app.include_router(node_mqtt.router, prefix="/api/v0", tags=["node-mqtt"])
 from app.api import memories
 app.include_router(memories.router, prefix="/api/v0", tags=["memories"])
 
+from app.api import signals
+app.include_router(signals.router, prefix="/api/v0", tags=["signals"])
+
 # Mobile-facing memory CRUD (user JWT, role-scoped)
 from app.api import mobile_memories
 app.include_router(mobile_memories.router, prefix="/api/v0", tags=["mobile-memories"])
@@ -800,6 +834,9 @@ app.include_router(mobile_command_data.router, prefix="/api/v0/mobile", tags=["m
 from app.api import mobile_household_settings
 app.include_router(mobile_household_settings.router, prefix="/api/v0/mobile", tags=["mobile-household-settings"])
 
+from app.api import mobile_presence
+app.include_router(mobile_presence.router, prefix="/api/v0/mobile", tags=["mobile-presence"])
+
 from app.api import mobile_phone_contacts
 app.include_router(mobile_phone_contacts.router, prefix="/api/v0/mobile", tags=["mobile-phone-contacts"])
 from app.api import mobile_call_context
@@ -852,6 +889,19 @@ async def start_conversation(
             "adapter_hash": None,
             "household_id": node_context_provider.household_id,
         }
+
+        # Household home context (currently the locality from household.location) so
+        # node commands + agents can read the household's location without a
+        # duplicated per-command secret or an HTTP round-trip back here. Keyed on the
+        # server-trusted household_id; None when unset → the consumer falls back to
+        # its own secret. Captured in a local so it survives warmup re-enriching
+        # node_context, and delivered to the node on the return below.
+        from app.services.phone_number_search import household_location
+
+        _home_loc = household_location(node_context_provider.household_id)
+        home_context = {"location": _home_loc} if _home_loc else None
+        if home_context:
+            node_context["home_context"] = home_context
 
         # Phase 5: household-level adapter deployment takes precedence over the
         # legacy per-node adapter_hash column. A household-active adapter wins
@@ -1010,8 +1060,11 @@ async def start_conversation(
             )
 
         latency_logger.end_request(request.conversation_id)
-        # Return success immediately - LLM warm-up and cache population will happen in background
-        return {"status": "success", "conversation_id": request.conversation_id}
+        # Return success immediately - LLM warm-up and cache population will happen in background.
+        # home_context rides this response so the node can cache the household's location
+        # (self-healing: every conversation/start reasserts the current value).
+        return {"status": "success", "conversation_id": request.conversation_id,
+                "home_context": home_context}
 
     except Exception as e:
         latency_logger.end_request(request.conversation_id)
@@ -1847,6 +1900,26 @@ async def memory_extraction_callback(request: Request):
         await handle_extraction_callback(payload)
     except Exception as e:
         logger.error("Memory extraction callback failed: %s", e, exc_info=True)
+
+    return {"status": "ok"}
+
+
+@v0_router.post("/situation-matcher/callback", name="situation_matcher_callback")
+async def situation_matcher_callback(request: Request):
+    """Receive the background-model queue callback for a proactive situation match."""
+    _verify_callback_auth(request)
+
+    payload = await request.json()
+    logger.info(
+        "Situation matcher callback: job_id=%s status=%s",
+        payload.get("job_id"), payload.get("status"),
+    )
+
+    from app.services.situation_matcher_service import handle_match_callback
+    try:
+        await handle_match_callback(payload)
+    except Exception as e:
+        logger.error("Situation matcher callback failed: %s", e, exc_info=True)
 
     return {"status": "ok"}
 

@@ -48,6 +48,15 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         env_fallback="JARVIS_TOOL_CLASSIFIER_MIN_CONFIDENCE",
     ),
 
+    # Signal Bus settings
+    SettingDefinition(
+        key="signals.enabled",
+        category="signals",
+        value_type="bool",
+        default=True,
+        description="Enable the Signal Bus ingress + reactive rendering for this household",
+    ),
+
     # Tool router settings
     # Transcription settings
     SettingDefinition(
@@ -320,6 +329,35 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
             "proposes a command' card (e.g. an email agent's 'Add to calendar?') "
             "is refused server-side. Fail-closed — any settings error disables it "
             "— because it lets background agents originate real writes."
+        ),
+    ),
+    SettingDefinition(
+        key="proposals.proactive_enabled",
+        category="proposals",
+        value_type="bool",
+        default=False,
+        description=(
+            "Enable the PROACTIVE Signal reasoner (situation matcher). When off "
+            "(default), Signal edges never trigger a background reason pass; the "
+            "reactive 'who's home' rendering still works. Requires proposals.enabled "
+            "as well. Runs on the background model, only ever proposes a card. Keep "
+            "off until the offline precision harness clears the model. Fail-closed."
+        ),
+    ),
+    SettingDefinition(
+        key="errands.autonomous_enabled",
+        category="errands",
+        value_type="bool",
+        default=False,
+        description=(
+            "Allow a Signal to AUTORUN a low-blast multi-step plan without a "
+            "tap-to-confirm card (e.g. an upcoming appointment auto-checks drive time "
+            "and sets a leave-by reminder). When off (default), a signal-triggered "
+            "plan is proposed as a card instead of executed. Even when on, only plans "
+            "that pass the plan-start blast gate (allowlisted, non-risky, no outbound "
+            "counterparty, few steps) autorun; anything else falls back to a card. "
+            "Fail-closed — any settings error disables autorun — because it lets a "
+            "background signal originate real writes with no human confirmation."
         ),
     ),
     SettingDefinition(
