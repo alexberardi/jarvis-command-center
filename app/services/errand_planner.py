@@ -386,20 +386,30 @@ def _strip_think(text: str) -> str:
 
 
 async def _run_planner(
-    prompt: str, llm_client: Any, *, extra_body: dict[str, Any] | None = None
+    prompt: str,
+    llm_client: Any,
+    *,
+    extra_body: dict[str, Any] | None = None,
+    model: str = "background",
 ) -> dict[str, Any]:
     """Single planner LLM call → parsed JSON dict. Raises ValueError on an empty
-    or unparseable response. Thinking is ON by default (the model decomposes
-    multi-part instructions), so we strip the <think> block and give max_tokens
-    headroom for both the reasoning and the JSON. Callers whose task does NOT want
-    thinking (e.g. the situation matcher, where Qwen3.5 reasons without bound) pass
-    ``extra_body={"chat_template_kwargs": {"enable_thinking": False}}``."""
+    or unparseable response. Runs on the BACKGROUND model slot so planning never
+    contends with the live voice slot for a serving turn. Thinking is ON by
+    default (the model decomposes multi-part instructions), so we strip the
+    <think> block and give max_tokens headroom for both the reasoning and the
+    JSON. Callers whose task does NOT want thinking (e.g. the situation matcher,
+    where reasoning models run away on the prompt) pass
+    ``extra_body={"reasoning_budget": 0}``."""
     response = await llm_client.chat_completion(
         messages=[{"role": "user", "content": prompt}],
+        model=model,
         temperature=0,
-        # Room for the <think> reasoning pass (measured up to ~1900 tokens) AND the
-        # JSON that follows. Too tight and the JSON is truncated (finish=length).
-        max_tokens=3500,
+        # Room for the <think> reasoning pass AND the JSON that follows. Too tight
+        # and the JSON is truncated (finish=length). Measured up to ~1900 think
+        # tokens on Qwen3.5-9B; a larger reasoning model at high effort needs more,
+        # but this is also the hard ceiling on how long one planning call can
+        # occupy the GPU — don't raise it without watching background-job latency.
+        max_tokens=6000,
         extra_body=extra_body,
     )
     raw = _extract_content(response)

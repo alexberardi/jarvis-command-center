@@ -339,3 +339,11 @@ def test_replan_from_progress_allows_an_empty_continuation():
         "g", [], [], "reason", client,
         menu=[{"command": "x", "description": "", "args": {}}]))
     assert plan.steps == []
+
+
+def test_planner_runs_on_background_model_slot():
+    """Planning is background work — it must target the proxy's background model
+    slot (thinking ON there) and never contend for the live voice slot."""
+    client = _client(_plan({"summary": "s", "steps": []}))
+    asyncio.run(errand_planner._run_planner("prompt", client))
+    assert client.chat_completion.call_args.kwargs["model"] == "background"
