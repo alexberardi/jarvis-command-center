@@ -61,3 +61,35 @@ class TestBuildDirectionHint:
         hint = build_direction_hint(measured)
         assert hint is not None
         assert f"{measured:.1f}" in hint
+
+
+class TestMiddleBandLowConfidence:
+    """The combined-signal branch: ambiguous VAD + marginal wake score →
+    ambient-leaning hint (the kitchen-conversation signature). Middle band
+    stays silent at normal confidence, for follow-up turns, and when the
+    score is unknown."""
+
+    def test_middle_band_low_confidence_wake_gets_ambient_hint(self):
+        hint = build_direction_hint(3.0, wake_confidence=0.45, turn_source="wake")
+        assert hint is not None
+        assert "<not_for_me/>" in hint
+        assert "marginal" in hint
+
+    def test_middle_band_confident_wake_stays_silent(self):
+        assert build_direction_hint(3.0, wake_confidence=0.9, turn_source="wake") is None
+
+    def test_middle_band_unknown_confidence_stays_silent(self):
+        assert build_direction_hint(3.0, turn_source="wake") is None
+
+    def test_middle_band_follow_up_stays_silent(self):
+        assert build_direction_hint(3.0, wake_confidence=0.45, turn_source="follow_up") is None
+
+    def test_quiet_room_unaffected_by_low_confidence(self):
+        hint = build_direction_hint(0.5, wake_confidence=0.45, turn_source="wake")
+        assert hint is not None
+        assert "directed at you" in hint
+
+    def test_active_band_unaffected(self):
+        hint = build_direction_hint(4.9, wake_confidence=0.9, turn_source="wake")
+        assert hint is not None
+        assert "conversation between people" in hint
