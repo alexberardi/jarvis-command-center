@@ -749,7 +749,11 @@ class ConversationHandler:
             self.prompt_provider.user_message_suffix
             if self.prompt_provider else ""
         )
-        direction_hint: str | None = build_direction_hint(pre_wake_speech_seconds)
+        direction_hint: str | None = build_direction_hint(
+            pre_wake_speech_seconds,
+            wake_confidence=(turn_context or {}).get("wake_confidence"),
+            turn_source=(turn_context or {}).get("source"),
+        )
         if direction_hint:
             logger.info(
                 "🎯 Direction hint applied | pre_wake_speech_seconds=%.2f | hint=%s",
@@ -1019,7 +1023,11 @@ class ConversationHandler:
             self.prompt_provider.user_message_suffix
             if self.prompt_provider else ""
         )
-        direction_hint: str | None = build_direction_hint(pre_wake_speech_seconds)
+        direction_hint: str | None = build_direction_hint(
+            pre_wake_speech_seconds,
+            wake_confidence=(turn_context or {}).get("wake_confidence"),
+            turn_source=(turn_context or {}).get("source"),
+        )
         if direction_hint:
             logger.info(
                 "🎯 Direction hint applied (stream path) | pre_wake_speech_seconds=%.2f",
@@ -1373,7 +1381,11 @@ class ConversationHandler:
 
         # Append user message
         suffix = self.prompt_provider.user_message_suffix or ""
-        direction_hint: str | None = build_direction_hint(pre_wake_speech_seconds)
+        direction_hint: str | None = build_direction_hint(
+            pre_wake_speech_seconds,
+            wake_confidence=(turn_context or {}).get("wake_confidence"),
+            turn_source=(turn_context or {}).get("source"),
+        )
         if direction_hint:
             logger.info(
                 "🎯 Direction hint applied (tool-stream path) | pre_wake_speech_seconds=%.2f",
