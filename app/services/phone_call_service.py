@@ -801,7 +801,7 @@ async def _draft_details(
                         "before calling)'. Never include payment details. "
                         "Stay strictly consistent with the goal: never mix "
                         "pickup and delivery; only include an address for a "
-                        "delivery; invent no facts. /no_think"
+                        "delivery; invent no facts."
                     ),
                 },
                 {
@@ -816,6 +816,11 @@ async def _draft_details(
             temperature=0.3,
             include_date_context=True,
             max_tokens=200,
+            # Thinking OFF: with a reasoning background model, a think pass would
+            # swallow the 200-token budget and the brief would come back empty.
+            # The old /no_think sat in the SYSTEM turn, a placement Qwen ignores;
+            # reasoning_budget=0 is the contract that actually reaches the model.
+            extra_body={"reasoning_budget": 0},
         )
         content = (result.get("content") or result.get("message") or "").strip()
         return _ensure_times_section(goal, content or goal)

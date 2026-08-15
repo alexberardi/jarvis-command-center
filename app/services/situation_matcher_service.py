@@ -183,9 +183,9 @@ async def _enqueue(
             "model": "background",  # <-- off the live voice slot
             "messages": [{"role": "user", "content": prompt}],
             "sampling": {"temperature": 0.0},
-            # Bound the thinking model's reasoning (Qwen3.5 runs away on this prompt).
-            # Parity with the live match_situation path; forwarded to the sidecar by
-            # the model service. Harmless on models/templates that don't use it.
+            # Thinking OFF for this job (Qwen3.5+ runs away on this prompt).
+            # reasoning_budget=0 rides QueueRequest → the worker forwards it to
+            # the background slot. Parity with the live match_situation path.
             **SITUATION_MATCH_EXTRA_BODY,
         },
         "callback": callback,

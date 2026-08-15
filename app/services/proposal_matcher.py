@@ -31,13 +31,14 @@ from app.services.proposable_action_service import validate_against_params
 
 logger = logging.getLogger("uvicorn")
 
-# Bound the background model's chain-of-thought for situation matching. Qwen3.5
+# Disable the background model's chain-of-thought for situation matching. Qwen3.5
 # exhibits RUNAWAY reasoning on this prompt — it fills any max_tokens budget with
 # reasoning and never emits the answer (measured: 13k chars @3500 tok, 27k @8000,
-# always finish=length + empty content). Passed as a chat-template kwarg the sidecar
-# honors; harmlessly ignored by models/templates that don't use it. The durable fix
-# is serving-side (a reasoning budget on the background slot); this is the CC lever.
-SITUATION_MATCH_EXTRA_BODY: dict[str, Any] = {"chat_template_kwargs": {"enable_thinking": False}}
+# always finish=length + empty content). `reasoning_budget: 0` is the proxy's
+# backend-agnostic thinking-off contract: it survives both the sync request path
+# and queue jobs (the old `chat_template_kwargs` form was silently dropped at the
+# proxy's GenerationParams hop and never reached the model).
+SITUATION_MATCH_EXTRA_BODY: dict[str, Any] = {"reasoning_budget": 0}
 
 
 def _stable_idempotency_key(data: dict[str, Any], command: str, action: str) -> str:

@@ -139,15 +139,9 @@ async def _enqueue_extraction(
         {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
         {
             "role": "user",
-            # `/no_think` is Qwen3's control token to disable chain-of-thought — the
-            # ONLY reliable way to suppress it. The system prompt's "no <think> block"
-            # text is ignored: extraction jobs were emitting ~1.5k-token reasoning
-            # blocks (~9.5s each) that get stripped later anyway but burn the shared
-            # GPU while live voice turns wait behind them in the queue. Must live in a
-            # USER turn (system-prompt placement is ignored by Qwen3).
             "content": (
                 f"Existing memories for this user:\n{existing_memories}\n\n"
-                f"Recent conversations:\n{transcript_text}\n\n/no_think"
+                f"Recent conversations:\n{transcript_text}"
             ),
         },
     ]
@@ -186,6 +180,13 @@ async def _enqueue_extraction(
                 # at ~67%. Consistency matters more than sampling diversity here.
                 "temperature": 0.0,
             },
+            # Thinking OFF: extraction is structured + factual, and reasoning here
+            # only burns the shared GPU (~1.5k think tokens / ~9.5s per job measured
+            # on Qwen3-8B) while live voice turns wait. This replaces the old Qwen3
+            # `/no_think` user-turn token, which newer Qwen generations ignore; the
+            # proxy maps 0 → enable_thinking=false (REST) / empty-<think> prefill
+            # (in-process GGUF), so it works regardless of backend.
+            "reasoning_budget": 0,
         },
         "callback": callback,
     }

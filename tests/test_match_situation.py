@@ -113,12 +113,14 @@ def test_merged_form_still_dropped_when_split_is_not_a_real_key():
 
 
 def test_situation_match_disables_thinking():
-    # Qwen3.5 runs away reasoning on this prompt, so the situation matcher pins
-    # enable_thinking=false via extra_body (the errand planner keeps thinking on).
+    # Reasoning models run away on this prompt, so the situation matcher pins
+    # reasoning_budget=0 via extra_body (the errand planner keeps thinking on).
+    # The old chat_template_kwargs form was silently dropped by the proxy —
+    # reasoning_budget is the field that actually reaches the model.
     llm = _llm([])
     asyncio.run(pm.match_situation(bundle=_bundle(), node_id="n", llm_client=llm, fetch=_fetch_report()))
     extra = llm.chat_completion.call_args.kwargs.get("extra_body") or {}
-    assert extra.get("chat_template_kwargs", {}).get("enable_thinking") is False
+    assert extra.get("reasoning_budget") == 0
 
 
 def test_situation_prompt_guards_against_acting_on_ongoing_state():

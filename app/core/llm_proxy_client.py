@@ -75,8 +75,10 @@ class LLMProxyClient:
             max_tokens: Optional max tokens for completion. When set, overrides
                 the LLM proxy's server-side default.
             extra_body: Optional passthrough fields merged into the request payload
-                (e.g. ``{"chat_template_kwargs": {"enable_thinking": False}}`` to bound
-                a thinking model's reasoning). Merged last, so it can override defaults.
+                (e.g. ``{"reasoning_budget": 0}`` to disable a thinking model's
+                reasoning). Merged last, so it can override defaults. NOTE: only
+                fields the proxy declares on ChatCompletionRequest reach the model —
+                ``chat_template_kwargs`` is accepted but silently dropped there.
         """
         import time
         start_time = time.time()

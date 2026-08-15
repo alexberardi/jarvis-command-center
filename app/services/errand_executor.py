@@ -126,20 +126,24 @@ async def _compose_errand_message(goal: str, results: list[dict[str, Any]], fall
         "If the goal mentions such an action but there is NO step for it above, you MUST "
         "state it was NOT done (e.g. 'I checked the forecast — 100% rain — but I did not set "
         "a reminder'). Do not imply a conditional follow-up happened just because its "
-        "condition was met. No preamble, no markdown.\n\n/no_think"
+        "condition was met. No preamble, no markdown."
     )
     try:
         from app.core.llm_proxy_client import LLMProxyClient
 
         response = await LLMProxyClient().chat_completion(
             messages=[{"role": "user", "content": prompt}], temperature=0.3, max_tokens=400,
+            # Thinking OFF: composing the completion message is mechanical, and
+            # reasoning here would eat the 400-token budget. reasoning_budget
+            # replaces the old /no_think token (ignored by newer Qwen models).
+            extra_body={"reasoning_budget": 0},
         )
         content = ""
         if isinstance(response, dict):
             choices = response.get("choices") or []
             if choices:
                 content = choices[0].get("message", {}).get("content", "") or ""
-        # Strip a stray Qwd3 <think> block if /no_think was ignored.
+        # Strip a stray <think> block if thinking suppression was ignored.
         if "</think>" in content:
             content = content.split("</think>", 1)[1]
         content = content.strip()
