@@ -14,7 +14,7 @@ import uuid
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Set
 
-from app.core.conversation_cache import conversation_cache
+from app.core.conversation_cache import conversation_cache, trim_history_to_max_turns
 from app.core.direction_hint import build_direction_hint
 from app.core.affect_hint import build_affect_hint
 from app.core.turn_context import build_turn_hint, should_double_check_sentinel
@@ -58,6 +58,10 @@ from app.core.voice_command_helpers import (
 from app.core.warmup_service import warmup_service
 
 logger = logging.getLogger("uvicorn")
+
+# Fallback for conversation.max_turns when the settings service is unreachable.
+# Must match the definition default in app/services/settings_definitions.py.
+_DEFAULT_MAX_HISTORY_TURNS: int = 10
 
 
 def get_server_tool_names(tools: Optional[List[Dict[str, Any]]]) -> Set[str]:
@@ -729,6 +733,15 @@ class ConversationHandler:
         # never accumulate across a multi-turn conversation and bloat the
         # prompt toward the model's context limit.
         messages[:] = [m for m in messages if not _is_transient_system_block(m)]
+        # Sliding-window history trim (conversation.max_turns): drop the OLDEST
+        # user/assistant exchanges — atomically, tool calls + results ride with
+        # their turn — so the prompt can't grow unbounded within the cache TTL.
+        # Front-drop on the turn boundary keeps the retained tail byte-stable
+        # after the system prefix, so the KV prefix cache re-prefills only from
+        # the trim boundary, never the whole prompt.
+        trim_history_to_max_turns(
+            messages, self._get_max_history_turns(conversation_id)
+        )
         # Reconcile messages[0]'s characterization tail for the confirmed speaker —
         # a no-op (full KV-cache hit) when the warmup prediction was already right.
         _apply_characterization_swap(messages, conversation_id)
@@ -1026,6 +1039,15 @@ class ConversationHandler:
         # never accumulate across a multi-turn conversation and bloat the
         # prompt toward the model's context limit.
         messages[:] = [m for m in messages if not _is_transient_system_block(m)]
+        # Sliding-window history trim (conversation.max_turns): drop the OLDEST
+        # user/assistant exchanges — atomically, tool calls + results ride with
+        # their turn — so the prompt can't grow unbounded within the cache TTL.
+        # Front-drop on the turn boundary keeps the retained tail byte-stable
+        # after the system prefix, so the KV prefix cache re-prefills only from
+        # the trim boundary, never the whole prompt.
+        trim_history_to_max_turns(
+            messages, self._get_max_history_turns(conversation_id)
+        )
         # Reconcile messages[0]'s characterization tail for the confirmed speaker —
         # a no-op (full KV-cache hit) when the warmup prediction was already right.
         _apply_characterization_swap(messages, conversation_id)
@@ -1405,6 +1427,15 @@ class ConversationHandler:
         # never accumulate across a multi-turn conversation and bloat the
         # prompt toward the model's context limit.
         messages[:] = [m for m in messages if not _is_transient_system_block(m)]
+        # Sliding-window history trim (conversation.max_turns): drop the OLDEST
+        # user/assistant exchanges — atomically, tool calls + results ride with
+        # their turn — so the prompt can't grow unbounded within the cache TTL.
+        # Front-drop on the turn boundary keeps the retained tail byte-stable
+        # after the system prefix, so the KV prefix cache re-prefills only from
+        # the trim boundary, never the whole prompt.
+        trim_history_to_max_turns(
+            messages, self._get_max_history_turns(conversation_id)
+        )
         # Reconcile messages[0]'s characterization tail for the confirmed speaker —
         # a no-op (full KV-cache hit) when the warmup prediction was already right.
         _apply_characterization_swap(messages, conversation_id)
@@ -2766,6 +2797,23 @@ class ConversationHandler:
         if self.prompt_provider:
             self.prompt_provider.include_thinking = enabled
         return enabled
+
+    def _get_max_history_turns(self, conversation_id: str) -> int:
+        """conversation.max_turns — sliding-window size for conversation history
+        (per household). Each turn is one user/assistant exchange (including any
+        tool calls/results it made); oldest turns are dropped first at the start
+        of every turn so the prompt can't grow unbounded within the cache TTL."""
+        try:
+            node_ctx = conversation_cache.get_node_context(conversation_id)
+            hh_id = node_ctx.get("household_id") if node_ctx else None
+            val = get_settings_service().get(
+                "conversation.max_turns",
+                default=_DEFAULT_MAX_HISTORY_TURNS,
+                household_id=str(hh_id) if hh_id else None,
+            )
+            return int(val)
+        except Exception:
+            return _DEFAULT_MAX_HISTORY_TURNS
 
     def _get_advanced_context_enabled(self, conversation_id: str) -> bool:
         """model.advanced_context — whether the background agents' weather/calendar/
