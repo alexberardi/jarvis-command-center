@@ -219,3 +219,77 @@ class TestIsShortNonCommandFragment:
 
         assert not is_short_non_command_fragment("")
         assert not is_short_non_command_fragment(None)
+
+
+class TestIsMusicControlShaped:
+    """Music-control shape detector for SELF-PLAYBACK turns. Unlike the
+    device-command guard, bare verbs count ("pause", "skip") — the playing
+    music supplies the object. Only ever consulted when the node reported
+    self-playback, and only ever PREVENTS a suppression-leaning hint."""
+
+    def test_bare_verbs_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        for cmd in ("Pause.", "Stop", "Skip.", "Next", "Resume.", "Mute"):
+            assert is_music_control_shaped(cmd), cmd
+
+    def test_verb_object_forms_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        for cmd in (
+            "Stop the music.",
+            "Skip this song.",
+            "Next track.",
+            "Play some jazz.",
+            "Play the next one.",
+            "Turn it down.",
+            "Turn down the volume.",
+            "Turn off the music.",
+            "Volume up.",
+            "Louder.",
+            "Quieter.",
+        ):
+            assert is_music_control_shaped(cmd), cmd
+
+    def test_politeness_and_wake_prefixes_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        assert is_music_control_shaped("Jarvis, skip this song.")
+        assert is_music_control_shaped("Please pause.")
+        assert is_music_control_shaped("Hey Jarvis, turn it down.")
+
+    def test_questions_do_not_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        assert not is_music_control_shaped("Can you skip this song?")
+        assert not is_music_control_shaped("Skip this one?")
+
+    def test_multi_speaker_dialogue_does_not_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        assert not is_music_control_shaped("- Pause. - Eat it.")
+
+    def test_generic_speech_does_not_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        for text in (
+            "I love this song.",
+            "We stopped by the store earlier.",
+            "He was going to play outside.",
+            "Eat it.",
+            "Oh.",
+        ):
+            assert not is_music_control_shaped(text), text
+
+    def test_empty_is_not_music_control(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        assert not is_music_control_shaped("")
+        assert not is_music_control_shaped(None)
+
+    def test_mid_word_verb_prefix_does_not_match(self):
+        # "stopped"/"playing" must not read as "stop"/"play" (word boundary).
+        from app.core.transcript_filter import is_music_control_shaped
+
+        assert not is_music_control_shaped("Stopping by later.")
+        assert not is_music_control_shaped("Playtime is over soon.")

@@ -19,7 +19,8 @@ not affected.
 
 This module also hosts the transcript SHAPE detectors the false-wake
 defenses share (``is_device_command_shaped``, ``has_multi_speaker_markers``,
-``is_short_non_command_fragment``). They classify the transcript's form,
+``is_short_non_command_fragment``, ``is_music_control_shaped``). They
+classify the transcript's form,
 never its meaning, and feed the direction/turn hints — a device-shaped
 imperative must never be talked out of by acoustic-side evidence alone
 (prod 2026-08-15: two real "turn on the ... lights" commands were
@@ -77,6 +78,29 @@ _DEVICE_COMMAND_RE: re.Pattern[str] = re.compile(
 
 _WORD_RE: re.Pattern[str] = re.compile(r"[\w']+")
 
+# Music-control commands as spoken over the node's OWN music playback. Unlike
+# the device-command guard, bare verbs count ("pause", "skip", "next") — with
+# music audibly playing there is no ambiguity about the object, and users
+# routinely bark the one-word form. Matching stays anchored to a control verb
+# opening the utterance (after an optional politeness/wake prefix) so ordinary
+# speech that merely CONTAINS "play"/"stop" doesn't earn the directed posture.
+# Only consulted when the node reported self-playback (see is_music_control_
+# shaped's callers) — it never fires on normal turns.
+_MUSIC_CONTROL_RE: re.Pattern[str] = re.compile(
+    r"^\s*(?:hey\s+)?(?:\w+[,.!]\s+)?(?:please,?\s+)?"
+    r"(?:"
+    r"(?:stop|pause|resume|skip|mute|unmute)\b"
+    r"|next\b"
+    r"|play\b"
+    r"|(?:turn|crank)\s+(?:it|that|this|the\s+\w+)\s+(?:up|down)\b"
+    r"|turn\s+(?:up|down|off)\s+the\s+\w+"
+    r"|volume\s+(?:up|down)\b"
+    r"|(?:louder|quieter|softer)\b"
+    r"|(?:go\s+back|previous)\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def has_multi_speaker_markers(text: str | None) -> bool:
     """True when the transcript carries whisper's multi-speaker dash notation.
@@ -109,6 +133,29 @@ def is_device_command_shaped(text: str | None) -> bool:
     if has_multi_speaker_markers(stripped):
         return False
     return _DEVICE_COMMAND_RE.match(stripped) is not None
+
+
+def is_music_control_shaped(text: str | None) -> bool:
+    """True when the transcript reads as a music-control command.
+
+    Shape: a music-control verb ("stop", "pause", "skip", "next", "play
+    ...", "volume up/down", "turn it up/down", "louder") opening the
+    utterance, single-speaker, not a question. Meant for turns where the
+    node reported SELF-PLAYBACK — with music coming out of the node's own
+    speaker, these shapes are how users talk to Jarvis over the music and
+    deserve the directed posture explicitly. Like the device-command guard
+    this signal only ever PREVENTS a suppression-leaning hint (fail-open),
+    so it errs generous; unlike it, bare verbs ("pause") count because the
+    playing music supplies the object.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped or "?" in stripped:
+        return False
+    if has_multi_speaker_markers(stripped):
+        return False
+    return _MUSIC_CONTROL_RE.match(stripped) is not None
 
 
 def is_short_non_command_fragment(text: str | None) -> bool:

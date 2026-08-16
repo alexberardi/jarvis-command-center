@@ -624,11 +624,12 @@ class ConversationHandler:
             return False
         logger.info(
             "🚫 wake_unverified | verdict=%s mode=%s node_id=%s "
-            "conversation_id=%s clip_transcript=%r command=%r",
+            "conversation_id=%s self_playback=%s clip_transcript=%r command=%r",
             wake_verification.get("verdict") or "unverified",
             wake_verification.get("mode"),
             node_ctx.get("node_id"),
             conversation_id,
+            bool((turn_context or {}).get("self_playback")),
             wake_verification.get("transcript"),
             voice_command,
         )
@@ -838,6 +839,8 @@ class ConversationHandler:
             turn_source=(turn_context or {}).get("source"),
             transcript=voice_command,
             speaker_known=speaker_user_id is not None,
+            self_playback=(turn_context or {}).get("self_playback"),
+            self_playback_kind=(turn_context or {}).get("self_playback_kind"),
         )
         if direction_hint:
             logger.info(
@@ -859,6 +862,8 @@ class ConversationHandler:
             pre_wake_speech_seconds=pre_wake_speech_seconds,
             wake_verified=(turn_context or {}).get("wake_verified"),
             transcript=voice_command,
+            self_playback=(turn_context or {}).get("self_playback"),
+            self_playback_kind=(turn_context or {}).get("self_playback_kind"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied | hint=%s", turn_hint)
@@ -951,18 +956,31 @@ class ConversationHandler:
             # node_id + wake_verdict ride every sentinel line so the
             # measurement panel can join suppressions to nodes and to the
             # wake-verify verdict stream without log archaeology.
+            # self_playback rides too: a sentinel on a mid-music turn is a
+            # different population (VAD uninformative, clip degraded by
+            # bleed) and the panel must be able to split on it.
             _sentinel_node_id = (_turn_node_ctx or {}).get("node_id")
             _wake_verdict = (
                 "unverified"
                 if (turn_context or {}).get("wake_verified") is False
                 else "none"
             )
+            _self_playback = bool((turn_context or {}).get("self_playback"))
+            # NOTE (node cooldown interplay): the node arms its not_for_me
+            # soft cooldown purely node-side on this verdict (node
+            # core/wake_loop.py — arm_not_for_me_cooldown on
+            # result["not_for_me"]); CC does not tag the verdict payload
+            # today. FOLLOW-UP: add a media-context tag (e.g.
+            # ``not_for_me_context: "self_playback_media"``) to
+            # VoiceCommandResponse so the node can keep its cooldown gentle
+            # on mid-music verdicts instead of escalating — see
+            # response_models/voice_command_response.py.
             logger.info(
                 "🚫 not_for_me_sentinel | "
                 "conversation_id=%s node_id=%s speaker_user_id=%s "
                 "prompt_provider=%s pre_wake_speech_secs=%.2f "
                 "direction_hint=%s turn_source=%s wake_verdict=%s "
-                "transcript=%r raw_assistant=%r",
+                "self_playback=%s transcript=%r raw_assistant=%r",
                 conversation_id,
                 _sentinel_node_id,
                 speaker_user_id,
@@ -971,6 +989,7 @@ class ConversationHandler:
                 hint_state,
                 turn_source,
                 _wake_verdict,
+                _self_playback,
                 voice_command,
                 raw_msg[:160],
             )
@@ -1161,6 +1180,8 @@ class ConversationHandler:
             turn_source=(turn_context or {}).get("source"),
             transcript=voice_command,
             speaker_known=speaker_user_id is not None,
+            self_playback=(turn_context or {}).get("self_playback"),
+            self_playback_kind=(turn_context or {}).get("self_playback_kind"),
         )
         if direction_hint:
             logger.info(
@@ -1181,6 +1202,8 @@ class ConversationHandler:
             pre_wake_speech_seconds=pre_wake_speech_seconds,
             wake_verified=(turn_context or {}).get("wake_verified"),
             transcript=voice_command,
+            self_playback=(turn_context or {}).get("self_playback"),
+            self_playback_kind=(turn_context or {}).get("self_playback_kind"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied (stream path) | hint=%s", turn_hint)
@@ -1576,6 +1599,8 @@ class ConversationHandler:
             turn_source=(turn_context or {}).get("source"),
             transcript=voice_command,
             speaker_known=speaker_user_id is not None,
+            self_playback=(turn_context or {}).get("self_playback"),
+            self_playback_kind=(turn_context or {}).get("self_playback_kind"),
         )
         if direction_hint:
             logger.info(
@@ -1596,6 +1621,8 @@ class ConversationHandler:
             pre_wake_speech_seconds=pre_wake_speech_seconds,
             wake_verified=(turn_context or {}).get("wake_verified"),
             transcript=voice_command,
+            self_playback=(turn_context or {}).get("self_playback"),
+            self_playback_kind=(turn_context or {}).get("self_playback_kind"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied (tool-stream path) | hint=%s", turn_hint)

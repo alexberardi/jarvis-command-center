@@ -27,8 +27,15 @@ wake; with neither signal we emit nothing and behavior is unchanged.
 
 from __future__ import annotations
 
-from app.core.direction_hint import BORDERLINE_CONFIDENCE, QUIET_THRESHOLD_S
-from app.core.transcript_filter import is_device_command_shaped
+from app.core.direction_hint import (
+    BORDERLINE_CONFIDENCE,
+    QUIET_THRESHOLD_S,
+    is_media_self_playback,
+)
+from app.core.transcript_filter import (
+    is_device_command_shaped,
+    is_music_control_shaped,
+)
 
 # OWW detection scores at or above this are treated as a clean, deliberate
 # wake ("the user said your wake word"). Below it, the wake may be a false
@@ -53,6 +60,8 @@ def build_turn_hint(
     pre_wake_speech_seconds: float | None = None,
     wake_verified: bool | None = None,
     transcript: str | None = None,
+    self_playback: bool | None = None,
+    self_playback_kind: str | None = None,
 ) -> str | None:
     """Return a one-line ``[turn context: ...]`` hint, or None.
 
@@ -72,6 +81,13 @@ def build_turn_hint(
             normal directed posture even when ``wake_verified`` is False —
             acoustic-side evidence alone must not produce a suppression-
             leaning hint on an imperative device command.
+        self_playback: The node's own speaker was playing media when the
+            wake fired. Adds a mild media-context line to the wake hint
+            (music is both a false-wake source AND something users talk
+            over to control), and music-control-shaped transcripts gain
+            the device-command guard's seniority.
+        self_playback_kind: What was playing ("music"). See
+            ``direction_hint.is_media_self_playback``.
 
     Returns:
         The bracketed hint to append to the user message, or ``None``
@@ -79,10 +95,13 @@ def build_turn_hint(
         entry path) — in which case behavior is identical to before this
         module existed.
     """
+    media_playback = is_media_self_playback(self_playback, self_playback_kind)
     if turn_source == "follow_up":
         return _follow_up_hint(follow_up_iteration)
     if turn_source == "wake":
-        return _wake_hint(wake_confidence, wake_verified, transcript)
+        return _wake_hint(
+            wake_confidence, wake_verified, transcript, media_playback
+        )
     if turn_source == "chat":
         # Typed into the app — there is no microphone in this loop, so
         # "overheard speech" is impossible by construction.
@@ -96,7 +115,7 @@ def build_turn_hint(
     # so a reported value implies a fresh wake. Never claim a confidence
     # we weren't given.
     if pre_wake_speech_seconds is not None:
-        return _wake_hint(None)
+        return _wake_hint(None, media_playback=media_playback)
     return None
 
 
@@ -150,10 +169,33 @@ def should_double_check_sentinel(
     )
 
 
+# Mild media-context line appended (inside the bracket) to every wake-hint
+# variant when the node reported self-playback. Deliberately two-sided:
+# background media speech IS a known false-wake source, but users also
+# routinely talk to Jarvis OVER their music — most often to control it —
+# so the line weighs the transcript rather than leaning either way.
+_MEDIA_CONTEXT_NOTE = (
+    " Context: music was playing from this node's own speaker when the wake "
+    "fired. Speech or lyrics in the media can false-wake the node, but "
+    "people also often talk to you over their music — especially to change "
+    "or stop it — so weigh the transcript content itself. A music-control "
+    "command (stop, pause, skip, next, play, volume) is directed at you: "
+    "act on it."
+)
+
+
+def _with_media_note(hint: str, media_playback: bool) -> str:
+    """Append the media-context note inside the hint's closing bracket."""
+    if not media_playback:
+        return hint
+    return hint[:-1] + _MEDIA_CONTEXT_NOTE + "]"
+
+
 def _wake_hint(
     wake_confidence: float | None,
     wake_verified: bool | None = None,
     transcript: str | None = None,
+    media_playback: bool = False,
 ) -> str:
     # Wake-clip verification verdict: the clip that FIRED the wake was
     # transcribed and contained nothing wake-word-shaped. That is ONE
@@ -164,32 +206,41 @@ def _wake_hint(
     # short-circuits upstream. The imperative device-command guard is
     # senior: a device-shaped transcript keeps the normal directed posture
     # because acoustic-side evidence alone must not talk the model out of
-    # an imperative command.
+    # an imperative command. During self-playback, music-control shapes
+    # ("pause", "skip") share that seniority — with residual music bleed in
+    # the wake clip, an unverified verdict is expected on a REAL mid-music
+    # wake, and controlling the music is the most likely thing being said.
     if wake_verified is False and not (
-        transcript is not None and is_device_command_shaped(transcript)
+        transcript is not None
+        and (
+            is_device_command_shaped(transcript)
+            or (media_playback and is_music_control_shaped(transcript))
+        )
     ):
-        return (
+        return _with_media_note(
             "[turn context: the recorded wake clip did not clearly contain "
             "the wake word when transcribed — weigh this as one signal that "
             "the wake may have been a detector misfire, not as proof. A "
             "coherent command or question addressed to you should still be "
             "answered. Emit <not_for_me/> only when the transcript ALSO "
             "reads like speech meant for someone else (a reply to another "
-            "person, a mid-story line, a dialogue fragment).]"
+            "person, a mid-story line, a dialogue fragment).]",
+            media_playback,
         )
     if wake_confidence is not None and wake_confidence < WAKE_CONFIDENT_THRESHOLD:
-        return (
+        return _with_media_note(
             f"[turn context: wake word fired at low confidence "
             f"({wake_confidence:.2f}) — possibly a false wake. Judge by the "
             f"transcript: a coherent command or question is still for you; "
-            f"fragments, half-sentences, or noise are not.]"
+            f"fragments, half-sentences, or noise are not.]",
+            media_playback,
         )
     scored = (
         f" (detection confidence {wake_confidence:.2f})"
         if wake_confidence is not None
         else ""
     )
-    return (
+    return _with_media_note(
         # "answer DIRECTLY from your User Profile … ONLY call recall when NOT
         # already in your profile" — paired with the build_speaker_block change,
         # this stops the model firing a redundant `recall` round-trip for a fact
@@ -212,7 +263,8 @@ def _wake_hint(
         f"when it's NOT — never go silent); but if the user REPORTS or REQUESTS "
         f"an action, call the tool that does it — never just say you did it. "
         f"Reserve <not_for_me/> for STT artifacts or speech explicitly aimed at "
-        f"another person.]"
+        f"another person.]",
+        media_playback,
     )
 
 
