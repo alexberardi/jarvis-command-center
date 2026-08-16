@@ -276,3 +276,8 @@ class TestExtractionPromptGuardrails:
         assert "pet" in _EXTRACTION_SYSTEM_PROMPT.lower()
         # The literal failure case stays documented as a counter-example.
         assert "Counter-example" in _EXTRACTION_SYSTEM_PROMPT
+
+    def test_prompt_pins_user_turns_as_sole_source(self):
+        from app.services.memory_extraction_service import _EXTRACTION_SYSTEM_PROMPT
+        assert "ONLY from what the" in _EXTRACTION_SYSTEM_PROMPT
+        assert "NEVER store a claim" in _EXTRACTION_SYSTEM_PROMPT
