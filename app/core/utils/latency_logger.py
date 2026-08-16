@@ -34,7 +34,7 @@ class TimingEntry:
 class RequestTiming:
     """Timing data for a single request."""
     request_id: str
-    request_type: str  # "warmup", "voice_command", "voice_command_stream", "mobile_chat"
+    request_type: str  # "warmup", "voice_command", "voice_command_stream", "voice_command_continue", "mobile_chat", "stt"
     start_time: float = field(default_factory=time.perf_counter)
     entries: list[TimingEntry] = field(default_factory=list)
     _current_entry: Optional[TimingEntry] = field(default=None, repr=False)
@@ -89,6 +89,40 @@ class RequestTiming:
             entry.end_time = elapsed_end
             entry.duration_ms = duration_ms
             self.entries.append(entry)
+
+    def record_span(
+        self,
+        label: str,
+        start: float,
+        end: float,
+        service: str = "cc",
+        status: str = "ok",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a span from explicit ``time.perf_counter()`` timestamps.
+
+        For code where a ``with measure(...)`` block can't wrap the work —
+        e.g. async iterators that yield audio chunks, where the interesting
+        boundary (first chunk, stream end) is only known inside the iterator,
+        long after the call site returned.
+
+        Args:
+            label: Name for this span (e.g. "tts_first_chunk").
+            start: ``time.perf_counter()`` value at span start.
+            end: ``time.perf_counter()`` value at span end.
+            service: Which service this span represents.
+            status: "ok" or "error".
+            metadata: Arbitrary key-value pairs.
+        """
+        self.entries.append(TimingEntry(
+            label=label,
+            start_time=(start - self.start_time) * 1000,
+            end_time=(end - self.start_time) * 1000,
+            duration_ms=(end - start) * 1000,
+            service=service,
+            status=status,
+            metadata=metadata,
+        ))
 
     def total_ms(self) -> float:
         """Get total elapsed time in milliseconds."""

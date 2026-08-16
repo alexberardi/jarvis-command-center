@@ -35,6 +35,7 @@ from app.services.settings_service import get_settings_service
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.tool_builder import ToolBuilder
 from app.core.tool_executor import tool_executor
+from app.core.tool_routing import collect_tool_keywords, utterance_matches_keywords
 from app.core.tool_call_parser import tool_call_parser
 from app.core.utils.latency_logger import latency_logger
 
@@ -109,6 +110,21 @@ def _normalize_native_tool_calls(raw_calls: List[Dict[str, Any]]) -> List[Dict[s
     return normalized
 
 
+def _is_retry_nag(msg: Dict[str, Any], tag: str = "[MUST_CALL_RETRY]") -> bool:
+    """True only for the guard's standalone nag messages.
+
+    Nag content starts with the tag; the base system prompt merely MENTIONS
+    the tag in its rules text, so substring tests must not be used to
+    identify nags (they'd match — and delete or miscount — the cached
+    system prompt itself).
+    """
+    return (
+        msg.get("role") == "system"
+        and str(msg.get("content", "")).lstrip().startswith(tag)
+    )
+
+
+
 class ToolExecutionEngine:
     """
     Engine for executing the tool loop.
@@ -166,6 +182,23 @@ class ToolExecutionEngine:
         reasoning_parts: List[str] = []  # Accumulated <think> blocks across iterations
         iteration_metrics: List[Dict[str, Any]] = []  # Per-iteration LLM metrics
         _loop_start = _time.time()
+
+        # Scrub [MUST_CALL_RETRY] nags left over from PREVIOUS turns. They are
+        # one-shot steering messages: once a turn ends they only (a) keep
+        # "You MUST call a tool. Do NOT answer directly." pressure on every
+        # later turn (prod traces showed forced junk calls like chat/tell_joke
+        # on "Yum.") and (b) inflate _must_call_retry_count so later turns
+        # start at "attempt 2/2" (observed live 2026-08-15). Same hygiene the
+        # sentinel-restore path already applies.
+        # A nag is a standalone system message whose content STARTS with the
+        # tag. Substring matching is NOT safe here: the base system prompt's
+        # rules text mentions the tag when documenting the guard to the model
+        # (core_rules.py), and a substring scrub deletes messages[0] — the
+        # persona, rules, and every tool schema. Never touch the leading
+        # system prefix.
+        if any(_is_retry_nag(m) for m in messages[1:]):
+            logger.info("Scrubbing stale [MUST_CALL_RETRY] messages from prior turns")
+            messages[1:] = [m for m in messages[1:] if not _is_retry_nag(m)]
 
         # Build adapter_settings from node's adapter_hash if present
         node_context = conversation_cache.get_node_context(conversation_id) or {}
@@ -227,19 +260,12 @@ class ToolExecutionEngine:
             return sorted(must_call)
 
         def _must_call_retry_count() -> int:
-            retry_tag = "[MUST_CALL_RETRY]"
-            return sum(
-                1
-                for msg in messages
-                if msg.get("role") == "system" and retry_tag in msg.get("content", "")
-            )
+            return sum(1 for msg in messages if _is_retry_nag(msg))
 
         def _invalid_param_retry_count() -> int:
-            retry_tag = "[INVALID_PARAM_RETRY]"
             return sum(
-                1
-                for msg in messages
-                if msg.get("role") == "system" and retry_tag in msg.get("content", "")
+                1 for msg in messages
+                if _is_retry_nag(msg, "[INVALID_PARAM_RETRY]")
             )
 
         def _iso_date_retry_count() -> int:
@@ -782,11 +808,7 @@ class ToolExecutionEngine:
                     # transcript so follow-up turns aren't poisoned by them.
                     if messages and messages[-1].get("role") == "assistant":
                         messages.pop()
-                    while (
-                        messages
-                        and messages[-1].get("role") == "system"
-                        and "[MUST_CALL_RETRY]" in str(messages[-1].get("content", ""))
-                    ):
+                    while messages and _is_retry_nag(messages[-1]):
                         messages.pop()
                     restored: str = popped_prose
                     if self.prompt_provider:
@@ -856,12 +878,43 @@ class ToolExecutionEngine:
 
             # Handle different finish reasons
             if finish_reason == "stop":
-                # Unconditional force-tool-calls guard (compressed provider).
+                # Force-tool-calls guard (compressed provider).
                 # Pop the bad assistant message so the model gets a clean
                 # slate instead of being biased by its own failed response.
                 # Allows up to 2 retries before giving up.
+                #
+                # Keyword gate (2026-08-15 latency fix): this guard used to be
+                # unconditional, so EVERY plain-prose answer paid a second
+                # sequential LLM call — 56% of prod voice turns, +600ms p50.
+                # Prod traces showed the dominant retry victims were purely
+                # conversational turns ("Thank you", "Okay", follow-up
+                # chatter) where prose IS the correct final answer; the
+                # genuine rescues ("Leo took his medicine" → medication,
+                # "turn on the lights" → control_device) all carried command
+                # keywords in the utterance. So: only force a retry when the
+                # utterance keyword-matches a declared command/tool keyword.
+                # If no keywords are declared at all (old node clients) or
+                # the utterance is unknown, keep the legacy always-retry
+                # behavior — the gate only ever skips on positive evidence
+                # that no tool was being addressed.
                 force_tools = conversation_cache.get_force_tool_calls(conversation_id)
                 retry_count = _must_call_retry_count()
+                if force_tools and retry_count < 2 and not double_checked:
+                    keyword_pool = collect_tool_keywords(
+                        conversation_cache.get_available_commands(conversation_id),
+                        conversation_cache.get_tools(conversation_id),
+                        tools,
+                    )
+                    if (
+                        user_utterance
+                        and keyword_pool
+                        and not utterance_matches_keywords(user_utterance, keyword_pool)
+                    ):
+                        logger.info(
+                            "Force-tool-calls guard skipped — utterance matches "
+                            "no command keywords; accepting direct answer"
+                        )
+                        force_tools = False
                 # A prose answer produced by the double-check rescue is the
                 # rescue — never feed it back into the must-call machinery
                 # that manufactured the corner in the first place.

@@ -1655,3 +1655,402 @@ class TestSentinelDetectionIgnoresThinkBlocks:
 
         assert max_tokens_seen[0] == 256
         assert max_tokens_seen[1] >= 1024
+
+
+class TestForceToolCallsKeywordGate:
+    """2026-08-15 prod latency fix: the force-tool-calls guard was
+    unconditional, so every plain-prose answer paid a second sequential LLM
+    call — 56% of voice_command_stream traces ran llm_call_iter_2 (p50
+    +609ms), and the dominant victims were purely conversational turns
+    ("Thank you", "Okay") where prose IS the correct final answer. The guard
+    now only retries when the utterance keyword-matches a declared
+    command/tool keyword; with no keyword evidence the direct answer is
+    accepted on iteration 1.
+
+    Legacy behavior (always retry) is preserved whenever the gate lacks
+    signal: no keywords declared anywhere, or no user_utterance provided.
+    """
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        # Commands declare keywords — the gate has signal to work with.
+        cache.get_available_commands.return_value = [
+            {
+                "command_name": "medication",
+                "keywords": ["medicine", "meds", "took my"],
+                "parameters": [],
+            },
+            {
+                "command_name": "control_device",
+                "keywords": ["lights", "turn on", "turn off"],
+                "parameters": [],
+            },
+        ]
+        cache.get_tools.return_value = []
+        cache.get_force_tool_calls.return_value = True
+        cache.get_router_decision.return_value = {"used": False}
+        return cache
+
+    def _prose_response(self, message: str):
+        return {
+            "choices": [{
+                "message": {"content": json.dumps({"message": message, "tool_calls": []})},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    def _tool_call_response(self, name: str):
+        return {
+            "choices": [{
+                "message": {"content": json.dumps({
+                    "message": "",
+                    "tool_calls": [{"name": name, "arguments": {}}],
+                })},
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    @pytest.mark.asyncio
+    async def test_conversational_turn_accepts_prose_with_single_llm_call(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """"Thank you." matches no command keyword — the prose answer must be
+        accepted at iteration 1 with NO second LLM call and no retry nag."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._prose_response(
+            "You're welcome, Alex."
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-chat",
+                messages=messages,
+                tools=[{"function": {"name": "medication"}}],
+                user_utterance="Thank you.",
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert result["assistant_message"] == "You're welcome, Alex."
+        assert mock_llm_client.chat_completion.call_count == 1
+        assert not any(
+            "[MUST_CALL_RETRY]" in str(m.get("content", "")) for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_keyword_matched_turn_still_retries_prose(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """"Leo took his medicine." matches medication keywords — a prose
+        answer must still trigger the guard, and the retry rescues the tool
+        call (the guard's original protection)."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = [
+            self._prose_response("Glad Leo took his medicine!"),
+            self._tool_call_response("medication"),
+        ]
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                mock_executor.execute_tool_calls.return_value = ([], [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "medication", "arguments": "{}"},
+                }])
+                result = await engine.execute(
+                    conversation_id="test-conv-meds",
+                    messages=messages,
+                    tools=[{"function": {"name": "medication"}}],
+                    user_utterance="Leo took his medicine.",
+                    max_iterations=3,
+                )
+
+        assert result["stop_reason"] == "tool_calls"
+        assert result["tool_calls"][0]["function"]["name"] == "medication"
+        assert mock_llm_client.chat_completion.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_keywords_declared_keeps_legacy_retry(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Old node clients don't send keywords — with zero keyword signal the
+        guard must keep its legacy always-retry behavior."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_conversation_cache.get_available_commands.return_value = [
+            {"command_name": "medication", "parameters": []},
+        ]
+        mock_llm_client.chat_completion.side_effect = [
+            self._prose_response("Noted!"),
+            self._tool_call_response("medication"),
+        ]
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                mock_executor.execute_tool_calls.return_value = ([], [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "medication", "arguments": "{}"},
+                }])
+                result = await engine.execute(
+                    conversation_id="test-conv-legacy",
+                    messages=[{"role": "system", "content": "sys"}],
+                    tools=[{"function": {"name": "medication"}}],
+                    user_utterance="Thank you.",
+                    max_iterations=3,
+                )
+
+        assert result["stop_reason"] == "tool_calls"
+        assert mock_llm_client.chat_completion.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_missing_utterance_keeps_legacy_retry(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Without the utterance the gate has nothing to match against —
+        preserve legacy retry behavior."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = [
+            self._prose_response("Sure thing."),
+            self._tool_call_response("medication"),
+        ]
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                mock_executor.execute_tool_calls.return_value = ([], [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "medication", "arguments": "{}"},
+                }])
+                result = await engine.execute(
+                    conversation_id="test-conv-noutt",
+                    messages=[{"role": "system", "content": "sys"}],
+                    tools=[{"function": {"name": "medication"}}],
+                    max_iterations=3,
+                )
+
+        assert result["stop_reason"] == "tool_calls"
+        assert mock_llm_client.chat_completion.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_sentinel_still_short_circuits_before_gate(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The <not_for_me/> sentinel must keep outranking the guard AND the
+        keyword gate — terminal on first look regardless of keywords."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = {
+            "choices": [{
+                "message": {"content": '{"message": "<not_for_me/>", "tool_calls": []}'},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-sentinel",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "medication"}}],
+                user_utterance="turn on the lights",
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "not_for_me"
+        assert mock_llm_client.chat_completion.call_count == 1
+
+
+class TestStaleMustCallRetryScrub:
+    """Prod 2026-08-15: [MUST_CALL_RETRY] system nags persisted in the cached
+    transcript across turns — later turns started at "attempt 2/2" and kept
+    "You MUST call a tool" pressure on every subsequent request (forced junk
+    tool calls like tell_joke on "Yum."). execute() must scrub stale nags
+    from prior turns on entry."""
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        cache.get_available_commands.return_value = [
+            {"command_name": "medication", "keywords": ["medicine"], "parameters": []},
+        ]
+        cache.get_tools.return_value = []
+        cache.get_force_tool_calls.return_value = True
+        cache.get_router_decision.return_value = {"used": False}
+        return cache
+
+    def _prose_response(self, message: str):
+        return {
+            "choices": [{
+                "message": {"content": json.dumps({"message": message, "tool_calls": []})},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    @pytest.mark.asyncio
+    async def test_stale_nag_is_scrubbed_on_entry(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._prose_response("You're welcome.")
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Leo took his medicine"},
+            {"role": "system", "content": "[MUST_CALL_RETRY] You MUST call a tool. (attempt 1/2)"},
+            {"role": "assistant", "content": "Logged it."},
+        ]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-scrub",
+                messages=messages,
+                tools=[{"function": {"name": "medication"}}],
+                user_utterance="Thank you.",
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert not any(
+            "[MUST_CALL_RETRY]" in str(m.get("content", "")) for m in messages
+        )
+        # Prior-turn user/assistant content survives the scrub.
+        assert any(m.get("content") == "Logged it." for m in messages)
+
+    @pytest.mark.asyncio
+    async def test_retry_budget_is_fresh_after_scrub(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """A stale nag must not inflate the in-turn retry count: the first
+        in-turn retry is attempt 1/2, not 2/2."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = [
+            self._prose_response("Noted."),
+            self._prose_response("Noted again."),
+            self._prose_response("Final answer."),
+        ]
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "system", "content": "[MUST_CALL_RETRY] stale nag from last turn"},
+        ]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-budget",
+                messages=messages,
+                tools=[{"function": {"name": "medication"}}],
+                user_utterance="Leo took his medicine.",
+                max_iterations=3,
+            )
+
+        retry_messages = [
+            str(m.get("content", "")) for m in messages
+            if "[MUST_CALL_RETRY]" in str(m.get("content", ""))
+        ]
+        assert retry_messages, "keyword-matched prose should trigger the guard"
+        assert "attempt 1/2" in retry_messages[0]
+        assert "stale nag" not in retry_messages[0]
+
+
+class TestScrubDoesNotEatSystemPrompt:
+    """Regression: the base system prompt MENTIONS [MUST_CALL_RETRY] in its
+    rules text (core_rules.py). The scrub must only remove standalone nag
+    messages (content starts with the tag), never the cached prompt — a
+    substring scrub deleted messages[0] with every tool schema in it
+    (prod incident 2026-08-16)."""
+
+    def test_is_retry_nag_ignores_prompt_that_mentions_tag(self):
+        from app.core.tool_execution_engine import _is_retry_nag
+
+        base_prompt = {
+            "role": "system",
+            "content": (
+                "You are Jarvis. Rules: ... the utterance (you drafted an "
+                "answer, or a [MUST_CALL_RETRY] asks for a tool call) ... "
+                "TOOLS: control_device, get_weather"
+            ),
+        }
+        real_nag = {
+            "role": "system",
+            "content": "[MUST_CALL_RETRY] You MUST call a tool. Do NOT answer directly.",
+        }
+        assert not _is_retry_nag(base_prompt)
+        assert _is_retry_nag(real_nag)
+        assert _is_retry_nag({"role": "system", "content": "  [MUST_CALL_RETRY] retry"})
+        assert not _is_retry_nag({"role": "user", "content": "[MUST_CALL_RETRY]"})
+
+    @pytest.mark.asyncio
+    async def test_scrub_preserves_system_prompt_and_removes_stale_nags(self):
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client = MagicMock()
+        mock_llm_client.chat_completion = AsyncMock(return_value={
+            "choices": [{
+                "message": {"content": '{"message": "hi", "tool_calls": []}'},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        })
+
+        mock_cache = MagicMock()
+        mock_cache.get_node_context.return_value = {}
+        mock_cache.get_timezone.return_value = "UTC"
+        mock_cache.get_force_tool_calls.return_value = False
+        mock_cache.get_router_decision.return_value = {"used": True}
+        mock_cache.get_available_commands.return_value = []
+
+        base_prompt = {
+            "role": "system",
+            "content": "Persona + rules mentioning [MUST_CALL_RETRY] + tool schemas",
+        }
+        stale_nag = {
+            "role": "system",
+            "content": "[MUST_CALL_RETRY] You MUST call a tool. Do NOT answer directly.",
+        }
+        messages = [
+            base_prompt,
+            {"role": "user", "content": "old turn"},
+            {"role": "assistant", "content": "old answer"},
+            stale_nag,
+            {"role": "user", "content": "hello"},
+        ]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_cache):
+            engine = ToolExecutionEngine(mock_llm_client)
+            await engine.execute("conv-scrub", messages, tools=[], user_utterance="hello")
+
+        assert messages[0] is base_prompt, "scrub must never remove the cached system prompt"
+        assert stale_nag not in messages, "stale standalone nags must be scrubbed"

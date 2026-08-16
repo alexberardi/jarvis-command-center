@@ -8,6 +8,81 @@ logger = logging.getLogger("uvicorn")
 # Type alias for conversation messages
 ConversationMessage = Dict[str, str]
 
+
+def _expects_continuation(msg: ConversationMessage) -> bool:
+    """True if ``msg`` leaves its exchange open — the next message(s) belong to
+    the SAME turn: a ``role="tool"`` result (more results or the final assistant
+    reply follow), or an assistant message that issued ``tool_calls`` (its
+    results — native ``role="tool"`` messages or the text-mode user-message
+    injection — haven't landed yet)."""
+    if not isinstance(msg, dict):
+        return False
+    role = msg.get("role")
+    if role == "tool":
+        return True
+    return role == "assistant" and bool(msg.get("tool_calls"))
+
+
+def trim_history_to_max_turns(
+    messages: List[ConversationMessage],
+    max_turns: int,
+) -> int:
+    """Sliding-window trim of conversation history, IN PLACE.
+
+    Keeps the leading system prefix (the cached prompt at ``messages[0]`` plus
+    any system messages before the first exchange) and only the most recent
+    ``max_turns`` exchanges. A turn starts at a ``role="user"`` message and
+    carries its whole exchange with it — the assistant reply, any assistant
+    ``tool_calls``, the ``role="tool"`` results, and text-mode tool-result user
+    injections — so a tool response is never orphaned and an assistant
+    tool_call never loses its results (turns are kept or dropped atomically).
+
+    Whole turns are dropped from the FRONT (oldest first) and retained messages
+    are never reordered or rewritten, so the prompt stays byte-stable from the
+    system prefix through the retained tail — the llama.cpp KV prefix cache
+    only re-prefills from the trim boundary, never the (large) system prompt.
+
+    ``max_turns <= 0`` disables trimming. Returns the number of messages
+    dropped (0 = no trim).
+    """
+    if max_turns <= 0:
+        return 0
+
+    # Leading system prefix (the cached prompt) — never trimmed.
+    prefix_end = 0
+    while prefix_end < len(messages) and messages[prefix_end].get("role") == "system":
+        prefix_end += 1
+
+    # Group everything after the prefix into turns. A user message starts a
+    # new turn unless the previous message still expects a continuation (tool
+    # result pending / text-mode tool-result injection).
+    turns: List[List[ConversationMessage]] = []
+    for msg in messages[prefix_end:]:
+        if msg.get("role") == "user" and (
+            not turns or not _expects_continuation(turns[-1][-1])
+        ):
+            turns.append([msg])
+        elif turns:
+            turns[-1].append(msg)
+        else:
+            # Defensive: stray non-user message before the first exchange —
+            # anchor a turn on it so it ages out with the window.
+            turns.append([msg])
+
+    if len(turns) <= max_turns:
+        return 0
+
+    kept = turns[len(turns) - max_turns:]
+    trimmed = messages[:prefix_end] + [m for turn in kept for m in turn]
+    dropped = len(messages) - len(trimmed)
+    messages[:] = trimmed
+    logger.info(
+        f"✂️ Trimmed conversation history: dropped {len(turns) - max_turns} "
+        f"turns ({dropped} messages), kept last {max_turns} turns"
+    )
+    return dropped
+
+
 class ConversationCache:
     """Simple in-memory cache for conversation messages, tools, and available commands with TTL expiration."""
     

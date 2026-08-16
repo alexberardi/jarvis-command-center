@@ -7,6 +7,7 @@ context headers (household_id, node_id) to downstream services.
 
 import asyncio
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Response
 from fastapi.responses import StreamingResponse
@@ -16,6 +17,7 @@ from app.deps import verify_api_key
 from app.context_providers.node_context_provider import NodeContextProvider
 from app.core.clients import TTSClient, WhisperClient
 from app.core.tts_text import clean_for_tts
+from app.core.utils.latency_logger import latency_logger
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -105,51 +107,92 @@ async def whisper_transcribe(
     Returns:
         Transcription result dict with text, optional speaker_id, etc.
     """
-    client = WhisperClient(
-        household_id=node_context.household_id,
-        node_id=node_context.node.node_id,
-        household_member_ids=node_context.household_member_ids,
-    )
+    # STT gets its own latency trace. Keyed by a unique id — NOT the
+    # conversation_id — because the node's warmup (/conversation/start) can
+    # still be in flight under the same conversation_id and start_request
+    # would clobber that trace. The persisted trace row still carries the
+    # conversation_id (when the node provided one) so STT rows join to the
+    # voice turn in the trace visualizer.
+    trace_key = f"stt-{uuid4().hex}"
+    timing = latency_logger.start_request(trace_key, "stt")
+    if conversation_id:
+        timing.request_id = conversation_id
+    timing.source = "node"
+    timing.node_id = node_context.node.node_id
+    timing.household_id = node_context.household_id
 
-    # Read file content
-    audio_bytes = await file.read()
-    filename = file.filename or "audio.wav"
+    try:
+        client = WhisperClient(
+            household_id=node_context.household_id,
+            node_id=node_context.node.node_id,
+            household_member_ids=node_context.household_member_ids,
+        )
 
-    speaker_audio_bytes: bytes | None = None
-    speaker_audio_filename: str | None = None
-    if speaker_audio is not None:
-        speaker_audio_bytes = await speaker_audio.read()
-        speaker_audio_filename = speaker_audio.filename or "speaker.wav"
+        # Read file content
+        audio_bytes = await file.read()
+        filename = file.filename or "audio.wav"
 
-    # Wake-clip verification: the leading ~2s of speaker_audio is the wake
-    # snapshot. Fire-and-forget — the command turn reads the verdict from the
-    # conversation cache with a bounded fail-open wait. Only when the node
-    # provided a conversation_id (new nodes) and the mode isn't off.
-    if speaker_audio_bytes and conversation_id:
-        from app.core.wake_verification import _get_mode, run_wake_verification
-        if _get_mode(node_context.household_id, node_context.node.node_id) != "off":
-            asyncio.create_task(run_wake_verification(
-                speaker_audio_bytes,
-                conversation_id,
-                node_context.household_id,
-                node_context.node.node_id,
-                node_context.household_member_ids,
-            ))
+        speaker_audio_bytes: bytes | None = None
+        speaker_audio_filename: str | None = None
+        if speaker_audio is not None:
+            speaker_audio_bytes = await speaker_audio.read()
+            speaker_audio_filename = speaker_audio.filename or "speaker.wav"
 
-    # Build extra params
-    params: dict[str, Any] = {}
-    if language:
-        params["language"] = language
-    if task:
-        params["task"] = task
+        # Build extra params
+        params: dict[str, Any] = {}
+        if language:
+            params["language"] = language
+        if task:
+            params["task"] = task
 
-    return await client.transcribe(
-        audio_bytes,
-        filename,
-        speaker_audio=speaker_audio_bytes,
-        speaker_audio_filename=speaker_audio_filename,
-        **params,
-    )
+        with timing.measure(
+            "stt_transcribe",
+            service="whisper",
+            metadata={
+                "audio_bytes": len(audio_bytes),
+                "speaker_audio_bytes": (
+                    len(speaker_audio_bytes) if speaker_audio_bytes else 0
+                ),
+            },
+        ):
+            result = await client.transcribe(
+                audio_bytes,
+                filename,
+                speaker_audio=speaker_audio_bytes,
+                speaker_audio_filename=speaker_audio_filename,
+                **params,
+            )
+
+        # Wake-clip verification: the leading ~2s of speaker_audio is the wake
+        # snapshot. Fire-and-forget — the command turn reads the verdict from the
+        # conversation cache with a bounded fail-open wait. Only when the node
+        # provided a conversation_id (new nodes) and the mode isn't off.
+        # Deliberately started AFTER the command transcribe returns: whisper
+        # serializes model access, so racing this task against the command
+        # transcribe would queue the user's STT behind the wake clip (and
+        # before whisper grew its lock, the race crashed it outright —
+        # GGML_ASSERT !sched->is_alloc). The command turn's bounded verdict
+        # wait (VERDICT_WAIT_SECONDS) still covers the later start.
+        if speaker_audio_bytes and conversation_id:
+            from app.core.wake_verification import _get_mode, run_wake_verification
+            if _get_mode(node_context.household_id, node_context.node.node_id) != "off":
+                asyncio.create_task(run_wake_verification(
+                    speaker_audio_bytes,
+                    conversation_id,
+                    node_context.household_id,
+                    node_context.node.node_id,
+                    node_context.household_member_ids,
+                ))
+
+        if isinstance(result, dict):
+            timing.user_command = result.get("text")
+        return result
+    except Exception as exc:
+        timing.trace_status = "error"
+        timing.error_message = str(exc)
+        raise
+    finally:
+        latency_logger.end_request(trace_key)
 
 
 @router.post("/whisper/voice-profiles/enroll")

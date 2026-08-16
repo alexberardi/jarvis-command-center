@@ -7,7 +7,8 @@ to predict which tool should handle a given utterance.
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple
+import re
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger("uvicorn")
 
@@ -120,6 +121,89 @@ def filter_tools_for_utterance(
     """
     # Keyword-based filtering disabled: always keep the full tool list
     return tools
+
+
+# Minimum keyword length considered meaningful for utterance matching.
+# Ultra-short keywords ("to", "in", "hi") appear in ordinary conversation
+# and would make every chatty turn look tool-shaped.
+_KEYWORD_MATCH_MIN_LEN = 3
+
+
+def _normalize_for_keyword_match(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace, pad with spaces.
+
+    The space padding lets multi-word keywords match on word boundaries
+    with a plain substring test ("took my" matches "Leo took my pills"
+    but "night" does not match "goodnight").
+    """
+    collapsed = " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+    return f" {collapsed} "
+
+
+def collect_tool_keywords(
+    *sources: Optional[Iterable[Dict[str, Any]]],
+) -> List[str]:
+    """
+    Collect declared keywords from command/tool definition dicts.
+
+    Accepts any number of iterables of dicts in either shape:
+    - command definitions with a top-level ``keywords`` list
+    - OpenAI-style tool defs with keywords under ``function``
+
+    Returns:
+        Deduplicated list of keyword strings (original casing preserved).
+    """
+    seen: Set[str] = set()
+    keywords: List[str] = []
+    for source in sources:
+        for item in source or []:
+            if not isinstance(item, dict):
+                continue
+            raw = item.get("keywords")
+            if raw is None and isinstance(item.get("function"), dict):
+                raw = item["function"].get("keywords")
+            if not isinstance(raw, list):
+                continue
+            for kw in raw:
+                if isinstance(kw, str) and kw.strip() and kw not in seen:
+                    seen.add(kw)
+                    keywords.append(kw)
+    return keywords
+
+
+def utterance_matches_keywords(
+    utterance: Optional[str],
+    keywords: Iterable[str],
+) -> bool:
+    """
+    Check whether an utterance contains any command keyword.
+
+    Deterministic word-boundary matching: keywords and utterance are both
+    lowercased and punctuation-stripped, then keywords must appear as whole
+    words (multi-word keywords as whole-word phrases). Keywords shorter than
+    ``_KEYWORD_MATCH_MIN_LEN`` are ignored — they match ordinary chatter.
+
+    Args:
+        utterance: The user's voice command
+        keywords: Keyword strings declared by commands/tools
+
+    Returns:
+        True if any meaningful keyword appears in the utterance.
+    """
+    if not utterance:
+        return False
+    normalized_utterance = _normalize_for_keyword_match(utterance)
+    if not normalized_utterance.strip():
+        return False
+    for kw in keywords:
+        if not isinstance(kw, str):
+            continue
+        normalized_kw = _normalize_for_keyword_match(kw).strip()
+        if len(normalized_kw) < _KEYWORD_MATCH_MIN_LEN:
+            continue
+        if f" {normalized_kw} " in normalized_utterance:
+            return True
+    return False
 
 
 def prune_tools_by_confidence(

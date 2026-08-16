@@ -9,7 +9,7 @@ import hashlib
 import hmac
 from uuid import uuid4
 from datetime import datetime
-from typing import Optional
+from typing import AsyncIterator, Optional
 from fastapi import FastAPI, HTTPException, Depends, Request, APIRouter, BackgroundTasks
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -1304,6 +1304,39 @@ async def voice_acknowledge(
     return {"text": text}
 
 
+async def _end_trace_after_stream(
+    stream: AsyncIterator[bytes],
+    conversation_id: str,
+) -> AsyncIterator[bytes]:
+    """Close the latency trace when the audio stream FINISHES, not when the
+    StreamingResponse is created.
+
+    Calling ``end_request`` before returning a StreamingResponse closed the
+    trace before the first audio byte left CC, so total_duration_ms excluded
+    all TTS/streaming time (and spans recorded during streaming — e.g.
+    tts_first_chunk — landed on a dead trace). Wrapping the generator keeps
+    the trace open until the node has consumed the stream (or disconnected —
+    GeneratorExit also runs the ``finally``), so time-to-first-byte and the
+    streaming window are included. Existing spans are preserved untouched.
+    """
+    timing = latency_logger.get_request(conversation_id)
+    stream_start = time.perf_counter()
+    first_chunk = True
+    try:
+        async for chunk in stream:
+            if first_chunk:
+                first_chunk = False
+                if timing is not None:
+                    timing.checkpoint("first_audio_byte")
+            yield chunk
+    finally:
+        if timing is not None:
+            timing.record_span(
+                "audio_stream", stream_start, time.perf_counter(),
+            )
+        latency_logger.end_request(conversation_id)
+
+
 @v0_router.post("/voice/command/stream")
 async def handle_voice_stream(
     request: VoiceCommandRequest,
@@ -1355,6 +1388,7 @@ async def handle_voice_stream(
         tts_client = TTSClient(
             household_id=node_context_provider.household_id,
             node_id=node_context_provider.node.node_id,
+            conversation_id=request.conversation_id,
         )
 
         # --- Fast path: router-gated streaming LLM → TTS ---
@@ -1382,10 +1416,10 @@ async def handle_voice_stream(
 
             duration = time.time() - start_time
             logger.info(f"🚀 Streaming LLM→TTS response in {duration:.2f}s")
-            latency_logger.end_request(request.conversation_id)
 
+            # Trace closes when the stream finishes (see _end_trace_after_stream)
             return StreamingResponse(
-                streaming_audio,
+                _end_trace_after_stream(streaming_audio, request.conversation_id),
                 status_code=200,
                 media_type="audio/raw",
                 headers={
@@ -1423,10 +1457,10 @@ async def handle_voice_stream(
 
             duration = time.time() - start_time
             logger.info(f"🚀 Tool-stream LLM→TTS response in {duration:.2f}s")
-            latency_logger.end_request(request.conversation_id)
 
+            # Trace closes when the stream finishes (see _end_trace_after_stream)
             return StreamingResponse(
-                streaming_audio,
+                _end_trace_after_stream(streaming_audio, request.conversation_id),
                 status_code=200,
                 media_type="audio/raw",
                 headers={
@@ -1469,14 +1503,17 @@ async def handle_voice_stream(
             duration = time.time() - start_time
             logger.info(f"✅ Streaming audio response in {duration:.2f}s")
             timing.assistant_message = assistant_message
-            latency_logger.end_request(request.conversation_id)
 
             # Include the text in a header so the node can display it
             # (e.g., keyboard_listener prints it instead of "(streamed audio)")
             encoded_text = urllib.parse.quote(assistant_message, safe="")
 
+            # Trace closes when the stream finishes (see _end_trace_after_stream)
             return StreamingResponse(
-                stream_text_as_audio(assistant_message, tts_client),
+                _end_trace_after_stream(
+                    stream_text_as_audio(assistant_message, tts_client),
+                    request.conversation_id,
+                ),
                 status_code=200,
                 media_type="audio/raw",
                 headers={
@@ -2011,6 +2048,16 @@ async def continue_voice_command_stream(
     202 JSON when streaming isn't applicable so callers can retry against
     the blocking endpoint.
     """
+    timing = latency_logger.start_request(
+        request.conversation_id, "voice_command_continue"
+    )
+    timing.source = "node"
+    timing.node_id = node_context_provider.node.node_id
+    timing.household_id = node_context_provider.household_id
+    timing.user_command = (
+        f"[continuation with {len(request.tool_results)} tool results]"
+    )
+    timing.checkpoint("auth_complete")
     start_time = time.time()
 
     logger.info(
@@ -2024,6 +2071,7 @@ async def continue_voice_command_stream(
         tts_client = TTSClient(
             household_id=node_context_provider.household_id,
             node_id=node_context_provider.node.node_id,
+            conversation_id=request.conversation_id,
         )
 
         tool_results = [
@@ -2033,21 +2081,24 @@ async def continue_voice_command_stream(
 
         # Push actions to inbox in parallel with the stream — same as the
         # blocking endpoint. Fire-and-forget so it doesn't block audio.
-        await _maybe_push_actions_to_inbox(
-            tool_results=tool_results,
-            node_context_provider=node_context_provider,
-        )
+        with timing.measure("inbox_actions_push"):
+            await _maybe_push_actions_to_inbox(
+                tool_results=tool_results,
+                node_context_provider=node_context_provider,
+            )
 
-        streaming_audio = await model_service.try_stream_continue_with_tool_results(
-            conversation_id=request.conversation_id,
-            tool_results=tool_results,
-            tts_client=tts_client,
-        )
+        with timing.measure("continue_stream_dispatch"):
+            streaming_audio = await model_service.try_stream_continue_with_tool_results(
+                conversation_id=request.conversation_id,
+                tool_results=tool_results,
+                tts_client=tts_client,
+            )
 
         if streaming_audio is None:
             # Streaming path not applicable — return 202 JSON so the node
             # falls back to calling /voice/command/continue (blocking).
             logger.info("Continue-stream: not applicable, signaling fallback")
+            latency_logger.end_request(request.conversation_id)
             return JSONResponse(
                 status_code=202,
                 content={"fallback": "use_blocking_continue"},
@@ -2061,8 +2112,9 @@ async def continue_voice_command_stream(
         duration = time.time() - start_time
         logger.info(f"🚀 Continue-stream LLM→TTS dispatched in {duration:.2f}s")
 
+        # Trace closes when the stream finishes (see _end_trace_after_stream)
         return StreamingResponse(
-            streaming_audio,
+            _end_trace_after_stream(streaming_audio, request.conversation_id),
             status_code=200,
             media_type="audio/raw",
             headers={
@@ -2074,6 +2126,7 @@ async def continue_voice_command_stream(
         )
 
     except Exception as e:
+        latency_logger.end_request(request.conversation_id)
         duration = time.time() - start_time
         logger.error(f"❌ Continue-stream failed after {duration:.2f}s: {e}")
         raise HTTPException(
