@@ -582,17 +582,19 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         key="voice.wake_verification_mode",
         category="voice",
         value_type="string",
-        default="bias",
+        default="off",
         description=(
             "Wake-clip verification: transcribe the ~2s clip that fired the "
             "wake word and check it actually contains the wake phrase. "
-            "'off' = disabled; 'bias' = an unverified wake injects a strong "
-            "not_for_me-leaning prompt hint; 'enforce' = an unverified wake "
-            "is silently dropped (like the STT-noise prefilter). Catches "
+            "'off' = disabled; 'bias' = an unverified wake injects a mild "
+            "misfire-leaning prompt hint (one signal, never a suppression "
+            "instruction); 'enforce' = an unverified wake is silently "
+            "dropped (like the STT-noise prefilter). Catches "
             "high-confidence openWakeWord misfires that score/VAD cannot "
             "(prod 2026-08-15: a 0.95 misfire marked a medication as taken "
-            "off overheard family talk). Always fails OPEN on missing/"
-            "pending/errored verdicts."
+            "off overheard family talk). Fail SAFE: missing rows and "
+            "unrecognized values both mean 'off', and missing/pending/"
+            "errored verdicts always fail OPEN."
         ),
     ),
     SettingDefinition(

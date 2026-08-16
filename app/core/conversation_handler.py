@@ -589,6 +589,55 @@ class ConversationHandler:
             )
         return result
 
+    async def _resolve_wake_verified_into_context(
+        self,
+        conversation_id: str,
+        voice_command: str,
+        turn_context: dict | None,
+    ) -> bool:
+        """Resolve the wake-clip verdict for this turn and fold it into
+        ``turn_context``.
+
+        Shared by all three voice paths (blocking, streaming, tool-streaming)
+        so ``voice.wake_verification_mode`` means the same thing on every
+        router outcome — before this, only the blocking path resolved the
+        verdict and the streaming paths read a ``wake_verified`` key nothing
+        ever set.
+
+        Returns True when mode=enforce demands the turn be suppressed; the
+        blocking caller converts that to a silent ``not_for_me``, the
+        streaming callers fall through to the blocking path (which re-reads
+        the cached verdict instantly and suppresses there). Every other
+        outcome — verified, clip_unreliable, pending, off — returns False;
+        bias-mode unverified additionally sets
+        ``turn_context["wake_verified"] = False`` so the wake hint applies
+        its mild misfire lean.
+        """
+        node_ctx = conversation_cache.get_node_context(conversation_id) or {}
+        wake_verification = await resolve_wake_verification(
+            conversation_id,
+            turn_context,
+            household_id=node_ctx.get("household_id"),
+            node_id=node_ctx.get("node_id"),
+        )
+        if wake_verification is None or wake_verification.get("verified"):
+            return False
+        logger.info(
+            "🚫 wake_unverified | verdict=%s mode=%s node_id=%s "
+            "conversation_id=%s clip_transcript=%r command=%r",
+            wake_verification.get("verdict") or "unverified",
+            wake_verification.get("mode"),
+            node_ctx.get("node_id"),
+            conversation_id,
+            wake_verification.get("transcript"),
+            voice_command,
+        )
+        if wake_verification.get("mode") == "enforce":
+            return True
+        if turn_context is not None:
+            turn_context["wake_verified"] = False
+        return False
+
     async def process_voice_command_with_tools(
         self,
         voice_command: str,
@@ -650,32 +699,22 @@ class ConversationHandler:
         # Wake-clip verification gate. The media proxy transcribed the leading
         # seconds of the speaker_audio (the wake snapshot) in the background;
         # resolve that verdict here with a short fail-open wait. An unverified
-        # wake (clip contains nothing wake-word-shaped) is the acoustic
-        # fingerprint of an openWakeWord misfire — the one false-wake class
-        # confidence/VAD can't catch (prod 2026-08-15: two 0.95-score misfires
-        # in a quiet room; one marked a medication off overheard family talk).
-        # enforce → silent not_for_me like the noise gate above; bias → the
-        # verdict rides turn_context into the wake hint + disables the /think
-        # sentinel rescue.
-        wake_verification = await resolve_wake_verification(
-            conversation_id, turn_context,
-        )
-        if wake_verification is not None and not wake_verification.get("verified"):
-            logger.info(
-                "🚫 wake_unverified | mode=%s conversation_id=%s "
-                "clip_transcript=%r command=%r",
-                wake_verification.get("mode"),
-                conversation_id,
-                wake_verification.get("transcript"),
-                voice_command,
-            )
-            if wake_verification.get("mode") == "enforce":
-                return {
-                    "stop_reason": "not_for_me",
-                    "assistant_message": "",
-                }
-            if turn_context is not None:
-                turn_context["wake_verified"] = False
+        # wake (clip contains nothing wake-word-shaped) is one signal of an
+        # openWakeWord misfire — the false-wake class confidence/VAD can't
+        # catch (prod 2026-08-15: two 0.95-score misfires in a quiet room; one
+        # marked a medication off overheard family talk). enforce → silent
+        # not_for_me like the noise gate above; bias → the verdict rides
+        # turn_context into the wake hint as a MILD misfire lean (the verify
+        # clip itself can be garbage — same day, two real lights commands were
+        # suppressed by unreadable clips — so one bad clip never
+        # single-handedly silences a turn).
+        if await self._resolve_wake_verified_into_context(
+            conversation_id, voice_command, turn_context
+        ):
+            return {
+                "stop_reason": "not_for_me",
+                "assistant_message": "",
+            }
 
         # Get conversation state from cache
         with timing.measure("cache_lookups") if timing else nullcontext():
@@ -797,6 +836,8 @@ class ConversationHandler:
             pre_wake_speech_seconds,
             wake_confidence=(turn_context or {}).get("wake_confidence"),
             turn_source=(turn_context or {}).get("source"),
+            transcript=voice_command,
+            speaker_known=speaker_user_id is not None,
         )
         if direction_hint:
             logger.info(
@@ -817,6 +858,7 @@ class ConversationHandler:
             follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
             pre_wake_speech_seconds=pre_wake_speech_seconds,
             wake_verified=(turn_context or {}).get("wake_verified"),
+            transcript=voice_command,
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied | hint=%s", turn_hint)
@@ -849,12 +891,16 @@ class ConversationHandler:
                 user_utterance=voice_command,
                 max_iterations=max_iters,
                 agent_context_chars=len(agent_context) if agent_context else 0,
+                # NOTE: deliberately NOT keyed on wake_verified — the /think
+                # rescue stays available on unverified-clip turns because the
+                # verify clip itself can be garbage (2026-08-15: two real
+                # lights commands suppressed); one bad clip must never
+                # single-handedly silence a turn.
                 sentinel_double_check=should_double_check_sentinel(
                     (turn_context or {}).get("source"),
                     wake_confidence=(turn_context or {}).get("wake_confidence"),
                     follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
                     pre_wake_speech_seconds=pre_wake_speech_seconds,
-                    wake_verified=(turn_context or {}).get("wake_verified"),
                 ),
             )
 
@@ -902,17 +948,29 @@ class ConversationHandler:
             turn_source = (turn_context or {}).get("source") or (
                 "wake_inferred" if pre_wake_speech_seconds is not None else "unknown"
             )
+            # node_id + wake_verdict ride every sentinel line so the
+            # measurement panel can join suppressions to nodes and to the
+            # wake-verify verdict stream without log archaeology.
+            _sentinel_node_id = (_turn_node_ctx or {}).get("node_id")
+            _wake_verdict = (
+                "unverified"
+                if (turn_context or {}).get("wake_verified") is False
+                else "none"
+            )
             logger.info(
                 "🚫 not_for_me_sentinel | "
-                "conversation_id=%s speaker_user_id=%s prompt_provider=%s "
-                "pre_wake_speech_secs=%.2f direction_hint=%s turn_source=%s "
+                "conversation_id=%s node_id=%s speaker_user_id=%s "
+                "prompt_provider=%s pre_wake_speech_secs=%.2f "
+                "direction_hint=%s turn_source=%s wake_verdict=%s "
                 "transcript=%r raw_assistant=%r",
                 conversation_id,
+                _sentinel_node_id,
                 speaker_user_id,
                 provider_name,
                 pre_wake,
                 hint_state,
                 turn_source,
+                _wake_verdict,
                 voice_command,
                 raw_msg[:160],
             )
@@ -1031,6 +1089,21 @@ class ConversationHandler:
             predicted_tool, confidence,
         )
 
+        # Wake-clip verification — same resolution the blocking path runs, so
+        # voice.wake_verification_mode means the same thing regardless of
+        # which path the router picked. enforce + unverified → defer to the
+        # blocking path (it re-reads the cached verdict instantly and emits
+        # the silent not_for_me); bias + unverified → wake_verified rides
+        # turn_context into the wake hint below as a mild misfire lean.
+        if await self._resolve_wake_verified_into_context(
+            conversation_id, voice_command, turn_context
+        ):
+            logger.debug(
+                "Streaming path: unverified wake in enforce mode — deferring "
+                "to blocking path"
+            )
+            return None
+
         # Inject the per-turn speaker block (name + memories) as a trailing
         # system message — the cached prefix stays speaker-agnostic, so a
         # speaker change can't invalidate it or clobber the cached timezone.
@@ -1086,6 +1159,8 @@ class ConversationHandler:
             pre_wake_speech_seconds,
             wake_confidence=(turn_context or {}).get("wake_confidence"),
             turn_source=(turn_context or {}).get("source"),
+            transcript=voice_command,
+            speaker_known=speaker_user_id is not None,
         )
         if direction_hint:
             logger.info(
@@ -1105,6 +1180,7 @@ class ConversationHandler:
             follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
             pre_wake_speech_seconds=pre_wake_speech_seconds,
             wake_verified=(turn_context or {}).get("wake_verified"),
+            transcript=voice_command,
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied (stream path) | hint=%s", turn_hint)
@@ -1415,6 +1491,21 @@ class ConversationHandler:
             predicted_tool, confidence,
         )
 
+        # Wake-clip verification — same resolution the blocking path runs, so
+        # voice.wake_verification_mode means the same thing regardless of
+        # which path the router picked. enforce + unverified → defer to the
+        # blocking path (it re-reads the cached verdict instantly and emits
+        # the silent not_for_me); bias + unverified → wake_verified rides
+        # turn_context into the wake hint below as a mild misfire lean.
+        if await self._resolve_wake_verified_into_context(
+            conversation_id, voice_command, turn_context
+        ):
+            logger.debug(
+                "Tool-streaming path: unverified wake in enforce mode — "
+                "deferring to blocking path"
+            )
+            return None
+
         # Work on a copy so fall-back doesn't pollute the cache.
         messages = list(cached_messages)
 
@@ -1483,6 +1574,8 @@ class ConversationHandler:
             pre_wake_speech_seconds,
             wake_confidence=(turn_context or {}).get("wake_confidence"),
             turn_source=(turn_context or {}).get("source"),
+            transcript=voice_command,
+            speaker_known=speaker_user_id is not None,
         )
         if direction_hint:
             logger.info(
@@ -1502,6 +1595,7 @@ class ConversationHandler:
             follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
             pre_wake_speech_seconds=pre_wake_speech_seconds,
             wake_verified=(turn_context or {}).get("wake_verified"),
+            transcript=voice_command,
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied (tool-stream path) | hint=%s", turn_hint)

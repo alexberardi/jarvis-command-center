@@ -27,14 +27,18 @@ wake; with neither signal we emit nothing and behavior is unchanged.
 
 from __future__ import annotations
 
-from app.core.direction_hint import QUIET_THRESHOLD_S
+from app.core.direction_hint import BORDERLINE_CONFIDENCE, QUIET_THRESHOLD_S
+from app.core.transcript_filter import is_device_command_shaped
 
 # OWW detection scores at or above this are treated as a clean, deliberate
 # wake ("the user said your wake word"). Below it, the wake may be a false
 # fire and the transcript itself has to carry the addressing evidence.
 # Prod wakes on real requests routinely score 0.9+; marginal/false fires
 # cluster near the node's trigger threshold (~0.5).
-WAKE_CONFIDENT_THRESHOLD: float = 0.75
+# Alias of direction_hint.BORDERLINE_CONFIDENCE — the single source for the
+# confident/marginal wake-score boundary (they were duplicated 0.75s kept
+# in sync by hand before).
+WAKE_CONFIDENT_THRESHOLD: float = BORDERLINE_CONFIDENCE
 
 # From this follow-up iteration onward the window has been open long enough
 # that the room's conversation has likely resumed — require explicit
@@ -48,6 +52,7 @@ def build_turn_hint(
     follow_up_iteration: int | None = None,
     pre_wake_speech_seconds: float | None = None,
     wake_verified: bool | None = None,
+    transcript: str | None = None,
 ) -> str | None:
     """Return a one-line ``[turn context: ...]`` hint, or None.
 
@@ -59,6 +64,14 @@ def build_turn_hint(
         follow_up_iteration: 1-based iteration of the follow-up window.
         pre_wake_speech_seconds: Pre-wake VAD signal — used only to infer
             wake mode for old clients that don't send ``turn_source``.
+        wake_verified: Wake-clip verification verdict (bias mode). False
+            selects a mild misfire-leaning posture — unless the transcript
+            is device-command-shaped (see ``transcript``).
+        transcript: The command transcript, when available. A device-
+            command-shaped transcript ("turn on the ... lights") keeps the
+            normal directed posture even when ``wake_verified`` is False —
+            acoustic-side evidence alone must not produce a suppression-
+            leaning hint on an imperative device command.
 
     Returns:
         The bracketed hint to append to the user message, or ``None``
@@ -69,7 +82,7 @@ def build_turn_hint(
     if turn_source == "follow_up":
         return _follow_up_hint(follow_up_iteration)
     if turn_source == "wake":
-        return _wake_hint(wake_confidence, wake_verified)
+        return _wake_hint(wake_confidence, wake_verified, transcript)
     if turn_source == "chat":
         # Typed into the app — there is no microphone in this loop, so
         # "overheard speech" is impossible by construction.
@@ -92,7 +105,6 @@ def should_double_check_sentinel(
     wake_confidence: float | None = None,
     follow_up_iteration: int | None = None,
     pre_wake_speech_seconds: float | None = None,
-    wake_verified: bool | None = None,
 ) -> bool:
     """Should a first-look ``<not_for_me/>`` buy a reasoned second opinion?
 
@@ -107,12 +119,14 @@ def should_double_check_sentinel(
     continuation ("...actually set a timer for 5 minutes") must not be
     snap-silenced by a first-look ``<not_for_me/>``. Late follow-up iterations
     stay single-pass — by then silence is the window's designed ending.
+
+    An unverified wake clip deliberately does NOT disable the rescue: the
+    verify clip itself can be garbage (prod 2026-08-15: two real lights
+    commands were suppressed because verification read junk clips), so one
+    bad clip must never single-handedly silence a turn. The verdict is a
+    soft bias in the wake hint, and the /think re-check stays available to
+    catch exactly that failure.
     """
-    # An unverified wake clip is affirmative evidence of a misfire — a
-    # first-look sentinel on such a turn is CORRECT; don't argue it back
-    # into an answer with the /think rescue.
-    if wake_verified is False:
-        return False
     if turn_source == "follow_up":
         # Early iterations get the /think rescue — a genuine continuation may
         # need a tool and must not be dropped by a snap sentinel. Late
@@ -137,22 +151,31 @@ def should_double_check_sentinel(
 
 
 def _wake_hint(
-    wake_confidence: float | None, wake_verified: bool | None = None
+    wake_confidence: float | None,
+    wake_verified: bool | None = None,
+    transcript: str | None = None,
 ) -> str:
-    # Wake-clip verification verdict beats every acoustic signal: the clip
-    # that FIRED the wake was transcribed and contained nothing wake-word-
-    # shaped. Score and quiet-room are irrelevant — a 0.95 misfire in a
-    # silent kitchen looks identical to a real wake on those signals (prod
-    # 2026-08-15). Only bias mode reaches here; enforce short-circuits
-    # upstream.
-    if wake_verified is False:
+    # Wake-clip verification verdict: the clip that FIRED the wake was
+    # transcribed and contained nothing wake-word-shaped. That is ONE
+    # signal, not a verdict — the verify clip itself can be garbage (prod
+    # 2026-08-15: two real "turn on the ... lights" commands were suppressed
+    # by unreadable clips), so the posture is a MILD ambient lean, never a
+    # suppression instruction. Only bias mode reaches here; enforce
+    # short-circuits upstream. The imperative device-command guard is
+    # senior: a device-shaped transcript keeps the normal directed posture
+    # because acoustic-side evidence alone must not talk the model out of
+    # an imperative command.
+    if wake_verified is False and not (
+        transcript is not None and is_device_command_shaped(transcript)
+    ):
         return (
-            "[turn context: the wake word FIRED but the recorded wake clip "
-            "did not contain the wake word when transcribed — this is "
-            "almost certainly a detector misfire on other speech. Do NOT "
-            "act on statements, reports, or requests: overheard speech is "
-            "usually coherent. Emit <not_for_me/> unless the transcript "
-            "explicitly addresses you by name.]"
+            "[turn context: the recorded wake clip did not clearly contain "
+            "the wake word when transcribed — weigh this as one signal that "
+            "the wake may have been a detector misfire, not as proof. A "
+            "coherent command or question addressed to you should still be "
+            "answered. Emit <not_for_me/> only when the transcript ALSO "
+            "reads like speech meant for someone else (a reply to another "
+            "person, a mid-story line, a dialogue fragment).]"
         )
     if wake_confidence is not None and wake_confidence < WAKE_CONFIDENT_THRESHOLD:
         return (
