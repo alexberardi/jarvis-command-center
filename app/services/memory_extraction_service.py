@@ -18,6 +18,16 @@ _EXTRACTION_SYSTEM_PROMPT = """You are a memory extraction assistant for a voice
 Given conversation transcripts between Jarvis and a user, extract personal facts, preferences, \
 and habits worth remembering for future conversations.
 
+SOURCE OF TRUTH — the single most important rule: extract ONLY from what the \
+USER said. NEVER store a claim that appears only in Jarvis's own replies — \
+Jarvis sometimes gets things wrong, and storing its words launders a \
+hallucination into a permanent "fact" that poisons every future conversation \
+(this happened: Jarvis misattributed a medication to the wrong family member, \
+the claim was extracted as a memory, and Jarvis then repeated it as truth). \
+If the user CORRECTS or QUESTIONS something Jarvis said ("no, that's wrong", \
+"why do you think that?"), that is evidence AGAINST the claim — extract the \
+correction if one is stated, never the original claim.
+
 What TO extract:
 - Names of family members, pets, friends mentioned naturally — capture the name even when it arrives indirectly across the conversation
 - Location preferences (city they check weather for = likely where they live)
