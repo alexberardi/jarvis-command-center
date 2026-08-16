@@ -268,3 +268,90 @@ class TestChatSource:
         hint = build_turn_hint("chat")
         assert "wake" not in hint.lower()
         assert "confidence" not in hint.lower()
+
+
+class TestWakeVerifiedSoftBias:
+    """2026-08-15 regression pins: verified=False demoted from a hard
+    suppression instruction to a mild ambient lean. Two REAL lights commands
+    were suppressed because wake verification read garbage clips — one bad
+    clip must never single-handedly silence a turn."""
+
+    def test_unverified_hint_is_a_mild_lean_not_an_instruction(self):
+        hint = build_turn_hint("wake", wake_confidence=0.95, wake_verified=False)
+        assert hint is not None
+        assert "one signal" in hint
+        # The old hard posture must be gone.
+        assert "almost certainly" not in hint
+        assert "Do NOT act" not in hint
+
+    def test_unverified_hint_keeps_the_answer_path_open(self):
+        hint = build_turn_hint("wake", wake_confidence=0.95, wake_verified=False)
+        assert "should still be answered" in hint
+
+    def test_unverified_hint_does_not_require_addressing_by_name(self):
+        # The old text demanded the transcript "explicitly addresses you by
+        # name" — nobody says "Jarvis" mid-command after the wake word.
+        hint = build_turn_hint("wake", wake_confidence=0.95, wake_verified=False)
+        assert "by name" not in hint
+
+    def test_device_command_overrides_unverified_lean(self):
+        # Imperative guard senior to the verdict: the literal 2026-08-15
+        # losses keep the normal directed posture.
+        for cmd in (
+            "Turn on the living room lights.",
+            "Turn on the playroom lights.",
+        ):
+            hint = build_turn_hint(
+                "wake",
+                wake_confidence=0.97,
+                wake_verified=False,
+                transcript=cmd,
+            )
+            assert hint is not None
+            assert "addressed to you" in hint.lower()
+            assert "misfire" not in hint.lower()
+
+    def test_junk_transcript_keeps_unverified_lean(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.97,
+            wake_verified=False,
+            transcript="- Uh-huh. - Eat it.",
+        )
+        assert hint is not None
+        assert "one signal" in hint
+
+    def test_verified_true_gets_normal_posture(self):
+        hint = build_turn_hint("wake", wake_confidence=0.95, wake_verified=True)
+        assert "addressed to you" in hint.lower()
+
+
+class TestUnverifiedWakeKeepsSentinelRescue:
+    """The /think sentinel double-check must stay available on
+    unverified-clip turns — the verify clip itself can be garbage
+    (2026-08-15), so the rescue is the last line against a wrong silence."""
+
+    def test_signature_no_longer_takes_wake_verified(self):
+        import inspect
+
+        from app.core.turn_context import should_double_check_sentinel
+
+        params = inspect.signature(should_double_check_sentinel).parameters
+        assert "wake_verified" not in params
+
+    def test_confident_wake_qualifies_regardless_of_clip_verdict(self):
+        # Before: wake_verified=False short-circuited the rescue off. Now
+        # the verdict is not consulted at all — a confident wake keeps it.
+        from app.core.turn_context import should_double_check_sentinel
+
+        assert should_double_check_sentinel("wake", 0.97, None, None) is True
+
+
+class TestSharedConfidenceConstant:
+    def test_threshold_is_the_direction_hint_constant(self):
+        # Item 7 hygiene: the duplicated 0.75s are unified — one source.
+        from app.core.direction_hint import BORDERLINE_CONFIDENCE
+
+        assert WAKE_CONFIDENT_THRESHOLD is BORDERLINE_CONFIDENCE or (
+            WAKE_CONFIDENT_THRESHOLD == BORDERLINE_CONFIDENCE
+        )
