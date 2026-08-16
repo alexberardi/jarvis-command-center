@@ -35,6 +35,7 @@ from app.services.settings_service import get_settings_service
 from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.tool_builder import ToolBuilder
 from app.core.tool_executor import tool_executor
+from app.core.tool_routing import collect_tool_keywords, utterance_matches_keywords
 from app.core.tool_call_parser import tool_call_parser
 from app.core.utils.latency_logger import latency_logger
 
@@ -166,6 +167,27 @@ class ToolExecutionEngine:
         reasoning_parts: List[str] = []  # Accumulated <think> blocks across iterations
         iteration_metrics: List[Dict[str, Any]] = []  # Per-iteration LLM metrics
         _loop_start = _time.time()
+
+        # Scrub [MUST_CALL_RETRY] nags left over from PREVIOUS turns. They are
+        # one-shot steering messages: once a turn ends they only (a) keep
+        # "You MUST call a tool. Do NOT answer directly." pressure on every
+        # later turn (prod traces showed forced junk calls like chat/tell_joke
+        # on "Yum.") and (b) inflate _must_call_retry_count so later turns
+        # start at "attempt 2/2" (observed live 2026-08-15). Same hygiene the
+        # sentinel-restore path already applies.
+        _stale_retry_tag = "[MUST_CALL_RETRY]"
+        if any(
+            m.get("role") == "system" and _stale_retry_tag in str(m.get("content", ""))
+            for m in messages
+        ):
+            logger.info("Scrubbing stale %s messages from prior turns", _stale_retry_tag)
+            messages[:] = [
+                m for m in messages
+                if not (
+                    m.get("role") == "system"
+                    and _stale_retry_tag in str(m.get("content", ""))
+                )
+            ]
 
         # Build adapter_settings from node's adapter_hash if present
         node_context = conversation_cache.get_node_context(conversation_id) or {}
@@ -856,12 +878,43 @@ class ToolExecutionEngine:
 
             # Handle different finish reasons
             if finish_reason == "stop":
-                # Unconditional force-tool-calls guard (compressed provider).
+                # Force-tool-calls guard (compressed provider).
                 # Pop the bad assistant message so the model gets a clean
                 # slate instead of being biased by its own failed response.
                 # Allows up to 2 retries before giving up.
+                #
+                # Keyword gate (2026-08-15 latency fix): this guard used to be
+                # unconditional, so EVERY plain-prose answer paid a second
+                # sequential LLM call — 56% of prod voice turns, +600ms p50.
+                # Prod traces showed the dominant retry victims were purely
+                # conversational turns ("Thank you", "Okay", follow-up
+                # chatter) where prose IS the correct final answer; the
+                # genuine rescues ("Leo took his medicine" → medication,
+                # "turn on the lights" → control_device) all carried command
+                # keywords in the utterance. So: only force a retry when the
+                # utterance keyword-matches a declared command/tool keyword.
+                # If no keywords are declared at all (old node clients) or
+                # the utterance is unknown, keep the legacy always-retry
+                # behavior — the gate only ever skips on positive evidence
+                # that no tool was being addressed.
                 force_tools = conversation_cache.get_force_tool_calls(conversation_id)
                 retry_count = _must_call_retry_count()
+                if force_tools and retry_count < 2 and not double_checked:
+                    keyword_pool = collect_tool_keywords(
+                        conversation_cache.get_available_commands(conversation_id),
+                        conversation_cache.get_tools(conversation_id),
+                        tools,
+                    )
+                    if (
+                        user_utterance
+                        and keyword_pool
+                        and not utterance_matches_keywords(user_utterance, keyword_pool)
+                    ):
+                        logger.info(
+                            "Force-tool-calls guard skipped — utterance matches "
+                            "no command keywords; accepting direct answer"
+                        )
+                        force_tools = False
                 # A prose answer produced by the double-check rescue is the
                 # rescue — never feed it back into the must-call machinery
                 # that manufactured the corner in the first place.

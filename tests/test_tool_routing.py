@@ -237,3 +237,87 @@ class TestPruneToolsByConfidence:
 
         # Should return None (would result in empty list)
         assert pruned is None
+
+
+class TestCollectToolKeywords:
+    """Tests for collect_tool_keywords (force-tool-calls keyword gate)."""
+
+    def test_collects_from_command_definitions(self):
+        from app.core.tool_routing import collect_tool_keywords
+
+        commands = [
+            {"command_name": "medication", "keywords": ["medicine", "meds", "took my"]},
+            {"command_name": "no_keywords"},
+        ]
+        assert collect_tool_keywords(commands) == ["medicine", "meds", "took my"]
+
+    def test_collects_from_openai_style_tool_defs(self):
+        from app.core.tool_routing import collect_tool_keywords
+
+        tools = [
+            {"function": {"name": "control_device", "keywords": ["lights", "turn on"]}},
+            {"function": {"name": "recall"}},
+        ]
+        assert collect_tool_keywords(tools) == ["lights", "turn on"]
+
+    def test_merges_and_deduplicates_multiple_sources(self):
+        from app.core.tool_routing import collect_tool_keywords
+
+        commands = [{"command_name": "a", "keywords": ["lights"]}]
+        tools = [{"function": {"name": "a", "keywords": ["lights", "dim"]}}]
+        assert collect_tool_keywords(commands, tools) == ["lights", "dim"]
+
+    def test_none_sources_and_malformed_entries_are_ignored(self):
+        from app.core.tool_routing import collect_tool_keywords
+
+        commands = [
+            {"command_name": "bad_type", "keywords": "not-a-list"},
+            {"command_name": "mixed", "keywords": ["ok", 42, None, "  "]},
+            "not-a-dict",
+        ]
+        assert collect_tool_keywords(None, commands, []) == ["ok"]
+
+
+class TestUtteranceMatchesKeywords:
+    """Tests for utterance_matches_keywords (force-tool-calls keyword gate)."""
+
+    def test_conversational_ack_matches_nothing(self):
+        from app.core.tool_routing import utterance_matches_keywords
+
+        keywords = ["medicine", "meds", "lights", "calendar", "joke"]
+        for utterance in ["Thank you.", "Okay.", "Oh.", "Goodnight.", "Mm-hmm.", "Really good."]:
+            assert utterance_matches_keywords(utterance, keywords) is False
+
+    def test_single_word_keyword_matches_on_word_boundary(self):
+        from app.core.tool_routing import utterance_matches_keywords
+
+        assert utterance_matches_keywords("Leo took his medicine.", ["medicine"]) is True
+        # "night" must not match inside "goodnight"
+        assert utterance_matches_keywords("goodnight", ["night"]) is False
+
+    def test_multi_word_keyword_matches_as_phrase(self):
+        from app.core.tool_routing import utterance_matches_keywords
+
+        assert utterance_matches_keywords("I took my pills already", ["took my"]) is True
+        assert utterance_matches_keywords("he took someone's advice", ["took my"]) is False
+
+    def test_short_keywords_are_ignored(self):
+        from app.core.tool_routing import utterance_matches_keywords
+
+        # "to" and "hi" are shorter than the minimum meaningful length and
+        # would otherwise flag ordinary chatter as tool-shaped.
+        assert utterance_matches_keywords("I'm going to go.", ["to", "hi"]) is False
+
+    def test_matching_is_case_and_punctuation_insensitive(self):
+        from app.core.tool_routing import utterance_matches_keywords
+
+        assert utterance_matches_keywords("Turn on the LIGHTS!", ["lights"]) is True
+        assert utterance_matches_keywords("What's on my calendar?", ["calendar"]) is True
+
+    def test_empty_inputs_do_not_match(self):
+        from app.core.tool_routing import utterance_matches_keywords
+
+        assert utterance_matches_keywords("", ["lights"]) is False
+        assert utterance_matches_keywords(None, ["lights"]) is False
+        assert utterance_matches_keywords("turn on the lights", []) is False
+        assert utterance_matches_keywords("!!!", ["lights"]) is False
