@@ -124,8 +124,12 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         key="conversation.max_turns",
         category="conversation",
         value_type="int",
-        default=20,
-        description="Maximum number of conversation turns",
+        default=10,
+        description=(
+            "Maximum user/assistant exchanges kept in conversation history "
+            "(sliding window — oldest turns are dropped first, atomically with "
+            "their tool calls/results; keeps prompts bounded for the LLM)"
+        ),
         env_fallback="JARVIS_CONVERSATION_MAX_TURNS",
     ),
     SettingDefinition(
