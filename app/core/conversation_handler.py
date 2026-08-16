@@ -858,9 +858,13 @@ class ConversationHandler:
                 }
                 for r in server_results
             ]
-            result = await self._format_tool_result_text_mode(
-                conversation_id, messages, tool_results_for_format
-            )
+            # This is the post-tool-loop LLM call that renders the final
+            # spoken answer — previously an unspanned gap of up to ~1.8s
+            # in voice_command_stream traces.
+            with timing.measure("final_response_generation", service="llm_proxy") if timing else nullcontext():
+                result = await self._format_tool_result_text_mode(
+                    conversation_id, messages, tool_results_for_format
+                )
 
         # If the LLM emitted the <not_for_me/> sentinel, the user wasn't
         # addressing Jarvis (overheard conversation, TV audio, etc.). Convert
@@ -1131,6 +1135,11 @@ class ConversationHandler:
         )
         think_stripper = ThinkBlockStripper.from_pair(think_pair)
 
+        # Latency trace (open only when the calling endpoint registered one —
+        # /voice/command/stream does). The trace stays open until the audio
+        # stream finishes, so spans recorded inside the generator land on it.
+        timing = latency_logger.get_request(conversation_id)
+
         # Open the LLM stream up-front so we can peek for the <not_for_me/>
         # sentinel before committing tokens to TTS. process_voice_command_with_tools
         # catches the sentinel after the blocking call, but the fast path
@@ -1139,6 +1148,8 @@ class ConversationHandler:
         # TTS'd token-by-token. On detection we return None; the caller
         # falls through to the blocking path which repeats the (cheap)
         # LLM call and converts to a 202 JSON not_for_me.
+        _llm_start = _time.perf_counter()
+        _llm_first_token_at: float | None = None
         llm_stream = self.llm_client.chat_completion_stream(
             messages=messages,
             adapter_settings=adapter_settings,
@@ -1154,6 +1165,15 @@ class ConversationHandler:
                 if event.get("done"):
                     break
                 delta = event.get("delta", "")
+                if delta and _llm_first_token_at is None:
+                    _llm_first_token_at = _time.perf_counter()
+                    if timing is not None:
+                        timing.record_span(
+                            "llm_stream_first_token",
+                            _llm_start,
+                            _llm_first_token_at,
+                            service="llm_proxy",
+                        )
                 if not delta:
                     continue
                 pre_buffer_text += delta
@@ -1231,6 +1251,19 @@ class ConversationHandler:
                                     yield chunk
                             except Exception as e:
                                 logger.warning("TTS stream error for sentence %d: %s", sentences_sent, e)
+
+                # Wall time of the whole LLM stream. TTS waits interleave
+                # with token arrival here, so this is the stream's envelope,
+                # not pure inference time — llm_stream_first_token is the
+                # clean LLM latency signal.
+                if timing is not None:
+                    timing.record_span(
+                        "llm_stream_total",
+                        _llm_start,
+                        _time.perf_counter(),
+                        service="llm_proxy",
+                        metadata={"chars": len(full_response)},
+                    )
 
                 # Flush remaining buffer — strip any lingering complete
                 # think block one more time (in case the whole response
@@ -1642,6 +1675,10 @@ class ConversationHandler:
 
         _t0 = _time.time()
 
+        # Latency trace (open only when the calling endpoint registered one —
+        # /voice/command/continue/stream does).
+        timing = latency_logger.get_request(conversation_id)
+
         # Remember any items a tool surfaced this turn (parity with the blocking
         # continue) so a later turn can re-inject the "recently shown" list.
         _stash_referenced_items(conversation_id, tool_results)
@@ -1873,6 +1910,8 @@ class ConversationHandler:
             full_response = ""
             sentences_sent = 0
             substituted: Optional[str] = None
+            _llm_start = _time.perf_counter()
+            _llm_first_token_at: Optional[float] = None
 
             try:
                 async for event in self.llm_client.chat_completion_stream(
@@ -1884,6 +1923,15 @@ class ConversationHandler:
                     if event.get("done"):
                         break
                     delta = event.get("delta", "")
+                    if delta and _llm_first_token_at is None:
+                        _llm_first_token_at = _time.perf_counter()
+                        if timing is not None:
+                            timing.record_span(
+                                "llm_stream_first_token",
+                                _llm_start,
+                                _llm_first_token_at,
+                                service="llm_proxy",
+                            )
                     if not delta:
                         continue
                     token_buffer += delta
@@ -1910,6 +1958,19 @@ class ConversationHandler:
                                 logger.warning(
                                     "TTS error sentence %d: %s", sentences_sent, e,
                                 )
+
+                # Wall time of the whole LLM stream. TTS waits interleave
+                # with token arrival here, so this is the stream's envelope,
+                # not pure inference time — llm_stream_first_token is the
+                # clean LLM latency signal.
+                if timing is not None:
+                    timing.record_span(
+                        "llm_stream_total",
+                        _llm_start,
+                        _time.perf_counter(),
+                        service="llm_proxy",
+                        metadata={"chars": len(full_response)},
+                    )
 
                 # Flush trailing partial — but never speak raw JSON / think
                 # residue (a model that re-emits a bare tool-call instead of
@@ -1997,6 +2058,9 @@ class ConversationHandler:
         """
         logger.info(f"🔄 Continuing conversation {conversation_id[:8]} with {len(tool_results)} tool results")
 
+        # Latency trace (open only when the calling endpoint registered one)
+        timing = latency_logger.get_request(conversation_id)
+
         # Get conversation state
         messages = conversation_cache.get_messages(conversation_id)
         tools = conversation_cache.get_tools(conversation_id)
@@ -2047,9 +2111,10 @@ class ConversationHandler:
             # Text-based tool calling: local models loop on tool calls because
             # role="tool" messages are dropped/ignored by the chat template.
             # Bypass the tool loop with a single formatting LLM call.
-            result = await self._format_tool_result_text_mode(
-                conversation_id, messages, tool_results
-            )
+            with timing.measure("final_response_generation", service="llm_proxy") if timing else nullcontext():
+                result = await self._format_tool_result_text_mode(
+                    conversation_id, messages, tool_results
+                )
 
         # Update cache
         conversation_cache.update_messages(conversation_id, messages)

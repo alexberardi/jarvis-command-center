@@ -6,11 +6,13 @@ household/node/user identification.
 """
 
 import logging
+import time
 from typing import AsyncIterator
 
 import httpx
 
 from jarvis_auth_client.headers import get_app_headers, build_context_headers
+from app.core.utils.latency_logger import latency_logger
 from app.services.settings_service import get_settings_service
 
 logger = logging.getLogger("uvicorn")
@@ -38,6 +40,7 @@ class TTSClient:
         household_id: str,
         node_id: str | None = None,
         user_id: int | None = None,
+        conversation_id: str | None = None,
     ) -> None:
         """Initialize the TTS client.
 
@@ -45,10 +48,15 @@ class TTSClient:
             household_id: The household making the request
             node_id: Optional specific node making the request
             user_id: Optional user associated with the request
+            conversation_id: Optional conversation whose open latency trace
+                (if any) receives ``tts_first_chunk`` / ``tts_stream_total``
+                spans from streaming calls. Instrumentation only — no
+                behavior change when omitted or when no trace is open.
         """
         self.household_id = household_id
         self.node_id = node_id
         self.user_id = user_id
+        self.conversation_id = conversation_id
 
         # URL resolution priority:
         # 1. Per-household/node setting (tts.url)
@@ -120,6 +128,15 @@ class TTSClient:
         """
         url = f"{self.base_url.rstrip('/')}/speak/stream"
 
+        # Latency spans (instrumentation only). Looked up per call — the
+        # trace stays open through the whole streaming window, so every
+        # sentence's synth gets its own tts_first_chunk / tts_stream_total.
+        timing = (
+            latency_logger.get_request(self.conversation_id)
+            if self.conversation_id else None
+        )
+        request_start = time.perf_counter()
+
         client = httpx.AsyncClient(timeout=timeout)
         resp = await client.send(
             client.build_request("POST", url, json={"text": text}, headers=self._build_headers()),
@@ -134,10 +151,36 @@ class TTSClient:
         }
 
         async def _iter_and_close() -> AsyncIterator[bytes]:
+            first_chunk = True
+            total_bytes = 0
             try:
                 async for chunk in resp.aiter_bytes(chunk_size=4096):
+                    if first_chunk:
+                        first_chunk = False
+                        if timing is not None:
+                            # Time-to-first-audio-chunk from the TTS service,
+                            # measured from the speak_stream() call.
+                            timing.record_span(
+                                "tts_first_chunk",
+                                request_start,
+                                time.perf_counter(),
+                                service="tts",
+                                metadata={"text_chars": len(text)},
+                            )
+                    total_bytes += len(chunk)
                     yield chunk
             finally:
+                if timing is not None:
+                    timing.record_span(
+                        "tts_stream_total",
+                        request_start,
+                        time.perf_counter(),
+                        service="tts",
+                        metadata={
+                            "text_chars": len(text),
+                            "audio_bytes": total_bytes,
+                        },
+                    )
                 await resp.aclose()
                 await client.aclose()
 
