@@ -59,7 +59,8 @@ class TestSettingsDefinitions:
                               "network", "oauth", "smart_home", "adapter", "voice",
                               "routines", "web_search", "updates", "attention",
                               "phone_calls", "household", "persona",
-                              "characterization", "proposals", "signals", "errands"}
+                              "characterization", "proposals", "signals", "errands",
+                              "presence"}
         assert categories == expected_categories
 
 

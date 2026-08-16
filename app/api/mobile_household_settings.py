@@ -59,6 +59,11 @@ HOUSEHOLD_CONTROLLABLE_SETTINGS: dict[str, str] = {
     # tools/safety. Length-capped on write (PERSONA_MAX_CHARS) to bound the
     # cached prefix. Starter presets served via GET .../persona/presets.
     "persona.household_prompt": "string",
+    # Presence automations: lock/unlock the household's lock devices on a phone
+    # geofence crossing. Both fail-closed, default off. Auto-unlock is a SEPARATE
+    # toggle from auto-lock because it opens a door on a geofence event.
+    "presence.auto_lock_enabled": "bool",
+    "presence.auto_unlock_enabled": "bool",
 }
 
 # Role required to CHANGE a household setting. Reads are open to any member;

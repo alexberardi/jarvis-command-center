@@ -806,4 +806,28 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         default=1,
         description="Max simultaneous active calls per household",
     ),
+    SettingDefinition(
+        key="presence.auto_lock_enabled",
+        category="presence",
+        value_type="bool",
+        default=False,
+        description=(
+            "When on, a 'presence.left' signal (the phone leaving the home "
+            "geofence) LOCKS the household's controllable lock devices via the "
+            "smart-home control path. Deterministic — no LLM. Fail-closed, default "
+            "OFF: nothing actuates until a household opts in."
+        ),
+    ),
+    SettingDefinition(
+        key="presence.auto_unlock_enabled",
+        category="presence",
+        value_type="bool",
+        default=False,
+        description=(
+            "When on, a 'presence.seen' signal (the phone arriving in the home "
+            "geofence) UNLOCKS the household's lock devices. SEPARATE from "
+            "auto_lock because auto-unlock physically opens a door on a geofence "
+            "event — enable it deliberately. Fail-closed, default OFF."
+        ),
+    ),
 ]

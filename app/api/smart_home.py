@@ -1095,6 +1095,39 @@ _RESULT_DIR = _os.path.join(_tempfile.gettempdir(), "jarvis-device-control")
 _os.makedirs(_RESULT_DIR, exist_ok=True)
 
 
+def build_control_details(
+    dev: Device,
+    action_name: str,
+    reply_request_id: str,
+    data: dict | None = None,
+) -> dict:
+    """The MQTT ``action``-verb payload for a ``control_device`` command.
+
+    Carries the device's full addressing context so the node's
+    ``control_device.handle_action`` actuates WITHOUT re-resolving the device by
+    name. Shared by the smart-home control route and the presence-automation
+    reaction so the context shape lives in exactly one place.
+    """
+    return {
+        "command_name": "control_device",
+        "action_name": action_name,
+        "context": {
+            "entity_id": dev.entity_id,
+            "domain": dev.domain,
+            "name": dev.name,
+            "protocol": dev.protocol,
+            "cloud_id": dev.cloud_id,
+            "model": dev.model,
+            "local_ip": dev.local_ip,
+            "mac_address": dev.mac_address,
+            "source": dev.source,
+            **(data or {}),
+        },
+        "trusted": True,
+        "reply_request_id": reply_request_id,
+    }
+
+
 @router.post(
     "/households/{household_id}/devices/{device_id}/control",
     response_model=DeviceControlResponse,
@@ -1138,24 +1171,7 @@ def control_device(
     result_file = _os.path.join(_RESULT_DIR, f"{request_id}.json")
 
     service = get_node_command_service()
-    details = {
-        "command_name": "control_device",
-        "action_name": body.action,
-        "context": {
-            "entity_id": dev.entity_id,
-            "domain": dev.domain,
-            "name": dev.name,
-            "protocol": dev.protocol,
-            "cloud_id": dev.cloud_id,
-            "model": dev.model,
-            "local_ip": dev.local_ip,
-            "mac_address": dev.mac_address,
-            "source": dev.source,
-            **(body.data or {}),
-        },
-        "trusted": True,
-        "reply_request_id": request_id,
-    }
+    details = build_control_details(dev, body.action, request_id, body.data)
     logger.info("DEVICE CONTROL: action=%s node=%s device=%s mqtt=%s", body.action, node.node_id[:12], dev.entity_id, mqtt.is_connected if mqtt else "N/A")
     service.publish_command_with_id(node.node_id, "action", details, request_id)
     logger.info("DEVICE CONTROL: published, polling for %s", request_id[:8])
