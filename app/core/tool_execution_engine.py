@@ -110,6 +110,21 @@ def _normalize_native_tool_calls(raw_calls: List[Dict[str, Any]]) -> List[Dict[s
     return normalized
 
 
+def _is_retry_nag(msg: Dict[str, Any], tag: str = "[MUST_CALL_RETRY]") -> bool:
+    """True only for the guard's standalone nag messages.
+
+    Nag content starts with the tag; the base system prompt merely MENTIONS
+    the tag in its rules text, so substring tests must not be used to
+    identify nags (they'd match — and delete or miscount — the cached
+    system prompt itself).
+    """
+    return (
+        msg.get("role") == "system"
+        and str(msg.get("content", "")).lstrip().startswith(tag)
+    )
+
+
+
 class ToolExecutionEngine:
     """
     Engine for executing the tool loop.
@@ -175,19 +190,15 @@ class ToolExecutionEngine:
         # on "Yum.") and (b) inflate _must_call_retry_count so later turns
         # start at "attempt 2/2" (observed live 2026-08-15). Same hygiene the
         # sentinel-restore path already applies.
-        _stale_retry_tag = "[MUST_CALL_RETRY]"
-        if any(
-            m.get("role") == "system" and _stale_retry_tag in str(m.get("content", ""))
-            for m in messages
-        ):
-            logger.info("Scrubbing stale %s messages from prior turns", _stale_retry_tag)
-            messages[:] = [
-                m for m in messages
-                if not (
-                    m.get("role") == "system"
-                    and _stale_retry_tag in str(m.get("content", ""))
-                )
-            ]
+        # A nag is a standalone system message whose content STARTS with the
+        # tag. Substring matching is NOT safe here: the base system prompt's
+        # rules text mentions the tag when documenting the guard to the model
+        # (core_rules.py), and a substring scrub deletes messages[0] — the
+        # persona, rules, and every tool schema. Never touch the leading
+        # system prefix.
+        if any(_is_retry_nag(m) for m in messages[1:]):
+            logger.info("Scrubbing stale [MUST_CALL_RETRY] messages from prior turns")
+            messages[1:] = [m for m in messages[1:] if not _is_retry_nag(m)]
 
         # Build adapter_settings from node's adapter_hash if present
         node_context = conversation_cache.get_node_context(conversation_id) or {}
@@ -249,19 +260,12 @@ class ToolExecutionEngine:
             return sorted(must_call)
 
         def _must_call_retry_count() -> int:
-            retry_tag = "[MUST_CALL_RETRY]"
-            return sum(
-                1
-                for msg in messages
-                if msg.get("role") == "system" and retry_tag in msg.get("content", "")
-            )
+            return sum(1 for msg in messages if _is_retry_nag(msg))
 
         def _invalid_param_retry_count() -> int:
-            retry_tag = "[INVALID_PARAM_RETRY]"
             return sum(
-                1
-                for msg in messages
-                if msg.get("role") == "system" and retry_tag in msg.get("content", "")
+                1 for msg in messages
+                if _is_retry_nag(msg, "[INVALID_PARAM_RETRY]")
             )
 
         def _iso_date_retry_count() -> int:
@@ -804,11 +808,7 @@ class ToolExecutionEngine:
                     # transcript so follow-up turns aren't poisoned by them.
                     if messages and messages[-1].get("role") == "assistant":
                         messages.pop()
-                    while (
-                        messages
-                        and messages[-1].get("role") == "system"
-                        and "[MUST_CALL_RETRY]" in str(messages[-1].get("content", ""))
-                    ):
+                    while messages and _is_retry_nag(messages[-1]):
                         messages.pop()
                     restored: str = popped_prose
                     if self.prompt_provider:

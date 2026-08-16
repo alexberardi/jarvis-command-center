@@ -1983,3 +1983,74 @@ class TestStaleMustCallRetryScrub:
         assert retry_messages, "keyword-matched prose should trigger the guard"
         assert "attempt 1/2" in retry_messages[0]
         assert "stale nag" not in retry_messages[0]
+
+
+class TestScrubDoesNotEatSystemPrompt:
+    """Regression: the base system prompt MENTIONS [MUST_CALL_RETRY] in its
+    rules text (core_rules.py). The scrub must only remove standalone nag
+    messages (content starts with the tag), never the cached prompt — a
+    substring scrub deleted messages[0] with every tool schema in it
+    (prod incident 2026-08-16)."""
+
+    def test_is_retry_nag_ignores_prompt_that_mentions_tag(self):
+        from app.core.tool_execution_engine import _is_retry_nag
+
+        base_prompt = {
+            "role": "system",
+            "content": (
+                "You are Jarvis. Rules: ... the utterance (you drafted an "
+                "answer, or a [MUST_CALL_RETRY] asks for a tool call) ... "
+                "TOOLS: control_device, get_weather"
+            ),
+        }
+        real_nag = {
+            "role": "system",
+            "content": "[MUST_CALL_RETRY] You MUST call a tool. Do NOT answer directly.",
+        }
+        assert not _is_retry_nag(base_prompt)
+        assert _is_retry_nag(real_nag)
+        assert _is_retry_nag({"role": "system", "content": "  [MUST_CALL_RETRY] retry"})
+        assert not _is_retry_nag({"role": "user", "content": "[MUST_CALL_RETRY]"})
+
+    @pytest.mark.asyncio
+    async def test_scrub_preserves_system_prompt_and_removes_stale_nags(self):
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client = MagicMock()
+        mock_llm_client.chat_completion = AsyncMock(return_value={
+            "choices": [{
+                "message": {"content": '{"message": "hi", "tool_calls": []}'},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        })
+
+        mock_cache = MagicMock()
+        mock_cache.get_node_context.return_value = {}
+        mock_cache.get_timezone.return_value = "UTC"
+        mock_cache.get_force_tool_calls.return_value = False
+        mock_cache.get_router_decision.return_value = {"used": True}
+        mock_cache.get_available_commands.return_value = []
+
+        base_prompt = {
+            "role": "system",
+            "content": "Persona + rules mentioning [MUST_CALL_RETRY] + tool schemas",
+        }
+        stale_nag = {
+            "role": "system",
+            "content": "[MUST_CALL_RETRY] You MUST call a tool. Do NOT answer directly.",
+        }
+        messages = [
+            base_prompt,
+            {"role": "user", "content": "old turn"},
+            {"role": "assistant", "content": "old answer"},
+            stale_nag,
+            {"role": "user", "content": "hello"},
+        ]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_cache):
+            engine = ToolExecutionEngine(mock_llm_client)
+            await engine.execute("conv-scrub", messages, tools=[], user_utterance="hello")
+
+        assert messages[0] is base_prompt, "scrub must never remove the cached system prompt"
+        assert stale_nag not in messages, "stale standalone nags must be scrubbed"
