@@ -138,21 +138,6 @@ async def whisper_transcribe(
             speaker_audio_bytes = await speaker_audio.read()
             speaker_audio_filename = speaker_audio.filename or "speaker.wav"
 
-        # Wake-clip verification: the leading ~2s of speaker_audio is the wake
-        # snapshot. Fire-and-forget — the command turn reads the verdict from the
-        # conversation cache with a bounded fail-open wait. Only when the node
-        # provided a conversation_id (new nodes) and the mode isn't off.
-        if speaker_audio_bytes and conversation_id:
-            from app.core.wake_verification import _get_mode, run_wake_verification
-            if _get_mode(node_context.household_id, node_context.node.node_id) != "off":
-                asyncio.create_task(run_wake_verification(
-                    speaker_audio_bytes,
-                    conversation_id,
-                    node_context.household_id,
-                    node_context.node.node_id,
-                    node_context.household_member_ids,
-                ))
-
         # Build extra params
         params: dict[str, Any] = {}
         if language:
@@ -177,6 +162,27 @@ async def whisper_transcribe(
                 speaker_audio_filename=speaker_audio_filename,
                 **params,
             )
+
+        # Wake-clip verification: the leading ~2s of speaker_audio is the wake
+        # snapshot. Fire-and-forget — the command turn reads the verdict from the
+        # conversation cache with a bounded fail-open wait. Only when the node
+        # provided a conversation_id (new nodes) and the mode isn't off.
+        # Deliberately started AFTER the command transcribe returns: whisper
+        # serializes model access, so racing this task against the command
+        # transcribe would queue the user's STT behind the wake clip (and
+        # before whisper grew its lock, the race crashed it outright —
+        # GGML_ASSERT !sched->is_alloc). The command turn's bounded verdict
+        # wait (VERDICT_WAIT_SECONDS) still covers the later start.
+        if speaker_audio_bytes and conversation_id:
+            from app.core.wake_verification import _get_mode, run_wake_verification
+            if _get_mode(node_context.household_id, node_context.node.node_id) != "off":
+                asyncio.create_task(run_wake_verification(
+                    speaker_audio_bytes,
+                    conversation_id,
+                    node_context.household_id,
+                    node_context.node.node_id,
+                    node_context.household_member_ids,
+                ))
 
         if isinstance(result, dict):
             timing.user_command = result.get("text")
