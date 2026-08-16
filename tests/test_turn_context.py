@@ -355,3 +355,156 @@ class TestSharedConfidenceConstant:
         assert WAKE_CONFIDENT_THRESHOLD is BORDERLINE_CONFIDENCE or (
             WAKE_CONFIDENT_THRESHOLD == BORDERLINE_CONFIDENCE
         )
+
+
+class TestSelfPlaybackMediaContext:
+    """Media-aware wake hints: when the node reported SELF-PLAYBACK (its own
+    speaker was playing music at wake), the wake hint carries a mild
+    two-sided media-context line — music is a known false-wake source, but
+    users also talk to Jarvis over music, most often to control it. Soft
+    bias only; never a suppression instruction."""
+
+    def test_wake_hint_carries_media_context_line(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert hint is not None
+        assert hint.startswith("[turn context:")
+        assert hint.endswith("]")
+        assert "own speaker" in hint
+        assert "music" in hint.lower()
+
+    def test_media_line_is_two_sided_not_a_suppression(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        # Both sides present: false-wake awareness AND talk-over-music.
+        assert "false-wake" in hint or "false wake" in hint.lower()
+        assert "talk to you over" in hint or "over their music" in hint
+        # And it must never instruct silence outright.
+        assert "do not act" not in hint.lower()
+
+    def test_media_line_calls_music_control_directed(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert "music-control" in hint.lower()
+        assert "directed at you" in hint.lower()
+
+    def test_no_media_line_without_self_playback(self):
+        for kwargs in (
+            {},
+            {"self_playback": None, "self_playback_kind": None},
+            {"self_playback": False, "self_playback_kind": None},
+        ):
+            hint = build_turn_hint("wake", wake_confidence=0.95, **kwargs)
+            assert "own speaker" not in hint
+
+    def test_old_node_missing_fields_identical_output(self):
+        assert build_turn_hint("wake", wake_confidence=0.95) == build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            self_playback=None,
+            self_playback_kind=None,
+        )
+
+    def test_future_non_music_kind_gets_no_media_line(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            self_playback=True,
+            self_playback_kind="podcast",
+        )
+        assert "own speaker" not in hint
+
+    def test_missing_kind_still_counts_as_music(self):
+        hint = build_turn_hint(
+            "wake", wake_confidence=0.95, self_playback=True
+        )
+        assert "own speaker" in hint
+
+    def test_low_confidence_variant_also_carries_media_line(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=WAKE_CONFIDENT_THRESHOLD - 0.2,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert "low confidence" in hint.lower()
+        assert "own speaker" in hint
+
+    def test_unverified_lean_also_carries_media_line(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            wake_verified=False,
+            transcript="what's the weather tomorrow",
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert "one signal" in hint
+        assert "own speaker" in hint
+
+    def test_music_control_overrides_unverified_lean_during_media(self):
+        # Residual music bleed degrades the verify clip, so unverified is
+        # the EXPECTED verdict on a real mid-music wake — and a bare
+        # music-control command is the most likely real utterance. It gets
+        # the directed posture, like the device-command guard.
+        for cmd in ("Pause.", "Skip this song.", "Turn it down."):
+            hint = build_turn_hint(
+                "wake",
+                wake_confidence=0.97,
+                wake_verified=False,
+                transcript=cmd,
+                self_playback=True,
+                self_playback_kind="music",
+            )
+            assert hint is not None, cmd
+            assert "addressed to you" in hint.lower(), cmd
+            assert "misfire" not in hint.lower(), cmd
+
+    def test_music_control_without_media_keeps_unverified_lean(self):
+        # Off-music, a bare "Pause." with an unverified clip keeps the
+        # existing soft misfire lean — the music-control guard only exists
+        # during self-playback.
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.97,
+            wake_verified=False,
+            transcript="Pause.",
+        )
+        assert "one signal" in hint
+
+    def test_follow_up_hint_unaffected_by_self_playback(self):
+        assert build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            self_playback=True,
+            self_playback_kind="music",
+        ) == build_turn_hint("follow_up", follow_up_iteration=1)
+
+    def test_chat_hint_unaffected_by_self_playback(self):
+        assert build_turn_hint(
+            "chat", self_playback=True, self_playback_kind="music"
+        ) == build_turn_hint("chat")
+
+    def test_inferred_wake_carries_media_line(self):
+        # Old-signature path (no turn_source, pre-wake present) still routes
+        # media context when the new fields ride along.
+        hint = build_turn_hint(
+            None,
+            pre_wake_speech_seconds=0.0,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert hint is not None
+        assert "own speaker" in hint

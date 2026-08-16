@@ -39,6 +39,7 @@ import wave
 from typing import Any, Optional
 
 from app.core.conversation_cache import conversation_cache
+from app.core.direction_hint import is_media_self_playback
 
 logger = logging.getLogger("uvicorn")
 
@@ -65,6 +66,14 @@ CLIP_SIMILARITY_FLOOR = 0.5
 # suppressed by garbage verify clips). Verdict becomes "clip_unreliable" and
 # is treated like no-verdict downstream (fail open).
 CLIP_UNRELIABLE_WAKE_CONFIDENCE = 0.9
+# Relaxed threshold when the node reported SELF-PLAYBACK (its own speaker
+# was playing music at wake): residual music bleed in the wake clip degrades
+# the verify transcript, so "unverified with zero wake-phrase trace" is the
+# EXPECTED reading on a real mid-music wake — a degraded-clip signature, not
+# the misfire signature. 0.5 is the node's OWW trigger threshold, so any
+# reported fire qualifies; the treatment stays fail-open (clip_unreliable →
+# no-verdict), never a suppression.
+CLIP_UNRELIABLE_WAKE_CONFIDENCE_SELF_PLAYBACK = 0.5
 
 
 def _get_mode(household_id: str | None = None, node_id: str | None = None) -> str:
@@ -279,14 +288,15 @@ async def resolve_wake_verification(
                     logger.info(
                         "🔎 wake-verify | verdict=clip_unreliable node_id=%s "
                         "conversation_id=%s wake_confidence=%.2f similarity=%.2f "
-                        "transcript=%r — clip has no trace of the wake phrase "
-                        "but the node scored the wake >= %.2f; treating the "
-                        "clip as unreliable and failing open",
+                        "self_playback=%s transcript=%r — clip has no trace of "
+                        "the wake phrase but the node scored the wake above the "
+                        "clip-unreliable bar; treating the clip as unreliable "
+                        "and failing open",
                         verdict.get("node_id"), conversation_id[:8],
                         (turn_context or {}).get("wake_confidence") or -1.0,
                         _verdict_similarity(verdict),
+                        bool((turn_context or {}).get("self_playback")),
                         verdict.get("transcript"),
-                        CLIP_UNRELIABLE_WAKE_CONFIDENCE,
                     )
                 return None
             return {**verdict, "mode": mode}
@@ -312,12 +322,28 @@ def _verdict_similarity(verdict: dict[str, Any]) -> float:
 def _is_clip_unreliable(
     verdict: dict[str, Any], turn_context: Optional[dict]
 ) -> bool:
-    """Unverified + zero wake-phrase trace + very confident node score."""
+    """Unverified + zero wake-phrase trace + very confident node score.
+
+    During self-playback the confidence bar drops to the node's trigger
+    threshold: music bleed in the wake clip degrades the verify transcript,
+    so a no-trace unverified verdict is the degraded-clip signature there,
+    and the fail-open treatment (clip_unreliable → treated as no-verdict)
+    is preferred over the unverified ambient lean. Soft-bias stance: never
+    hard-suppress on acoustic evidence during music.
+    """
     if verdict.get("verdict") == "clip_unreliable":
         return True  # already re-labeled on an earlier resolve
     if verdict.get("verified"):
         return False
-    wake_confidence = (turn_context or {}).get("wake_confidence")
-    if wake_confidence is None or wake_confidence < CLIP_UNRELIABLE_WAKE_CONFIDENCE:
+    ctx = turn_context or {}
+    threshold = (
+        CLIP_UNRELIABLE_WAKE_CONFIDENCE_SELF_PLAYBACK
+        if is_media_self_playback(
+            ctx.get("self_playback"), ctx.get("self_playback_kind")
+        )
+        else CLIP_UNRELIABLE_WAKE_CONFIDENCE
+    )
+    wake_confidence = ctx.get("wake_confidence")
+    if wake_confidence is None or wake_confidence < threshold:
         return False
     return _verdict_similarity(verdict) < CLIP_SIMILARITY_FLOOR

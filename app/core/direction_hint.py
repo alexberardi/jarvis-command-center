@@ -21,6 +21,13 @@ fragments from an unrecognized speaker. Senior to both is the imperative
 device-command guard: a transcript shaped like "turn on the ... lights"
 never receives an ambient-leaning hint from acoustic/shape evidence alone
 (prod 2026-08-15: two real lights commands were suppressed that way).
+
+Self-playback (node reported its own speaker was playing music at wake):
+the VAD calibrated against the music bleed, so the reading is
+uninformative in BOTH directions — ~0s is the normal mid-music reading,
+not a quiet room, and a high reading is just the music. All VAD-derived
+branches are suppressed for the turn; the junk-shape signals still apply,
+and music-control shapes ("pause", "skip") join the device-command guard.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from __future__ import annotations
 from app.core.transcript_filter import (
     has_multi_speaker_markers,
     is_device_command_shaped,
+    is_music_control_shaped,
     is_short_non_command_fragment,
 )
 
@@ -68,12 +76,34 @@ _SPEAKER_KNOWN_NOTE = (
 )
 
 
+def is_media_self_playback(
+    self_playback: bool | None, self_playback_kind: str | None
+) -> bool:
+    """True when the node reported its OWN speaker was playing music at wake.
+
+    During self-playback the node's pre-wake VAD calibrates against the
+    music bleed, so ``pre_wake_speech_seconds`` reads ~0 on a REAL mid-music
+    wake — the quiet-room fingerprint. Every VAD-derived branch must treat
+    the signal as uninformative for these turns.
+
+    ``self_playback_kind`` is "music" today; a missing kind on a node that
+    set the flag still counts as music (the only kind that exists) so a
+    slightly-older node build doesn't silently lose the treatment. A future
+    NON-music kind will NOT inherit it without a deliberate decision here.
+    """
+    if not self_playback:
+        return False
+    return self_playback_kind is None or self_playback_kind == "music"
+
+
 def build_direction_hint(
     pre_wake_speech_seconds: float | None,
     wake_confidence: float | None = None,
     turn_source: str | None = None,
     transcript: str | None = None,
     speaker_known: bool | None = None,
+    self_playback: bool | None = None,
+    self_playback_kind: str | None = None,
 ) -> str | None:
     """Return a one-line hint, or None when the signal isn't actionable.
 
@@ -94,12 +124,22 @@ def build_direction_hint(
         speaker_known: True when the speaker was voice-matched to a
             household member — a directed-leaning input that tempers
             ambient-leaning hints and disables the fragment signal.
+        self_playback: The node was playing media from its OWN speaker when
+            the wake fired. Makes every VAD-derived branch uninformative:
+            the node's pre-wake VAD calibrated against the music bleed, so
+            ~0s is the NORMAL reading on a real mid-music wake (and a high
+            reading is just the music). Junk-shape signals still apply.
+        self_playback_kind: What was playing ("music"). See
+            ``is_media_self_playback``.
 
     Returns:
         A short bracketed hint to append to the user message, or ``None``
-        when no hint should be added (signal missing, or ambiguous middle
-        band without a marginal wake score).
+        when no hint should be added (signal missing, ambiguous middle
+        band without a marginal wake score, or VAD-only signal during
+        self-playback).
     """
+    media_playback = is_media_self_playback(self_playback, self_playback_kind)
+
     quiet_hint = (
         (
             f"[direction hint: room was quiet "
@@ -107,7 +147,8 @@ def build_direction_hint(
             f"{WINDOW_SECONDS:.0f}s before wake) — strong signal this is directed at you]"
         )
         if (
-            pre_wake_speech_seconds is not None
+            not media_playback  # VAD reads ~0 DURING music — not a quiet room
+            and pre_wake_speech_seconds is not None
             and pre_wake_speech_seconds < QUIET_THRESHOLD_S
         )
         else None
@@ -118,8 +159,15 @@ def build_direction_hint(
     # suppression-leaning hint from acoustic-side evidence alone. Directed
     # evidence (quiet room) still surfaces; everything ambient-leaning is
     # muted (prod 2026-08-15: two real lights commands suppressed by wake
-    # verification reading garbage clips).
-    if transcript is not None and is_device_command_shaped(transcript):
+    # verification reading garbage clips). During self-playback,
+    # music-control shapes ("pause", "skip", "turn it down") get the same
+    # seniority — talking over the music to control it is the single most
+    # expected mid-music utterance, and a bare "pause" must not fall
+    # through to the short-fragment junk signal below.
+    if transcript is not None and (
+        is_device_command_shaped(transcript)
+        or (media_playback and is_music_control_shaped(transcript))
+    ):
         return quiet_hint
 
     ambient_note = _SPEAKER_KNOWN_NOTE if speaker_known else ""
@@ -150,6 +198,13 @@ def build_direction_hint(
                 "leans toward <not_for_me/>. Still answer if it is a real "
                 "request to you.]"
             )
+
+    # During self-playback every remaining branch is VAD-derived and the
+    # VAD is measuring the node's own music, not the room — no reading in
+    # either direction is trustworthy. Suppress them all for the turn (the
+    # media context itself is surfaced by the turn hint, not here).
+    if media_playback:
+        return None
 
     if pre_wake_speech_seconds is None:
         return None

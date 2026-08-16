@@ -61,3 +61,18 @@ class VoiceCommandRequest(BaseModel):
     turn_source: Optional[str] = None
     wake_confidence: Optional[float] = None
     follow_up_iteration: Optional[int] = None
+    # Self-playback context — the node was playing media out of its OWN
+    # speaker when the wake fired (it hard-pauses/ducks on wake, so the
+    # command audio itself is clean; the signal is about the moments BEFORE).
+    # During self-playback the node's pre-wake VAD calibrates against the
+    # music bleed, so pre_wake_speech_seconds reads ~0 on a REAL mid-music
+    # wake — the quiet-room fingerprint — and residual music in the wake clip
+    # can degrade verification phrase-match. CC treats the VAD signal as
+    # uninformative and softens clip-verdict leans for these turns (see
+    # core/direction_hint.py, core/turn_context.py, core/wake_verification.py).
+    # None/absent on old nodes → behavior unchanged.
+    self_playback: Optional[bool] = None
+    # What kind of media was playing. Only "music" today; the media-aware
+    # hint rules key on it so a future kind doesn't silently inherit
+    # music-specific posture (music-control commands, lyric bleed).
+    self_playback_kind: Optional[str] = None

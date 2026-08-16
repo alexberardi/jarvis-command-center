@@ -65,6 +65,17 @@ class VoiceCommandResponse(BaseModel):
     # stripped from assistant_message). The node skips its follow-up
     # window and returns to idle. None/False → normal window behavior.
     end_of_exchange: Optional[bool] = None
+    # FOLLOW-UP (not yet a field — documented so the wire shape is decided
+    # deliberately, not forced from CC): the node arms its not_for_me soft
+    # cooldown purely node-side when stop_reason == "not_for_me" (node
+    # core/wake_loop.py → voice_filters.arm_not_for_me_cooldown). A verdict
+    # on a SELF-PLAYBACK turn (node was playing its own music at wake)
+    # should not escalate that cooldown as aggressively — music turns are a
+    # different false-wake population and the user is likely to re-wake to
+    # control the music. When the node grows handling for it, add e.g.
+    #   not_for_me_context: Optional[str] = None  # "self_playback_media"
+    # here and tag it where the sentinel is converted in
+    # core/conversation_handler.py (search: "node cooldown interplay").
     
     @property
     def success(self) -> bool:

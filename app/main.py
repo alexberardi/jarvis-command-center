@@ -1167,6 +1167,8 @@ async def handle_voice(
                     "source": request.turn_source,
                     "wake_confidence": request.wake_confidence,
                     "follow_up_iteration": request.follow_up_iteration,
+                    "self_playback": request.self_playback,
+                    "self_playback_kind": request.self_playback_kind,
                 },
             )
 
@@ -1406,6 +1408,8 @@ async def handle_voice_stream(
                 "source": request.turn_source,
                 "wake_confidence": request.wake_confidence,
                 "follow_up_iteration": request.follow_up_iteration,
+                "self_playback": request.self_playback,
+                "self_playback_kind": request.self_playback_kind,
             },
         )
         if streaming_audio is not None:
@@ -1447,6 +1451,8 @@ async def handle_voice_stream(
                 "source": request.turn_source,
                 "wake_confidence": request.wake_confidence,
                 "follow_up_iteration": request.follow_up_iteration,
+                "self_playback": request.self_playback,
+                "self_playback_kind": request.self_playback_kind,
             },
         )
         if streaming_audio is not None:
@@ -1483,6 +1489,8 @@ async def handle_voice_stream(
                     "source": request.turn_source,
                     "wake_confidence": request.wake_confidence,
                     "follow_up_iteration": request.follow_up_iteration,
+                    "self_playback": request.self_playback,
+                    "self_playback_kind": request.self_playback_kind,
                 },
             )
 

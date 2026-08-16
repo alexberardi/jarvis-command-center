@@ -235,3 +235,164 @@ class TestSpeakerKnownLean:
         )
         assert hint is not None
         assert "household member" in hint
+
+
+class TestSelfPlaybackVadSuppression:
+    """During SELF-PLAYBACK (node's own speaker was playing music at wake)
+    the pre-wake VAD calibrated against the music bleed, so its reading is
+    uninformative in BOTH directions: ~0s is the NORMAL mid-music reading
+    (not a quiet room) and a high reading is just the music. Every
+    VAD-derived branch must stay silent for the turn; the junk-shape
+    signals still apply."""
+
+    def test_quiet_reading_emits_no_directed_hint(self):
+        # The core failure this slice fixes: a REAL mid-music wake reads
+        # ~0s pre-wake speech — today's quiet-room/false-wake fingerprint.
+        assert (
+            build_direction_hint(
+                0.0,
+                turn_source="wake",
+                transcript="what's the weather tomorrow",
+                self_playback=True,
+                self_playback_kind="music",
+            )
+            is None
+        )
+
+    def test_high_reading_emits_no_ambient_hint(self):
+        assert (
+            build_direction_hint(
+                ACTIVE_THRESHOLD_S + 1.0,
+                turn_source="wake",
+                transcript="what's the weather tomorrow",
+                self_playback=True,
+                self_playback_kind="music",
+            )
+            is None
+        )
+
+    def test_middle_band_marginal_wake_combined_hint_suppressed(self):
+        # The combined VAD+score hint is still VAD-derived — suppressed too.
+        assert (
+            build_direction_hint(
+                3.0,
+                wake_confidence=0.55,
+                turn_source="wake",
+                transcript="what's the weather tomorrow",
+                self_playback=True,
+                self_playback_kind="music",
+            )
+            is None
+        )
+
+    def test_junk_shape_hints_still_apply(self):
+        # Dash-marker dialogue evidence is transcript-side, not VAD-side —
+        # it survives the media suppression (lyrics/TV bleed still exists).
+        hint = build_direction_hint(
+            0.0,
+            turn_source="wake",
+            transcript="- Uh-huh. - Eat it.",
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert hint is not None
+        assert "multi-speaker" in hint
+
+    def test_fragment_hint_still_applies(self):
+        hint = build_direction_hint(
+            0.0,
+            turn_source="wake",
+            transcript="Eat it.",
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert hint is not None
+        assert "fragment" in hint
+
+    def test_music_control_fragment_gets_no_junk_hint(self):
+        # Bare "Pause." is exactly how users talk over their own music —
+        # the music-control guard is senior to the short-fragment signal.
+        assert (
+            build_direction_hint(
+                0.0,
+                turn_source="wake",
+                transcript="Pause.",
+                self_playback=True,
+                self_playback_kind="music",
+            )
+            is None
+        )
+
+    def test_music_control_without_media_still_gets_fragment_hint(self):
+        # The music-control guard only exists during self-playback; a bare
+        # "Pause." on a normal quiet-room wake keeps existing behavior
+        # (quiet-room directed hint outranks the fragment signal there).
+        hint = build_direction_hint(
+            2.0, turn_source="wake", transcript="Pause."
+        )
+        assert hint is not None
+        assert "fragment" in hint
+
+    def test_device_command_during_media_returns_none(self):
+        # The device guard normally returns the quiet-room hint; during
+        # media the quiet reading is untrustworthy, so nothing is emitted.
+        assert (
+            build_direction_hint(
+                0.0,
+                turn_source="wake",
+                transcript="Turn on the living room lights.",
+                self_playback=True,
+                self_playback_kind="music",
+            )
+            is None
+        )
+
+    def test_old_node_missing_fields_behavior_unchanged(self):
+        # Old clients never send the fields → None/None → identical output.
+        for pre_wake in (0.0, 3.0, ACTIVE_THRESHOLD_S + 1.0):
+            assert build_direction_hint(
+                pre_wake, turn_source="wake", transcript="hello there friend"
+            ) == build_direction_hint(
+                pre_wake,
+                turn_source="wake",
+                transcript="hello there friend",
+                self_playback=None,
+                self_playback_kind=None,
+            )
+
+    def test_self_playback_false_behavior_unchanged(self):
+        hint = build_direction_hint(
+            0.0,
+            turn_source="wake",
+            transcript="what's the weather tomorrow",
+            self_playback=False,
+            self_playback_kind=None,
+        )
+        assert hint is not None
+        assert "quiet" in hint
+
+    def test_missing_kind_still_counts_as_music(self):
+        # A node that sets the flag but omits the kind (only "music" exists
+        # today) must not silently lose the treatment.
+        assert (
+            build_direction_hint(
+                0.0,
+                turn_source="wake",
+                transcript="what's the weather tomorrow",
+                self_playback=True,
+                self_playback_kind=None,
+            )
+            is None
+        )
+
+    def test_future_non_music_kind_keeps_normal_behavior(self):
+        # A future kind must opt in deliberately, not inherit music posture.
+        hint = build_direction_hint(
+            0.0,
+            turn_source="wake",
+            transcript="what's the weather tomorrow",
+            self_playback=True,
+            self_playback_kind="podcast",
+        )
+        assert hint is not None
+        assert "quiet" in hint
