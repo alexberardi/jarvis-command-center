@@ -598,6 +598,23 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         ),
     ),
     SettingDefinition(
+        key="voice.followup_doubt_max_rounds",
+        category="voice",
+        value_type="int",
+        default=2,
+        description=(
+            "Answered (non-sentinel) rounds a DOUBTED conversation — one "
+            "whose wake-clip verdict was 'unverified' — gets before "
+            "follow-up turns gain a strong wrap-up lean (answer briefly "
+            "and close with <exchange_complete/>, or <not_for_me/> if not "
+            "addressed). A prompt lean, never a hard cut; conversations "
+            "with a verified wake are exempt. Breaks the kitchen runaway "
+            "(2026-08-15): an answered false wake opened the follow-up "
+            "window onto the family's conversation and Jarvis answered "
+            "non-stop."
+        ),
+    ),
+    SettingDefinition(
         key="voice.wake_verification_phrase",
         category="voice",
         value_type="string",

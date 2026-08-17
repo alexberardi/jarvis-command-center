@@ -94,6 +94,31 @@ def _get_mode(household_id: str | None = None, node_id: str | None = None) -> st
         return "off"
 
 
+FOLLOWUP_DOUBT_MAX_ROUNDS_DEFAULT: int = 2
+
+
+def get_followup_doubt_max_rounds(
+    household_id: str | None = None, node_id: str | None = None
+) -> int:
+    """voice.followup_doubt_max_rounds — answered rounds a DOUBTED
+    conversation (wake verdict ``unverified``) gets before the follow-up
+    hint gains a wrap-up lean. Fail SAFE to the default on an unreachable
+    settings service or a garbage value; non-positive values also fall
+    back (there is deliberately no "cap immediately" mode — the cap is a
+    prompt lean, and its floor is one full answered round)."""
+    try:
+        from app.services.settings_service import get_settings_service
+        raw = get_settings_service().get(
+            "voice.followup_doubt_max_rounds",
+            household_id=household_id,
+            node_id=node_id,
+        )
+        value = int(raw)
+        return value if value > 0 else FOLLOWUP_DOUBT_MAX_ROUNDS_DEFAULT
+    except Exception:
+        return FOLLOWUP_DOUBT_MAX_ROUNDS_DEFAULT
+
+
 def _get_phrase(household_id: str | None = None) -> str:
     try:
         from app.services.settings_service import get_settings_service

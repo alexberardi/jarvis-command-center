@@ -52,6 +52,13 @@ WAKE_CONFIDENT_THRESHOLD: float = BORDERLINE_CONFIDENCE
 # engagement instead of inferring continuation.
 FOLLOW_UP_STRICT_ITERATION: int = 3
 
+# Verdict-propagation sentinel value: the conversation's WAKE turn resolved
+# an ``unverified`` wake-clip verdict (app/core/wake_verification.py). Only
+# this exact value selects the doubted follow-up posture — ``verified`` is
+# trusted engagement, and ``clip_unreliable``/absent is NO-SIGNAL, not doubt
+# (the verify clip itself can be garbage; fail open).
+DOUBTED_WAKE_VERDICT: str = "unverified"
+
 
 def build_turn_hint(
     turn_source: str | None,
@@ -62,6 +69,9 @@ def build_turn_hint(
     transcript: str | None = None,
     self_playback: bool | None = None,
     self_playback_kind: str | None = None,
+    conversation_wake_verdict: str | None = None,
+    doubt_round: int | None = None,
+    doubt_max_rounds: int | None = None,
 ) -> str | None:
     """Return a one-line ``[turn context: ...]`` hint, or None.
 
@@ -88,6 +98,24 @@ def build_turn_hint(
             the device-command guard's seniority.
         self_playback_kind: What was playing ("music"). See
             ``direction_hint.is_media_self_playback``.
+        conversation_wake_verdict: The wake-clip verdict of the WAKE turn
+            that opened this conversation, propagated onto follow-up turns
+            (which have no wake clip of their own to re-check). Only
+            ``"unverified"`` (DOUBTED_WAKE_VERDICT) changes anything: the
+            follow-up hint becomes a caution posture — the conversation
+            began as a suspected detector misfire, so room-conversation-
+            shaped utterances should be sentineled. ``verified`` /
+            ``clip_unreliable`` / None keep the hint byte-identical to
+            today (fail open: clip_unreliable and absent are no-signal,
+            not doubt). Ignored on non-follow-up turns.
+        doubt_round: How many answered (non-sentinel) rounds this
+            conversation has already had, for the doubted-conversation
+            round cap. Only meaningful with an unverified verdict.
+        doubt_max_rounds: The ``voice.followup_doubt_max_rounds`` setting.
+            When a DOUBTED conversation has had ``doubt_round >=
+            doubt_max_rounds`` answered rounds, the caution hint gains a
+            strong wrap-up lean (answer briefly and close, or sentinel) —
+            a lean, never a hard cut. Verified conversations are exempt.
 
     Returns:
         The bracketed hint to append to the user message, or ``None``
@@ -97,7 +125,14 @@ def build_turn_hint(
     """
     media_playback = is_media_self_playback(self_playback, self_playback_kind)
     if turn_source == "follow_up":
-        return _follow_up_hint(follow_up_iteration)
+        return _follow_up_hint(
+            follow_up_iteration,
+            wake_verdict=conversation_wake_verdict,
+            doubt_round=doubt_round,
+            doubt_max_rounds=doubt_max_rounds,
+            transcript=transcript,
+            media_playback=media_playback,
+        )
     if turn_source == "wake":
         return _wake_hint(
             wake_confidence, wake_verified, transcript, media_playback
@@ -144,7 +179,11 @@ def should_double_check_sentinel(
     commands were suppressed because verification read junk clips), so one
     bad clip must never single-handedly silence a turn. The verdict is a
     soft bias in the wake hint, and the /think re-check stays available to
-    catch exactly that failure.
+    catch exactly that failure. The same holds for DOUBTED-conversation
+    follow-ups (conversation_wake_verdict="unverified"): this gate never
+    consults the verdict, so early follow-up iterations keep the rescue
+    even when the caution hint leans toward the sentinel — fail-open, a
+    real engaged user must not fight suppression.
     """
     if turn_source == "follow_up":
         # Early iterations get the /think rescue — a genuine continuation may
@@ -268,8 +307,66 @@ def _wake_hint(
     )
 
 
-def _follow_up_hint(follow_up_iteration: int | None) -> str:
+def _follow_up_hint(
+    follow_up_iteration: int | None,
+    wake_verdict: str | None = None,
+    doubt_round: int | None = None,
+    doubt_max_rounds: int | None = None,
+    transcript: str | None = None,
+    media_playback: bool = False,
+) -> str:
     iteration = max(1, follow_up_iteration or 1)
+    # Verdict propagation (the kitchen runaway, 2026-08-15): a false wake
+    # that survives the wake-turn hints and gets ANSWERED opens the
+    # follow-up window onto the family's continuing conversation — and
+    # follow-up turns have no wake clip to re-verify, so without carrying
+    # the WAKE verdict forward every follow-up gets the engaged-
+    # conversation posture and the window re-opens after each answer.
+    # Only an ``unverified`` verdict selects the caution posture;
+    # verified / clip_unreliable / absent keep this hint byte-identical
+    # to before the verdict propagated (fail open). The imperative
+    # device-command guard stays senior — same shape as the wake hint:
+    # a device-shaped transcript (or a music-control shape during
+    # self-playback) keeps the normal directed posture, because a REAL
+    # engaged user must never have to fight suppression.
+    doubted = wake_verdict == DOUBTED_WAKE_VERDICT and not (
+        transcript is not None
+        and (
+            is_device_command_shaped(transcript)
+            or (media_playback and is_music_control_shaped(transcript))
+        )
+    )
+    if doubted:
+        # Round cap: a LEAN toward closing, never a hard cut — the model
+        # still answers (briefly) when the utterance is addressed to it.
+        wrap_up = (
+            (
+                f" This suspected-misfire conversation has already run "
+                f"{doubt_round} answered rounds — wrap up now: if this "
+                f"really is addressed to you, answer briefly and append "
+                f"<exchange_complete/> to close the exchange; if it is "
+                f"not, emit <not_for_me/>."
+            )
+            if (
+                doubt_round is not None
+                and doubt_max_rounds is not None
+                and doubt_round >= doubt_max_rounds
+            )
+            else ""
+        )
+        return (
+            f"[turn context: follow-up window, iteration {iteration} — "
+            f"there was no wake word, and this conversation BEGAN as a "
+            f"suspected detector misfire (the original wake clip did not "
+            f"contain the wake word when transcribed). The mic stayed open "
+            f"after your last reply, so what it hears now is likely the "
+            f"room's own conversation continuing without you. If this "
+            f"utterance reads like people talking to each other (a reply "
+            f"to someone else, a third-person reference, a mid-story line, "
+            f"a plan being made between people), emit <not_for_me/>. If it "
+            f"is unmistakably addressed to you, answer it — or run the "
+            f"tool it calls for.{wrap_up}]"
+        )
     escalation = (
         " This window has stayed open across several turns; the room has "
         "likely moved on — respond only to explicit engagement (your name, "

@@ -18,7 +18,10 @@ from app.core.conversation_cache import conversation_cache, trim_history_to_max_
 from app.core.direction_hint import build_direction_hint
 from app.core.affect_hint import build_affect_hint
 from app.core.turn_context import build_turn_hint, should_double_check_sentinel
-from app.core.wake_verification import resolve_wake_verification
+from app.core.wake_verification import (
+    get_followup_doubt_max_rounds,
+    resolve_wake_verification,
+)
 from app.core.profile_match import build_profile_match_hint
 from app.core.exchange_complete import apply_to_result as apply_exchange_complete
 from app.core.errors import ConversationPreconditionError
@@ -639,6 +642,80 @@ class ConversationHandler:
             turn_context["wake_verified"] = False
         return False
 
+    def _resolve_followup_doubt_into_context(
+        self, conversation_id: str, turn_context: dict | None
+    ) -> None:
+        """Propagate the conversation's WAKE verdict onto follow-up turns.
+
+        Follow-up turns have no wake clip of their own — there is nothing to
+        re-verify — so before this, a false wake that survived the wake-turn
+        hints and got ANSWERED handed every follow-up turn the engaged-
+        conversation posture, and the family's continuing conversation kept
+        the window re-opening after each answer (the 2026-08-15 kitchen
+        runaway; the #111 sentinel-is-terminal fix only ends the loop when
+        the model actually EMITS the sentinel).
+
+        Only an ``unverified`` stored verdict marks the conversation as
+        doubted. ``verified`` is trusted engagement; ``clip_unreliable`` and
+        absent are NO-SIGNAL, not doubt (the verify clip itself can be
+        garbage — fail open, byte-identical to today). Alongside the verdict
+        we attach the answered-round count and the round cap so the turn
+        hint can add its wrap-up lean (see core/turn_context.py). Old nodes
+        that don't send turn_source never reach this path.
+        """
+        if (turn_context or {}).get("source") != "follow_up":
+            return
+        verdict = conversation_cache.get_wake_verification(conversation_id) or {}
+        if verdict.get("verdict") != "unverified":
+            return
+        node_ctx = conversation_cache.get_node_context(conversation_id) or {}
+        turn_context["conversation_wake_verdict"] = "unverified"
+        turn_context["doubt_round"] = conversation_cache.get_answered_rounds(
+            conversation_id
+        )
+        turn_context["doubt_max_rounds"] = get_followup_doubt_max_rounds(
+            node_ctx.get("household_id"), node_ctx.get("node_id")
+        )
+        logger.info(
+            "🔁 follow_up_doubt | conversation_id=%s node_id=%s "
+            "wake_verdict=unverified doubt_round=%d max_rounds=%d "
+            "follow_up_iteration=%s",
+            conversation_id,
+            node_ctx.get("node_id"),
+            turn_context["doubt_round"],
+            turn_context["doubt_max_rounds"],
+            turn_context.get("follow_up_iteration"),
+        )
+
+    def _record_answered_round(
+        self,
+        conversation_id: str,
+        turn_context: dict | None,
+        voice_command: str,
+        node_ctx: dict | None = None,
+    ) -> None:
+        """Count an answered (non-sentinel) round + emit the measurable line.
+
+        The counter feeds the doubted-conversation round cap; the
+        ``follow_up_answered`` log line is the answer-side twin of
+        ``not_for_me_sentinel`` — wake_verdict + doubt_round on both makes
+        the runaway loop's behavior chartable (how many rounds doubted
+        conversations run before closing)."""
+        rounds = conversation_cache.increment_answered_rounds(conversation_id)
+        if (turn_context or {}).get("source") != "follow_up":
+            return
+        _doubt_round = (turn_context or {}).get("doubt_round")
+        logger.info(
+            "🔁 follow_up_answered | conversation_id=%s node_id=%s "
+            "wake_verdict=%s doubt_round=%d answered_rounds=%d transcript=%r",
+            conversation_id,
+            (node_ctx or {}).get("node_id"),
+            (turn_context or {}).get("conversation_wake_verdict") or "none",
+            -1 if _doubt_round is None else _doubt_round,
+            rounds,
+            voice_command,
+        )
+
     async def process_voice_command_with_tools(
         self,
         voice_command: str,
@@ -716,6 +793,12 @@ class ConversationHandler:
                 "stop_reason": "not_for_me",
                 "assistant_message": "",
             }
+
+        # Verdict propagation: follow-up turns in a conversation whose WAKE
+        # verdict was unverified get a caution posture instead of the
+        # engaged-conversation one (plus the answered-round cap) — the
+        # kitchen-runaway defense. No-op for verified/absent verdicts.
+        self._resolve_followup_doubt_into_context(conversation_id, turn_context)
 
         # Get conversation state from cache
         with timing.measure("cache_lookups") if timing else nullcontext():
@@ -864,6 +947,11 @@ class ConversationHandler:
             transcript=voice_command,
             self_playback=(turn_context or {}).get("self_playback"),
             self_playback_kind=(turn_context or {}).get("self_playback_kind"),
+            conversation_wake_verdict=(turn_context or {}).get(
+                "conversation_wake_verdict"
+            ),
+            doubt_round=(turn_context or {}).get("doubt_round"),
+            doubt_max_rounds=(turn_context or {}).get("doubt_max_rounds"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied | hint=%s", turn_hint)
@@ -960,11 +1048,17 @@ class ConversationHandler:
             # different population (VAD uninformative, clip degraded by
             # bleed) and the panel must be able to split on it.
             _sentinel_node_id = (_turn_node_ctx or {}).get("node_id")
+            # Wake turns: wake_verified=False (this turn's clip). Follow-up
+            # turns: conversation_wake_verdict (the WAKE turn's verdict,
+            # propagated — follow-ups have no clip of their own).
             _wake_verdict = (
                 "unverified"
                 if (turn_context or {}).get("wake_verified") is False
-                else "none"
+                else (turn_context or {}).get("conversation_wake_verdict")
+                or "none"
             )
+            _doubt_round = (turn_context or {}).get("doubt_round")
+            _doubt_round = -1 if _doubt_round is None else _doubt_round
             _self_playback = bool((turn_context or {}).get("self_playback"))
             # NOTE (node cooldown interplay): the node arms its not_for_me
             # soft cooldown purely node-side on this verdict (node
@@ -980,7 +1074,7 @@ class ConversationHandler:
                 "conversation_id=%s node_id=%s speaker_user_id=%s "
                 "prompt_provider=%s pre_wake_speech_secs=%.2f "
                 "direction_hint=%s turn_source=%s wake_verdict=%s "
-                "self_playback=%s transcript=%r raw_assistant=%r",
+                "doubt_round=%d self_playback=%s transcript=%r raw_assistant=%r",
                 conversation_id,
                 _sentinel_node_id,
                 speaker_user_id,
@@ -989,6 +1083,7 @@ class ConversationHandler:
                 hint_state,
                 turn_source,
                 _wake_verdict,
+                _doubt_round,
                 _self_playback,
                 voice_command,
                 raw_msg[:160],
@@ -1011,6 +1106,14 @@ class ConversationHandler:
             logger.info("🏁 exchange_complete | conversation_id=%s", conversation_id)
 
         result = self._rewrite_terminal_filler(result)
+
+        # Answered-round accounting for the doubted-conversation cap. A
+        # tool_calls (202) round counts HERE, once — the continue endpoint
+        # completes the same round and deliberately does not count again.
+        if result.get("stop_reason") not in ("not_for_me", "error"):
+            self._record_answered_round(
+                conversation_id, turn_context, voice_command, _turn_node_ctx
+            )
 
         return result
 
@@ -1123,6 +1226,11 @@ class ConversationHandler:
             )
             return None
 
+        # Verdict propagation onto follow-up turns (kitchen-runaway defense)
+        # — same resolution as the blocking path so the doubted posture
+        # doesn't depend on which path the router picked.
+        self._resolve_followup_doubt_into_context(conversation_id, turn_context)
+
         # Inject the per-turn speaker block (name + memories) as a trailing
         # system message — the cached prefix stays speaker-agnostic, so a
         # speaker change can't invalidate it or clobber the cached timezone.
@@ -1204,6 +1312,11 @@ class ConversationHandler:
             transcript=voice_command,
             self_playback=(turn_context or {}).get("self_playback"),
             self_playback_kind=(turn_context or {}).get("self_playback_kind"),
+            conversation_wake_verdict=(turn_context or {}).get(
+                "conversation_wake_verdict"
+            ),
+            doubt_round=(turn_context or {}).get("doubt_round"),
+            doubt_max_rounds=(turn_context or {}).get("doubt_max_rounds"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied (stream path) | hint=%s", turn_hint)
@@ -1413,6 +1526,12 @@ class ConversationHandler:
             messages.append({"role": "assistant", "content": clean_response})
             conversation_cache.update_messages(conversation_id, messages)
 
+            # An answered round by construction — a sentinel in the
+            # pre-buffer falls back to the blocking path before audio.
+            self._record_answered_round(
+                conversation_id, turn_context, voice_command, _turn_node_ctx
+            )
+
             logger.info(
                 "✅ Streaming complete: %d sentences, %d chars (T+%dms)",
                 sentences_sent, len(full_response), (_time.time() - _t0) * 1000,
@@ -1529,6 +1648,11 @@ class ConversationHandler:
             )
             return None
 
+        # Verdict propagation onto follow-up turns (kitchen-runaway defense)
+        # — same resolution as the blocking path so the doubted posture
+        # doesn't depend on which path the router picked.
+        self._resolve_followup_doubt_into_context(conversation_id, turn_context)
+
         # Work on a copy so fall-back doesn't pollute the cache.
         messages = list(cached_messages)
 
@@ -1623,6 +1747,11 @@ class ConversationHandler:
             transcript=voice_command,
             self_playback=(turn_context or {}).get("self_playback"),
             self_playback_kind=(turn_context or {}).get("self_playback_kind"),
+            conversation_wake_verdict=(turn_context or {}).get(
+                "conversation_wake_verdict"
+            ),
+            doubt_round=(turn_context or {}).get("doubt_round"),
+            doubt_max_rounds=(turn_context or {}).get("doubt_max_rounds"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied (tool-stream path) | hint=%s", turn_hint)
@@ -1792,6 +1921,10 @@ class ConversationHandler:
             if clean_response:
                 messages.append({"role": "assistant", "content": clean_response})
                 conversation_cache.update_messages(conversation_id, messages)
+                # An answered round (tool ran + prose was spoken).
+                self._record_answered_round(
+                    conversation_id, turn_context, voice_command, _turn_node_ctx
+                )
 
             logger.info(
                 "✅ Tool-stream complete: %d sentences, %d chars (T+%dms)",
