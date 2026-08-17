@@ -250,6 +250,38 @@ class ConversationCache:
                 return None
             return entry.get('wake_verification')
 
+    def increment_answered_rounds(self, conversation_id: str) -> int:
+        """Count an answered (non-sentinel) round for this conversation.
+
+        Feeds the doubted-conversation round cap (see core/turn_context.py):
+        when a conversation's wake verdict was ``unverified`` and it keeps
+        getting answered anyway, the follow-up hint gains a wrap-up lean
+        after ``voice.followup_doubt_max_rounds`` answered rounds. Returns
+        the new count (0 when the conversation is absent/expired — callers
+        never depend on the counter existing)."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                return 0
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                return 0
+            entry['answered_rounds'] = entry.get('answered_rounds', 0) + 1
+            return entry['answered_rounds']
+
+    def get_answered_rounds(self, conversation_id: str) -> int:
+        """Answered (non-sentinel) rounds so far (0 if none/absent/expired)."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                return 0
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                return 0
+            return entry.get('answered_rounds', 0)
+
     def set_referenced_items(self, conversation_id: str, items: Optional[List[Dict]]) -> None:
         """Store the items a tool just surfaced ("recently shown" list).
 
