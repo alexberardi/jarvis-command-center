@@ -293,3 +293,112 @@ class TestIsMusicControlShaped:
 
         assert not is_music_control_shaped("Stopping by later.")
         assert not is_music_control_shaped("Playtime is over soon.")
+
+
+class TestAddressedHouseholdMember:
+    """Named-person addressing shapes (2026-08-17 incident: a follow-up
+    captured "already done. Wow. Miles, come here." — a parent calling
+    their child by name). Form-only detection, feeding a lean hint; the
+    device/music guards stay senior at every call site."""
+
+    MEMBERS = ["Miles", "Jess", "Alex"]
+
+    def test_incident_transcript_matches(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        # Vocative in the THIRD sentence — matching must be per-sentence.
+        assert addressed_household_member(
+            "already done. Wow. Miles, come here.", self.MEMBERS
+        ) == "Miles"
+
+    def test_leading_name_with_comma_matches(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "Jess, can you grab that", self.MEMBERS
+        ) == "Jess"
+
+    def test_leading_name_into_imperative_matches(self):
+        # STT frequently drops the vocative comma.
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "Miles come here", self.MEMBERS
+        ) == "Miles"
+
+    def test_trailing_vocative_matches(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "come here, Miles", self.MEMBERS
+        ) == "Miles"
+        assert addressed_household_member(
+            "come here Miles", self.MEMBERS
+        ) == "Miles"
+
+    def test_case_insensitive(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "miles, come here", self.MEMBERS
+        ) == "Miles"
+
+    def test_speech_about_a_member_does_not_match(self):
+        from app.core.transcript_filter import is_addressed_to_other_person
+
+        for text in (
+            "Miles said he wants pizza",
+            "I told Miles to clean his room already",
+            "Miles is a little busy with his toys",
+            "we should take Miles to the park tomorrow",
+        ):
+            assert not is_addressed_to_other_person(text, self.MEMBERS), text
+
+    def test_word_boundary_no_substring_match(self):
+        from app.core.transcript_filter import is_addressed_to_other_person
+
+        # "Milestone, come quick" must not read as addressing Miles.
+        assert not is_addressed_to_other_person(
+            "Milestone, come quick", self.MEMBERS
+        )
+
+    def test_jarvis_and_wake_phrase_excluded(self):
+        from app.core.transcript_filter import is_addressed_to_other_person
+
+        assert not is_addressed_to_other_person(
+            "Jarvis, what time is it", ["Jarvis", "Miles"]
+        )
+        assert not is_addressed_to_other_person(
+            "hey, come look at this", ["Hey", "Miles"]
+        )
+
+    def test_no_members_is_a_no_op(self):
+        from app.core.transcript_filter import (
+            addressed_household_member,
+            is_addressed_to_other_person,
+        )
+
+        text = "Miles, come here"
+        assert addressed_household_member(text, None) is None
+        assert addressed_household_member(text, []) is None
+        assert not is_addressed_to_other_person(text, None)
+
+    def test_empty_transcript_is_a_no_op(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(None, self.MEMBERS) is None
+        assert addressed_household_member("", self.MEMBERS) is None
+
+    def test_multi_word_display_name_uses_first_token(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "Jess, come here", ["Jess Berardi"]
+        ) == "Jess"
+
+    def test_non_string_member_entries_are_ignored(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "Miles, come here", [None, 42, "Miles"]  # type: ignore[list-item]
+        ) == "Miles"

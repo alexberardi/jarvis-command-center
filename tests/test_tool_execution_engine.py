@@ -2054,3 +2054,246 @@ class TestScrubDoesNotEatSystemPrompt:
 
         assert messages[0] is base_prompt, "scrub must never remove the cached system prompt"
         assert stale_nag not in messages, "stale standalone nags must be scrubbed"
+
+
+class TestExchangeCompleteGuardExemption:
+    """2026-08-17 prod incident: after a real lights command, the follow-up
+    window captured a parent calling their child — "already done. Wow.
+    Miles, come here." The model emitted ``<exchange_complete/>`` (the
+    CORRECT terminal output: close the exchange, stop listening), but the
+    force-tool-calls guard treated the no-tool-call response as a failure,
+    popped it, and nagged with [MUST_CALL_RETRY] — so the model complied by
+    calling chat("Miles is a little busy with his toys...") into the
+    family's conversation. Two rounds later: "Shut up, Jorgis."
+
+    Terminal sentinels (``<exchange_complete/>``, ``<not_for_me/>``) are
+    legal terminal outputs, senior to tool-forcing: the retry must not fire
+    AT ALL on a first-look sentinel — not rely on the retry-escape path
+    (which only covers sentinels emitted AFTER a popped prose answer).
+    """
+
+    INCIDENT_TRANSCRIPT = "already done. Wow. Miles, come here."
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        # allow_direct_answer=False arms the per-command must-call guard too.
+        cache.get_available_commands.return_value = [
+            {"command_name": "control_device", "allow_direct_answer": False}
+        ]
+        cache.get_tools.return_value = []
+        # The incident combination: compressed provider forces tool calls
+        # AND the router had a confident match — BOTH retry guards armed.
+        cache.get_force_tool_calls.return_value = True
+        cache.get_router_decision.return_value = {"used": True}
+        return cache
+
+    def _marker_response(self, content: str):
+        return {
+            "choices": [{
+                "message": {"content": content},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    @pytest.mark.asyncio
+    async def test_incident_exchange_complete_is_not_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The exact incident shape (text path, JSON message field): one LLM
+        call, no [MUST_CALL_RETRY] nag, and the close-the-exchange intent
+        survives as ``end_of_exchange`` (clean_for_tts strips the literal
+        marker from assistant_message so it can never be spoken)."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            return self._marker_response(
+                '{"message": "<exchange_complete/>", "tool_calls": []}'
+            )
+
+        mock_llm_client.chat_completion.side_effect = side_effect
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-miles",
+                messages=messages,
+                tools=[{"function": {"name": "control_device"}}],
+                user_utterance=self.INCIDENT_TRANSCRIPT,
+                max_iterations=3,
+            )
+
+        assert call_count[0] == 1, (
+            "A terminal <exchange_complete/> must never be popped and "
+            "retried — the incident saw a [MUST_CALL_RETRY] nag and a "
+            "forced chat() call into the family's conversation."
+        )
+        assert result["stop_reason"] == "complete"
+        # The literal marker is stripped (never spoken); the intent rides
+        # the result so the node skips its follow-up window.
+        assert result.get("end_of_exchange") is True
+        assert "exchange_complete" not in str(result["assistant_message"])
+        assert not any(
+            "[MUST_CALL_RETRY]" in str(m.get("content", "")) for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_exchange_complete_with_prose_is_not_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The common shape: a final reply WITH the marker appended
+        ("Timer set. <exchange_complete/>") must also be terminal."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._marker_response(
+            '{"message": "Glad it worked out. <exchange_complete/>", "tool_calls": []}'
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-ec-prose",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "control_device"}}],
+                max_iterations=3,
+            )
+
+        assert mock_llm_client.chat_completion.call_count == 1
+        assert result["stop_reason"] == "complete"
+        assert "Glad it worked out" in str(result["assistant_message"])
+        assert result.get("end_of_exchange") is True
+
+    @pytest.mark.asyncio
+    async def test_exchange_complete_not_retried_native_path(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Native tool-calling path: the marker lives in raw_content (no
+        JSON wrapper) — the exemption must cover it there too."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._marker_response(
+            "Goodnight! <exchange_complete/>"
+        )
+        mock_provider = MagicMock()
+        mock_provider.supports_native_tools = True
+        mock_provider.build_tools.return_value = []
+        mock_provider.sanitize_text.side_effect = lambda s: s
+        engine = ToolExecutionEngine(mock_llm_client, prompt_provider=mock_provider)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-ec-native",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "control_device"}}],
+                max_iterations=3,
+            )
+
+        assert mock_llm_client.chat_completion.call_count == 1
+        assert result["stop_reason"] == "complete"
+
+    @pytest.mark.asyncio
+    async def test_must_call_guard_also_exempted(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The per-command must-call guard (router matched + allow_direct_
+        answer=False) must not retry a sentinel either."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        # Only the must-call branch armed.
+        mock_conversation_cache.get_force_tool_calls.return_value = False
+        mock_llm_client.chat_completion.return_value = self._marker_response(
+            '{"message": "<exchange_complete/>", "tool_calls": []}'
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-ec-mustcall",
+                messages=messages,
+                tools=[{"function": {"name": "control_device"}}],
+                max_iterations=3,
+            )
+
+        assert mock_llm_client.chat_completion.call_count == 1
+        assert result["stop_reason"] == "complete"
+        assert not any(
+            "[MUST_CALL_RETRY]" in str(m.get("content", "")) for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_marker_only_inside_think_block_does_not_exempt(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """A marker QUOTED inside <think> reasoning is not an emission —
+        same rule the not_for_me detector applies. The guard still fires."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return self._marker_response(
+                    "<think>should I say <exchange_complete/>? no</think>"
+                    '{"message": "Working on it.", "tool_calls": []}'
+                )
+            return self._marker_response(
+                '{"message": "Done.", "tool_calls": []}'
+            )
+
+        mock_llm_client.chat_completion.side_effect = side_effect
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-ec-think",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "control_device"}}],
+                max_iterations=3,
+            )
+
+        assert call_count[0] >= 2, (
+            "A think-quoted marker must NOT exempt the guard — only a real "
+            "emission outside <think> is terminal."
+        )
+
+    @pytest.mark.asyncio
+    async def test_plain_prose_still_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Guard-the-guard: without any sentinel, the force-tool-calls
+        retry still fires exactly as before the exemption."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._marker_response(
+            '{"message": "The lights are probably on.", "tool_calls": []}'
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-ec-prose-retry",
+                messages=messages,
+                tools=[{"function": {"name": "control_device"}}],
+                max_iterations=4,
+            )
+
+        assert mock_llm_client.chat_completion.call_count > 1, (
+            "The exemption must be sentinel-scoped — plain prose keeps the "
+            "retry behavior."
+        )

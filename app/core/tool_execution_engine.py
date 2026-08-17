@@ -15,6 +15,7 @@ from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 from app.core.conversation_cache import conversation_cache
+from app.core.exchange_complete import contains_marker as contains_exchange_complete
 from app.core.not_for_me import contains_sentinel
 
 # Reasoning traces must never count as sentinel emissions: the /think
@@ -878,6 +879,46 @@ class ToolExecutionEngine:
 
             # Handle different finish reasons
             if finish_reason == "stop":
+                # Terminal-sentinel exemption (2026-08-17 prod incident): a
+                # response carrying ``<exchange_complete/>`` is a LEGAL
+                # terminal output — the model closing its own exchange — and
+                # must NEVER be treated as "refused to pick a tool" by the
+                # retry guards below. In the incident, a follow-up captured
+                # a parent calling their child ("already done. Wow. Miles,
+                # come here."), the model correctly emitted the marker, and
+                # the force-tool-calls guard popped it and nagged with
+                # [MUST_CALL_RETRY] — so the model complied by calling
+                # chat("Miles is a little busy...") into the family's
+                # conversation. Sentinels are senior to tool-forcing; the
+                # retry must not fire AT ALL on a first-look sentinel (the
+                # popped-prose escape path above only covers sentinels
+                # emitted AFTER a retry already discarded a real answer).
+                # ``<not_for_me/>`` already short-circuited before this
+                # branch; checking both here keeps the exemption complete
+                # even if that ordering ever changes. Both delivery shapes
+                # are covered: raw_content (native path) and the parsed
+                # assistant_message (text path, where the marker lives in
+                # the JSON "message" field).
+                _terminal_texts = [_outside_think(raw_content)]
+                if isinstance(assistant_message, str):
+                    _terminal_texts.append(_outside_think(assistant_message))
+                elif isinstance(assistant_message, dict):
+                    _mc = assistant_message.get("content")
+                    if isinstance(_mc, str):
+                        _terminal_texts.append(_outside_think(_mc))
+                has_exchange_complete = any(
+                    contains_exchange_complete(t) for t in _terminal_texts
+                )
+                has_terminal_sentinel = has_exchange_complete or any(
+                    contains_sentinel(t) for t in _terminal_texts
+                )
+                if has_terminal_sentinel:
+                    logger.info(
+                        "🏁 terminal sentinel in response — retry guards "
+                        "exempted (iter %d)",
+                        iteration + 1,
+                    )
+
                 # Force-tool-calls guard (compressed provider).
                 # Pop the bad assistant message so the model gets a clean
                 # slate instead of being biased by its own failed response.
@@ -899,7 +940,12 @@ class ToolExecutionEngine:
                 # that no tool was being addressed.
                 force_tools = conversation_cache.get_force_tool_calls(conversation_id)
                 retry_count = _must_call_retry_count()
-                if force_tools and retry_count < 2 and not double_checked:
+                if (
+                    force_tools
+                    and retry_count < 2
+                    and not double_checked
+                    and not has_terminal_sentinel
+                ):
                     keyword_pool = collect_tool_keywords(
                         conversation_cache.get_available_commands(conversation_id),
                         conversation_cache.get_tools(conversation_id),
@@ -918,7 +964,12 @@ class ToolExecutionEngine:
                 # A prose answer produced by the double-check rescue is the
                 # rescue — never feed it back into the must-call machinery
                 # that manufactured the corner in the first place.
-                if force_tools and retry_count < 2 and not double_checked:
+                if (
+                    force_tools
+                    and retry_count < 2
+                    and not double_checked
+                    and not has_terminal_sentinel
+                ):
                     # Stash the answer we're about to discard: if the retry
                     # corners the model into <not_for_me/>, this comes back.
                     if isinstance(assistant_message, str) and assistant_message.strip():
@@ -942,7 +993,13 @@ class ToolExecutionEngine:
                     and router_decision.get("used", False)
                 )
                 must_call_tools = _get_must_call_tools()
-                if must_call_tools and router_matched and retry_count < 1 and not double_checked:
+                if (
+                    must_call_tools
+                    and router_matched
+                    and retry_count < 1
+                    and not double_checked
+                    and not has_terminal_sentinel
+                ):
                     # Same stash as the force-tools guard above.
                     if isinstance(assistant_message, str) and assistant_message.strip():
                         popped_prose = assistant_message
@@ -993,6 +1050,16 @@ class ToolExecutionEngine:
                     "stop_reason": "complete",
                     "assistant_message": assistant_message,
                 }
+                # The sanitize/clean pass above strips the exchange-complete
+                # marker out of assistant_message (clean_for_tts removes it
+                # so no path can ever SPEAK it) — which means the handler's
+                # exchange_complete.apply_to_result can no longer see it.
+                # Carry the model's close-the-exchange intent on the result
+                # explicitly so the node still skips its follow-up window
+                # (the 2026-08-17 incident's re-opened window is the exact
+                # vector this marker exists to close).
+                if has_exchange_complete:
+                    result["end_of_exchange"] = True
                 if reasoning_parts:
                     result["reasoning"] = "\n\n".join(reasoning_parts)
                 return result

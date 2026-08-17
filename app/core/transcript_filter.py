@@ -158,6 +158,121 @@ def is_music_control_shaped(text: str | None) -> bool:
     return _MUSIC_CONTROL_RE.match(stripped) is not None
 
 
+# --- Named-person addressing (2026-08-17 prod incident) -------------------
+#
+# A follow-up window captured a parent calling their child: "already done.
+# Wow. Miles, come here." Miles is a KNOWN household member, so the utterance
+# is near-certainly meant for him, not Jarvis — shape evidence the turn hint
+# can lean on for ANY wake verdict (the incident had wake_verdict=none, so
+# the doubt machinery never engaged). Like every shape detector here this
+# classifies FORM, not meaning, and only ever feeds a lean hint (fail-open).
+
+# Names that must never count as "another person being addressed": the
+# assistant itself and the wake-phrase tokens ("hey jarvis" — "hey" can be a
+# member nickname collision only in theory, but a false negative here just
+# skips a hint).
+_ADDRESSING_EXCLUDED_NAMES = frozenset({"jarvis", "hey"})
+
+# Sentence boundary for per-sentence vocative matching — the incident
+# transcript carries the vocative in its THIRD sentence.
+_SENTENCE_SPLIT_RE: re.Pattern[str] = re.compile(r"[.!?;]+")
+
+# Human-directed imperative verbs that follow a bare leading name when STT
+# drops the vocative comma ("Miles come here"). Deliberately people-verbs —
+# overlap with device verbs ("stop") is fine because the device-command guard
+# is senior at every call site.
+_HUMAN_IMPERATIVE_VERBS = (
+    "come", "go", "stop", "wait", "get", "put", "grab", "bring", "take",
+    "look", "listen", "sit", "stand", "stay", "hold", "leave", "hurry",
+    "let", "help", "eat", "finish", "clean", "pick",
+)
+_HUMAN_IMPERATIVE_RE_FRAGMENT = "|".join(_HUMAN_IMPERATIVE_VERBS)
+
+
+def _addressable_name_tokens(member_names: list[str] | None) -> dict[str, str]:
+    """Map lowercase first-name tokens → display token for matching.
+
+    Members are stored as display names / usernames ("Miles", "Jess B.");
+    the spoken vocative is the first name token. Tokens shorter than 2 chars
+    or on the exclusion list (jarvis / wake phrase) are dropped.
+    """
+    tokens: dict[str, str] = {}
+    for name in member_names or []:
+        if not isinstance(name, str):
+            continue
+        words = _WORD_RE.findall(name)
+        if not words:
+            continue
+        token = words[0]
+        lowered = token.lower()
+        if len(lowered) < 2 or lowered in _ADDRESSING_EXCLUDED_NAMES:
+            continue
+        tokens.setdefault(lowered, token)
+    return tokens
+
+
+def addressed_household_member(
+    text: str | None,
+    member_names: list[str] | None,
+) -> str | None:
+    """Return the household member a sentence in ``text`` directly addresses.
+
+    Vocative shapes, per sentence, case-insensitive, word-boundary:
+
+    - ``NAME, ...`` / ``NAME! ...`` — name opens the sentence with a
+      vocative separator ("Miles, come here", "Jess, can you grab that").
+    - ``NAME <imperative>`` — leading name straight into a human-directed
+      imperative, for STT-dropped commas ("Miles come here").
+    - ``..., NAME`` — trailing comma vocative ("come here, Miles").
+    - ``<imperative> ... NAME`` — imperative sentence ending on the name
+      ("come here Miles").
+
+    Speech merely ABOUT a member ("Miles said he wants pizza") matches no
+    shape. Returns the member's first-name token, or None. This is a hint
+    signal only — callers must fail open on None.
+    """
+    if not text:
+        return None
+    tokens = _addressable_name_tokens(member_names)
+    if not tokens:
+        return None
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        stripped = sentence.strip()
+        if not stripped:
+            continue
+        for lowered, display in tokens.items():
+            escaped = re.escape(lowered)
+            if re.match(rf"^{escaped}\s*[,!:]", stripped, re.IGNORECASE):
+                return display
+            if re.match(
+                rf"^{escaped}\s+(?:{_HUMAN_IMPERATIVE_RE_FRAGMENT})\b",
+                stripped,
+                re.IGNORECASE,
+            ):
+                return display
+            if re.search(rf",\s*{escaped}\s*$", stripped, re.IGNORECASE):
+                return display
+            if re.match(
+                rf"^(?:{_HUMAN_IMPERATIVE_RE_FRAGMENT})\b.*\s{escaped}\s*$",
+                stripped,
+                re.IGNORECASE,
+            ):
+                return display
+    return None
+
+
+def is_addressed_to_other_person(
+    text: str | None,
+    member_names: list[str] | None,
+) -> bool:
+    """True when ``text`` directly addresses a household member by name.
+
+    Boolean wrapper over ``addressed_household_member`` — see it for the
+    matched shapes and the jarvis / wake-phrase exclusion.
+    """
+    return addressed_household_member(text, member_names) is not None
+
+
 def is_short_non_command_fragment(text: str | None) -> bool:
     """True for ≤2-word fragments that aren't device commands.
 

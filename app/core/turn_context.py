@@ -33,6 +33,7 @@ from app.core.direction_hint import (
     is_media_self_playback,
 )
 from app.core.transcript_filter import (
+    addressed_household_member,
     is_device_command_shaped,
     is_music_control_shaped,
 )
@@ -72,6 +73,7 @@ def build_turn_hint(
     conversation_wake_verdict: str | None = None,
     doubt_round: int | None = None,
     doubt_max_rounds: int | None = None,
+    member_names: list[str] | None = None,
 ) -> str | None:
     """Return a one-line ``[turn context: ...]`` hint, or None.
 
@@ -116,6 +118,15 @@ def build_turn_hint(
             doubt_max_rounds`` answered rounds, the caution hint gains a
             strong wrap-up lean (answer briefly and close, or sentinel) —
             a lean, never a hard cut. Verified conversations are exempt.
+        member_names: Display names of the node's household members. On
+            follow-up turns (ANY verdict — this is transcript SHAPE
+            evidence, not acoustic), a transcript that directly addresses
+            a member by name ("Miles, come here") gains a strong ambient
+            lean toward ``<not_for_me/>`` (2026-08-17 incident: a parent
+            calling their child was answered INTO the family conversation).
+            The imperative device/music-control guard stays senior, the
+            lean is never a hard cut, and absent/empty names or no match
+            keep the hint byte-identical (fail open).
 
     Returns:
         The bracketed hint to append to the user message, or ``None``
@@ -132,6 +143,7 @@ def build_turn_hint(
             doubt_max_rounds=doubt_max_rounds,
             transcript=transcript,
             media_playback=media_playback,
+            member_names=member_names,
         )
     if turn_source == "wake":
         return _wake_hint(
@@ -314,8 +326,38 @@ def _follow_up_hint(
     doubt_max_rounds: int | None = None,
     transcript: str | None = None,
     media_playback: bool = False,
+    member_names: list[str] | None = None,
 ) -> str:
     iteration = max(1, follow_up_iteration or 1)
+    # Imperative device-command guard — senior to every suppression-leaning
+    # signal in this hint (doubted verdict AND the named-person addressing
+    # lean below): a device-shaped transcript (or a music-control shape
+    # during self-playback) keeps the normal directed posture, because a
+    # REAL engaged user must never have to fight suppression.
+    command_shaped = transcript is not None and (
+        is_device_command_shaped(transcript)
+        or (media_playback and is_music_control_shaped(transcript))
+    )
+    # Named-person addressing (2026-08-17 incident): "already done. Wow.
+    # Miles, come here." — a parent calling their child — was answered INTO
+    # the family conversation. The transcript's own shape says who it's for,
+    # so this lean applies on ANY verdict (the incident had wake_verdict=
+    # none / no speaker clip, so the doubt machinery never engaged). A lean,
+    # never a hard cut; no member names or no match → byte-identical hint.
+    addressed_name = (
+        None if command_shaped
+        else addressed_household_member(transcript, member_names)
+    )
+    addressing_note = (
+        (
+            f" This utterance directly addresses {addressed_name} by name — "
+            f"{addressed_name} is another member of this household, so it is "
+            f"near-certainly meant for them, not you. Emit <not_for_me/> "
+            f"unless it ALSO asks you something directly."
+        )
+        if addressed_name
+        else ""
+    )
     # Verdict propagation (the kitchen runaway, 2026-08-15): a false wake
     # that survives the wake-turn hints and gets ANSWERED opens the
     # follow-up window onto the family's continuing conversation — and
@@ -325,17 +367,8 @@ def _follow_up_hint(
     # Only an ``unverified`` verdict selects the caution posture;
     # verified / clip_unreliable / absent keep this hint byte-identical
     # to before the verdict propagated (fail open). The imperative
-    # device-command guard stays senior — same shape as the wake hint:
-    # a device-shaped transcript (or a music-control shape during
-    # self-playback) keeps the normal directed posture, because a REAL
-    # engaged user must never have to fight suppression.
-    doubted = wake_verdict == DOUBTED_WAKE_VERDICT and not (
-        transcript is not None
-        and (
-            is_device_command_shaped(transcript)
-            or (media_playback and is_music_control_shaped(transcript))
-        )
-    )
+    # device-command guard stays senior — same shape as the wake hint.
+    doubted = wake_verdict == DOUBTED_WAKE_VERDICT and not command_shaped
     if doubted:
         # Round cap: a LEAN toward closing, never a hard cut — the model
         # still answers (briefly) when the utterance is addressed to it.
@@ -365,7 +398,7 @@ def _follow_up_hint(
             f"to someone else, a third-person reference, a mid-story line, "
             f"a plan being made between people), emit <not_for_me/>. If it "
             f"is unmistakably addressed to you, answer it — or run the "
-            f"tool it calls for.{wrap_up}]"
+            f"tool it calls for.{addressing_note}{wrap_up}]"
         )
     escalation = (
         " This window has stayed open across several turns; the room has "
@@ -381,5 +414,6 @@ def _follow_up_hint(
         f"answer it — or run the tool it calls for; don't reply with bare "
         f"prose when the request needs a tool. If the room's conversation has "
         f"moved on without you, emit <not_for_me/> — your exchange is over, "
-        f"and going quiet is the designed ending, not a failure.{escalation}]"
+        f"and going quiet is the designed ending, not a failure."
+        f"{addressing_note}{escalation}]"
     )
