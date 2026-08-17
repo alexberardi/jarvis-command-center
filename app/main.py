@@ -903,6 +903,25 @@ async def start_conversation(
         if home_context:
             node_context["home_context"] = home_context
 
+        # Household member display names — feeds the follow-up "addressed to
+        # another member by name" turn hint ("Miles, come here" → lean toward
+        # <not_for_me/>; 2026-08-17 incident). Resolved ONCE per conversation
+        # at warmup (a single batch call against the same TTL cache the
+        # speaker resolver uses — off the per-turn hot path). Best-effort:
+        # any failure leaves the key absent and the hint disabled (fail open).
+        try:
+            from app.core import service_config
+            from app.core.utils.speaker_resolver import resolve_member_names
+
+            _member_names = await resolve_member_names(
+                service_config.get_auth_url(),
+                node_context_provider.household_member_ids,
+            )
+            if _member_names:
+                node_context["household_member_names"] = _member_names
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to resolve household member names: {e}")
+
         # Phase 5: household-level adapter deployment takes precedence over the
         # legacy per-node adapter_hash column. A household-active adapter wins
         # because it's the one gated by the scheduler's eval run.

@@ -52,3 +52,51 @@ async def resolve_speaker_name(
     except Exception as e:
         logger.warning(f"Failed to resolve speaker name for user_id={user_id}: {e}")
         return None
+
+
+async def resolve_member_names(
+    auth_base_url: str, user_ids: list[int] | None
+) -> list[str]:
+    """Batch-resolve household member user_ids to display names.
+
+    One auth round-trip for all cache misses (same ``/internal/users/batch``
+    endpoint and TTL cache as ``resolve_speaker_name``). Unresolvable ids
+    are dropped — callers treat the names as a best-effort hint signal
+    (the follow-up named-person addressing lean), so this NEVER raises:
+    any failure degrades to fewer/no names.
+    """
+    ids: list[int] = []
+    for uid in user_ids or []:
+        try:
+            ids.append(int(uid))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return []
+
+    now = time.time()
+    resolved: dict[int, str] = {}
+    missing: list[int] = []
+    for uid in ids:
+        cached = _speaker_cache.get(uid)
+        if cached and cached[1] > now:
+            resolved[uid] = cached[0]
+        else:
+            missing.append(uid)
+
+    if missing:
+        try:
+            joined = ",".join(str(u) for u in missing)
+            url = f"{auth_base_url}/internal/users/batch?user_ids={joined}"
+            result = await get(url, timeout=5)
+            users = result.get("users") if isinstance(result, dict) else None
+            if isinstance(users, dict):
+                for uid in missing:
+                    name = users.get(str(uid))
+                    if name:
+                        _speaker_cache[uid] = (name, now + _CACHE_TTL_SECONDS)
+                        resolved[uid] = name
+        except Exception as e:
+            logger.warning(f"Failed to batch-resolve member names: {e}")
+
+    return [resolved[uid] for uid in ids if uid in resolved]

@@ -952,6 +952,10 @@ class ConversationHandler:
             ),
             doubt_round=(turn_context or {}).get("doubt_round"),
             doubt_max_rounds=(turn_context or {}).get("doubt_max_rounds"),
+            # Named-person addressing lean (2026-08-17): household member
+            # display names resolved at /conversation/start; absent (old
+            # cache, resolve failure) → hint byte-identical (fail open).
+            member_names=(_turn_node_ctx or {}).get("household_member_names"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied | hint=%s", turn_hint)
@@ -1317,6 +1321,10 @@ class ConversationHandler:
             ),
             doubt_round=(turn_context or {}).get("doubt_round"),
             doubt_max_rounds=(turn_context or {}).get("doubt_max_rounds"),
+            # Named-person addressing lean (2026-08-17): household member
+            # display names resolved at /conversation/start; absent (old
+            # cache, resolve failure) → hint byte-identical (fail open).
+            member_names=(_turn_node_ctx or {}).get("household_member_names"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied (stream path) | hint=%s", turn_hint)
@@ -1752,6 +1760,10 @@ class ConversationHandler:
             ),
             doubt_round=(turn_context or {}).get("doubt_round"),
             doubt_max_rounds=(turn_context or {}).get("doubt_max_rounds"),
+            # Named-person addressing lean (2026-08-17): household member
+            # display names resolved at /conversation/start; absent (old
+            # cache, resolve failure) → hint byte-identical (fail open).
+            member_names=(_turn_node_ctx or {}).get("household_member_names"),
         )
         if turn_hint:
             logger.info("🧭 Turn hint applied (tool-stream path) | hint=%s", turn_hint)

@@ -3,7 +3,11 @@ import pytest
 import time
 from unittest.mock import AsyncMock, patch
 
-from app.core.utils.speaker_resolver import resolve_speaker_name, _speaker_cache
+from app.core.utils.speaker_resolver import (
+    resolve_member_names,
+    resolve_speaker_name,
+    _speaker_cache,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -72,3 +76,58 @@ async def test_cache_expires():
         assert name == "alice"
         # Should have called API since cache expired
         assert mock_get.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_member_names_batch_resolves_in_one_call():
+    with patch("app.core.utils.speaker_resolver.get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = {"users": {"1": "Miles", "2": "Jess"}}
+
+        names = await resolve_member_names("http://auth:7701", [1, 2])
+
+        assert names == ["Miles", "Jess"]
+        assert mock_get.call_count == 1
+        assert "user_ids=1,2" in mock_get.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_member_names_uses_and_fills_cache():
+    with patch("app.core.utils.speaker_resolver.get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = {"users": {"2": "Jess"}}
+        _speaker_cache[1] = ("Miles", time.time() + 100)
+
+        names = await resolve_member_names("http://auth:7701", [1, 2])
+
+        assert names == ["Miles", "Jess"]
+        # Only the miss goes over the wire.
+        assert mock_get.call_count == 1
+        assert "user_ids=2" in mock_get.call_args[0][0]
+        # And the miss lands in the cache for the next caller.
+        assert _speaker_cache[2][0] == "Jess"
+
+
+@pytest.mark.asyncio
+async def test_member_names_drops_unresolvable_ids():
+    with patch("app.core.utils.speaker_resolver.get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = {"users": {"1": "Miles"}}
+
+        names = await resolve_member_names("http://auth:7701", [1, 999])
+
+        assert names == ["Miles"]
+
+
+@pytest.mark.asyncio
+async def test_member_names_never_raises():
+    # Best-effort hint signal: an auth outage degrades to no names.
+    with patch("app.core.utils.speaker_resolver.get", new_callable=AsyncMock) as mock_get:
+        mock_get.side_effect = Exception("Connection refused")
+
+        assert await resolve_member_names("http://auth:7701", [1, 2]) == []
+
+
+@pytest.mark.asyncio
+async def test_member_names_empty_ids_no_call():
+    with patch("app.core.utils.speaker_resolver.get", new_callable=AsyncMock) as mock_get:
+        assert await resolve_member_names("http://auth:7701", []) == []
+        assert await resolve_member_names("http://auth:7701", None) == []
+        assert mock_get.call_count == 0

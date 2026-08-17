@@ -1790,16 +1790,18 @@ class TestForceToolCallsKeywordGate:
     async def test_no_keywords_declared_keeps_legacy_retry(
         self, mock_llm_client, mock_conversation_cache
     ):
-        """Old node clients don't send keywords — with zero keyword signal the
-        guard must keep its legacy always-retry behavior."""
+        """Old node clients don't send keywords — with zero keyword signal
+        the keyword half of the gate must not disable the guard. The
+        utterance still has to be action-shaped (2026-08-17 shape gate):
+        an imperative device command narrated as prose keeps the retry."""
         from app.core.tool_execution_engine import ToolExecutionEngine
 
         mock_conversation_cache.get_available_commands.return_value = [
-            {"command_name": "medication", "parameters": []},
+            {"command_name": "control_device", "parameters": []},
         ]
         mock_llm_client.chat_completion.side_effect = [
-            self._prose_response("Noted!"),
-            self._tool_call_response("medication"),
+            self._prose_response("Turning them on!"),
+            self._tool_call_response("control_device"),
         ]
         engine = ToolExecutionEngine(mock_llm_client)
 
@@ -1808,13 +1810,13 @@ class TestForceToolCallsKeywordGate:
                 mock_executor.execute_tool_calls.return_value = ([], [{
                     "id": "call_1",
                     "type": "function",
-                    "function": {"name": "medication", "arguments": "{}"},
+                    "function": {"name": "control_device", "arguments": "{}"},
                 }])
                 result = await engine.execute(
                     conversation_id="test-conv-legacy",
                     messages=[{"role": "system", "content": "sys"}],
-                    tools=[{"function": {"name": "medication"}}],
-                    user_utterance="Thank you.",
+                    tools=[{"function": {"name": "control_device"}}],
+                    user_utterance="Turn on the kitchen lights.",
                     max_iterations=3,
                 )
 
@@ -2054,3 +2056,993 @@ class TestScrubDoesNotEatSystemPrompt:
 
         assert messages[0] is base_prompt, "scrub must never remove the cached system prompt"
         assert stale_nag not in messages, "stale standalone nags must be scrubbed"
+
+
+class TestExchangeCompleteGuardExemption:
+    """2026-08-17 prod incident: after a real lights command, the follow-up
+    window captured a parent calling their child — "already done. Wow.
+    Miles, come here." The model emitted ``<exchange_complete/>`` (the
+    CORRECT terminal output: close the exchange, stop listening), but the
+    force-tool-calls guard treated the no-tool-call response as a failure,
+    popped it, and nagged with [MUST_CALL_RETRY] — so the model complied by
+    calling chat("Miles is a little busy with his toys...") into the
+    family's conversation. Two rounds later: "Shut up, Jorgis."
+
+    Terminal sentinels (``<exchange_complete/>``, ``<not_for_me/>``) are
+    legal terminal outputs, senior to tool-forcing: the retry must not fire
+    AT ALL on a first-look sentinel — not rely on the retry-escape path
+    (which only covers sentinels emitted AFTER a popped prose answer).
+    """
+
+    INCIDENT_TRANSCRIPT = "already done. Wow. Miles, come here."
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        # allow_direct_answer=False arms the per-command must-call guard too.
+        cache.get_available_commands.return_value = [
+            {"command_name": "control_device", "allow_direct_answer": False}
+        ]
+        cache.get_tools.return_value = []
+        # The incident combination: compressed provider forces tool calls
+        # AND the router had a confident match — BOTH retry guards armed.
+        cache.get_force_tool_calls.return_value = True
+        cache.get_router_decision.return_value = {"used": True}
+        return cache
+
+    def _marker_response(self, content: str):
+        return {
+            "choices": [{
+                "message": {"content": content},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    @pytest.mark.asyncio
+    async def test_incident_exchange_complete_is_not_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The exact incident shape (text path, JSON message field): one LLM
+        call, no [MUST_CALL_RETRY] nag, and the close-the-exchange intent
+        survives as ``end_of_exchange`` (clean_for_tts strips the literal
+        marker from assistant_message so it can never be spoken)."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            return self._marker_response(
+                '{"message": "<exchange_complete/>", "tool_calls": []}'
+            )
+
+        mock_llm_client.chat_completion.side_effect = side_effect
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-miles",
+                messages=messages,
+                tools=[{"function": {"name": "control_device"}}],
+                user_utterance=self.INCIDENT_TRANSCRIPT,
+                max_iterations=3,
+            )
+
+        assert call_count[0] == 1, (
+            "A terminal <exchange_complete/> must never be popped and "
+            "retried — the incident saw a [MUST_CALL_RETRY] nag and a "
+            "forced chat() call into the family's conversation."
+        )
+        assert result["stop_reason"] == "complete"
+        # The literal marker is stripped (never spoken); the intent rides
+        # the result so the node skips its follow-up window.
+        assert result.get("end_of_exchange") is True
+        assert "exchange_complete" not in str(result["assistant_message"])
+        assert not any(
+            "[MUST_CALL_RETRY]" in str(m.get("content", "")) for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_exchange_complete_with_prose_is_not_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The common shape: a final reply WITH the marker appended
+        ("Timer set. <exchange_complete/>") must also be terminal."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._marker_response(
+            '{"message": "Glad it worked out. <exchange_complete/>", "tool_calls": []}'
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-ec-prose",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "control_device"}}],
+                max_iterations=3,
+            )
+
+        assert mock_llm_client.chat_completion.call_count == 1
+        assert result["stop_reason"] == "complete"
+        assert "Glad it worked out" in str(result["assistant_message"])
+        assert result.get("end_of_exchange") is True
+
+    @pytest.mark.asyncio
+    async def test_exchange_complete_not_retried_native_path(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Native tool-calling path: the marker lives in raw_content (no
+        JSON wrapper) — the exemption must cover it there too."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._marker_response(
+            "Goodnight! <exchange_complete/>"
+        )
+        mock_provider = MagicMock()
+        mock_provider.supports_native_tools = True
+        mock_provider.build_tools.return_value = []
+        mock_provider.sanitize_text.side_effect = lambda s: s
+        engine = ToolExecutionEngine(mock_llm_client, prompt_provider=mock_provider)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-ec-native",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "control_device"}}],
+                max_iterations=3,
+            )
+
+        assert mock_llm_client.chat_completion.call_count == 1
+        assert result["stop_reason"] == "complete"
+
+    @pytest.mark.asyncio
+    async def test_must_call_guard_also_exempted(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The per-command must-call guard (router matched + allow_direct_
+        answer=False) must not retry a sentinel either."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        # Only the must-call branch armed.
+        mock_conversation_cache.get_force_tool_calls.return_value = False
+        mock_llm_client.chat_completion.return_value = self._marker_response(
+            '{"message": "<exchange_complete/>", "tool_calls": []}'
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-ec-mustcall",
+                messages=messages,
+                tools=[{"function": {"name": "control_device"}}],
+                max_iterations=3,
+            )
+
+        assert mock_llm_client.chat_completion.call_count == 1
+        assert result["stop_reason"] == "complete"
+        assert not any(
+            "[MUST_CALL_RETRY]" in str(m.get("content", "")) for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_marker_only_inside_think_block_does_not_exempt(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """A marker QUOTED inside <think> reasoning is not an emission —
+        same rule the not_for_me detector applies. The guard still fires."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return self._marker_response(
+                    "<think>should I say <exchange_complete/>? no</think>"
+                    '{"message": "Working on it.", "tool_calls": []}'
+                )
+            return self._marker_response(
+                '{"message": "Done.", "tool_calls": []}'
+            )
+
+        mock_llm_client.chat_completion.side_effect = side_effect
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-ec-think",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "control_device"}}],
+                max_iterations=3,
+            )
+
+        assert call_count[0] >= 2, (
+            "A think-quoted marker must NOT exempt the guard — only a real "
+            "emission outside <think> is terminal."
+        )
+
+    @pytest.mark.asyncio
+    async def test_plain_prose_still_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Guard-the-guard: without any sentinel, the force-tool-calls
+        retry still fires exactly as before the exemption."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._marker_response(
+            '{"message": "The lights are probably on.", "tool_calls": []}'
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-ec-prose-retry",
+                messages=messages,
+                tools=[{"function": {"name": "control_device"}}],
+                max_iterations=4,
+            )
+
+        assert mock_llm_client.chat_completion.call_count > 1, (
+            "The exemption must be sentinel-scoped — plain prose keeps the "
+            "retry behavior."
+        )
+
+
+class TestActionShapeGate:
+    """2026-08-17 prod incident: 'What should I do with Miles today?' — an
+    open question to the assistant — keyword-matched a calendar command, so
+    the force-tool-calls guard popped the model's prose answer and
+    [MUST_CALL_RETRY]-ed it into get_calendar_events: the whole calendar
+    read aloud in answer to a question.
+
+    DOCTRINE: the model decides when to talk and how to answer; guards force
+    tools ONLY where not-acting is a correctness failure (actions/reports),
+    NEVER on questions/conversation. The guard now requires the utterance to
+    be ACTION-shaped (imperative) or REPORT-shaped ("Leo took his medicine")
+    IN ADDITION to the keyword match. Question shapes never qualify — even
+    with keyword matches, and even for allow_direct_answer=False commands.
+    """
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        # Calendar keywords that MATCH the incident utterance ("today",
+        # "plans") — the old keyword-only gate armed the guard on it.
+        cache.get_available_commands.return_value = [
+            {
+                "command_name": "get_calendar_events",
+                "keywords": ["calendar", "schedule", "plans", "today"],
+                "parameters": [],
+            },
+            {
+                "command_name": "control_device",
+                "keywords": ["lights", "turn on", "turn off"],
+                "parameters": [],
+            },
+            {
+                "command_name": "medication",
+                "keywords": ["medicine", "meds", "took my"],
+                "parameters": [],
+            },
+        ]
+        cache.get_tools.return_value = []
+        cache.get_issued_client_calls.return_value = []
+        cache.get_force_tool_calls.return_value = True
+        cache.get_router_decision.return_value = {"used": False}
+        return cache
+
+    def _prose_response(self, message: str):
+        return {
+            "choices": [{
+                "message": {"content": json.dumps({"message": message, "tool_calls": []})},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    def _tool_call_response(self, name: str):
+        return {
+            "choices": [{
+                "message": {"content": json.dumps({
+                    "message": "",
+                    "tool_calls": [{"name": name, "arguments": {}}],
+                })},
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    @pytest.mark.asyncio
+    async def test_incident_question_with_keyword_match_is_not_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The incident fixture: a question that keyword-matches a calendar
+        command must accept the prose answer — one LLM call, no nag."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._prose_response(
+            "You could take Miles to the park — it's sunny out."
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-miles-q",
+                messages=messages,
+                tools=[{"function": {"name": "get_calendar_events"}}],
+                user_utterance="What should I do with Miles today?",
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert "park" in str(result["assistant_message"])
+        assert mock_llm_client.chat_completion.call_count == 1, (
+            "A question must NEVER be retried into a tool call, even when "
+            "it keyword-matches a command — the incident read the whole "
+            "calendar aloud in answer to an open question."
+        )
+        assert not any(
+            "[MUST_CALL_RETRY]" in str(m.get("content", "")) for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_question_without_question_mark_is_not_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """STT often drops the '?' — the leading question word alone must
+        exempt the utterance."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._prose_response(
+            "Your afternoon looks free."
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-noqm",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "get_calendar_events"}}],
+                user_utterance="what does my schedule look like today",
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert mock_llm_client.chat_completion.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_imperative_device_command_still_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """'Turn off the living room lights' narrated as prose keeps the
+        retry — action shape + keyword match both hold."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = [
+            self._prose_response("Turning off the living room lights!"),
+            self._tool_call_response("control_device"),
+        ]
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                mock_executor.execute_tool_calls.return_value = ([], [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "control_device", "arguments": "{}"},
+                }])
+                result = await engine.execute(
+                    conversation_id="test-conv-lights",
+                    messages=[{"role": "system", "content": "sys"}],
+                    tools=[{"function": {"name": "control_device"}}],
+                    user_utterance="Turn off the living room lights",
+                    max_iterations=3,
+                )
+
+        assert result["stop_reason"] == "tool_calls"
+        assert result["tool_calls"][0]["function"]["name"] == "control_device"
+        assert mock_llm_client.chat_completion.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_medication_report_still_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """'Leo took his medicine' is a REPORT that must reach the logging
+        tool — prose keeps the retry."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.side_effect = [
+            self._prose_response("Glad Leo took his medicine!"),
+            self._tool_call_response("medication"),
+        ]
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                mock_executor.execute_tool_calls.return_value = ([], [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "medication", "arguments": "{}"},
+                }])
+                result = await engine.execute(
+                    conversation_id="test-conv-leo-report",
+                    messages=[{"role": "system", "content": "sys"}],
+                    tools=[{"function": {"name": "medication"}}],
+                    user_utterance="Leo took his medicine",
+                    max_iterations=3,
+                )
+
+        assert result["stop_reason"] == "tool_calls"
+        assert mock_llm_client.chat_completion.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_trailing_question_mark_never_qualifies(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Even an imperative-verb opener with a trailing '?' reads as a
+        question ('turn off the lights?') — no retry."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._prose_response(
+            "They're already off."
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-qmark",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "control_device"}}],
+                user_utterance="turn off the lights?",
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert mock_llm_client.chat_completion.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_keyword_match_without_action_shape_is_not_retried(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Declarative chatter that happens to carry a keyword ('the lights
+        in here are so warm') must not force a tool call — keyword match
+        alone no longer arms the guard."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_llm_client.chat_completion.return_value = self._prose_response(
+            "They do give off a cozy glow."
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-chatter",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "control_device"}}],
+                user_utterance="the lights in here are so warm",
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert mock_llm_client.chat_completion.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_must_call_guard_exempts_question_shapes(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """allow_direct_answer=False commands keep their must-call semantics
+        for actions, but question shapes are exempt there too."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_conversation_cache.get_force_tool_calls.return_value = False
+        mock_conversation_cache.get_router_decision.return_value = {"used": True}
+        mock_conversation_cache.get_available_commands.return_value = [
+            {
+                "command_name": "get_calendar_events",
+                "keywords": ["calendar", "today"],
+                "allow_direct_answer": False,
+                "parameters": [],
+            },
+        ]
+        mock_llm_client.chat_completion.return_value = self._prose_response(
+            "You could visit the zoo."
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            result = await engine.execute(
+                conversation_id="test-conv-mustcall-q",
+                messages=messages,
+                tools=[{"function": {"name": "get_calendar_events"}}],
+                user_utterance="What should I do with Miles today?",
+                max_iterations=3,
+            )
+
+        assert result["stop_reason"] == "complete"
+        assert mock_llm_client.chat_completion.call_count == 1
+        assert not any(
+            "[MUST_CALL_RETRY]" in str(m.get("content", "")) for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_must_call_guard_still_fires_on_action_shapes(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """Guard-the-guard: the per-command must-call guard keeps its
+        existing semantics on non-question utterances."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        mock_conversation_cache.get_force_tool_calls.return_value = False
+        mock_conversation_cache.get_router_decision.return_value = {"used": True}
+        mock_conversation_cache.get_available_commands.return_value = [
+            {
+                "command_name": "control_device",
+                "keywords": ["lights"],
+                "allow_direct_answer": False,
+                "parameters": [],
+            },
+        ]
+        mock_llm_client.chat_completion.side_effect = [
+            self._prose_response("Sure, lights off."),
+            self._tool_call_response("control_device"),
+        ]
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                mock_executor.execute_tool_calls.return_value = ([], [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "control_device", "arguments": "{}"},
+                }])
+                result = await engine.execute(
+                    conversation_id="test-conv-mustcall-act",
+                    messages=messages,
+                    tools=[{"function": {"name": "control_device"}}],
+                    user_utterance="Turn off the lights",
+                    max_iterations=3,
+                )
+
+        assert result["stop_reason"] == "tool_calls"
+        assert mock_llm_client.chat_completion.call_count == 2
+        assert any(
+            "[MUST_CALL_RETRY]" in str(m.get("content", "")) for m in messages
+        )
+
+
+class TestIdenticalToolCallDedupe:
+    """2026-08-15 prod incident: three get_calendar_events with IDENTICAL
+    args inside 25 seconds — each follow-up re-read the whole calendar
+    aloud. When the model re-requests a client tool call whose (name,
+    canonicalized-args) matches one already issued this conversation within
+    voice.tool_dedupe_window_seconds, the engine must NOT return the 202:
+    it re-calls the LLM once with a system nudge to answer from the results
+    already in context. Whatever comes back is accepted — prose, a
+    different tool call, or (fail-open) the same call again.
+    """
+
+    TOOL_SCHEMA = [{"function": {"name": "get_calendar_events"}}]
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    def _real_cache(self, conversation_id: str):
+        """A REAL ConversationCache seeded for this conversation — exercises
+        record_issued_client_call / get_issued_client_calls end to end."""
+        from app.core.conversation_cache import ConversationCache
+
+        cache = ConversationCache(ttl_minutes=10)
+        cache.set(
+            conversation_id,
+            messages=[],
+            available_commands=[
+                {
+                    "command_name": "get_calendar_events",
+                    "keywords": ["calendar"],
+                    "parameters": [],
+                },
+            ],
+            timezone="UTC",
+            tools=[],
+            node_context={},
+        )
+        cache.set_force_tool_calls(conversation_id, False)
+        return cache
+
+    def _tool_call_response(self, name: str, arguments: dict):
+        return {
+            "choices": [{
+                "message": {"content": json.dumps({
+                    "message": "",
+                    "tool_calls": [{"name": name, "arguments": arguments}],
+                })},
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    def _prose_response(self, message: str):
+        return {
+            "choices": [{
+                "message": {"content": json.dumps({"message": message, "tool_calls": []})},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    def _executor_passthrough(self, mock_executor):
+        def side_effect(tool_calls, **kwargs):
+            return ([], [
+                {
+                    "id": f"call_{i}",
+                    "type": "function",
+                    "function": dict(tc["function"]),
+                }
+                for i, tc in enumerate(tool_calls)
+            ])
+        mock_executor.execute_tool_calls.side_effect = side_effect
+
+    @pytest.mark.asyncio
+    async def test_identical_call_within_window_nudges_and_accepts_prose(
+        self, mock_llm_client
+    ):
+        """The incident shape: same tool + same args again → no 202; one
+        nudge; the prose answer is accepted and the nudge is scrubbed.
+
+        Turn 1 goes through the engine for real so the recorded canonical
+        key reflects exactly what the engine issues (arg normalization
+        included) — the same way production records it."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        conv = "test-conv-dedupe-1"
+        cache = self._real_cache(conv)
+
+        identical = self._tool_call_response(
+            "get_calendar_events",
+            {"resolved_datetimes": ["2026-08-15T00:00:00Z"]},
+        )
+        mock_llm_client.chat_completion.side_effect = [
+            identical,  # turn 1: first (legitimate) issue
+            identical,  # turn 2: identical re-request → nudge
+            self._prose_response("Just the dentist at 3 — nothing else."),
+        ]
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                self._executor_passthrough(mock_executor)
+                turn1 = await engine.execute(
+                    conversation_id=conv,
+                    messages=messages,
+                    tools=list(self.TOOL_SCHEMA),
+                    user_utterance="what's on my calendar today",
+                    max_iterations=4,
+                )
+                assert turn1["stop_reason"] == "tool_calls"
+                assert len(cache.get_issued_client_calls(conv)) == 1
+                result = await engine.execute(
+                    conversation_id=conv,
+                    messages=messages,
+                    tools=list(self.TOOL_SCHEMA),
+                    user_utterance="anything else going on",
+                    max_iterations=4,
+                )
+
+        assert result["stop_reason"] == "complete"
+        assert "dentist" in str(result["assistant_message"])
+        assert mock_llm_client.chat_completion.call_count == 3
+        # The nudge is one-shot — scrubbed once the model replied.
+        assert not any(
+            "[TOOL_DEDUPE]" in str(m.get("content", "")) for m in messages
+        )
+        # The duplicate's assistant message was popped: only turn 1's
+        # legitimate tool_calls message remains in the transcript.
+        assert sum(1 for m in messages if m.get("tool_calls")) == 1
+
+    @pytest.mark.asyncio
+    async def test_different_args_pass_through(self, mock_llm_client):
+        """Same tool with DIFFERENT args is not a duplicate — 202 as usual."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        conv = "test-conv-dedupe-2"
+        cache = self._real_cache(conv)
+
+        mock_llm_client.chat_completion.side_effect = [
+            self._tool_call_response(
+                "get_calendar_events",
+                {"resolved_datetimes": ["2026-08-15T00:00:00Z"]},
+            ),
+            self._tool_call_response(
+                "get_calendar_events",
+                {"resolved_datetimes": ["2026-08-16T00:00:00Z"]},
+            ),
+        ]
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                self._executor_passthrough(mock_executor)
+                turn1 = await engine.execute(
+                    conversation_id=conv,
+                    messages=messages,
+                    tools=list(self.TOOL_SCHEMA),
+                    user_utterance="what's on my calendar today",
+                    max_iterations=3,
+                )
+                assert turn1["stop_reason"] == "tool_calls"
+                result = await engine.execute(
+                    conversation_id=conv,
+                    messages=messages,
+                    tools=list(self.TOOL_SCHEMA),
+                    user_utterance="what about tomorrow",
+                    max_iterations=3,
+                )
+
+        assert result["stop_reason"] == "tool_calls"
+        assert mock_llm_client.chat_completion.call_count == 2
+        assert len(cache.get_issued_client_calls(conv)) == 2
+
+    @pytest.mark.asyncio
+    async def test_expired_window_passes_through(self, mock_llm_client):
+        """An identical call OUTSIDE the window is legitimate — pass it."""
+        import time as _t
+
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        conv = "test-conv-dedupe-3"
+        cache = self._real_cache(conv)
+
+        identical = self._tool_call_response(
+            "get_calendar_events",
+            {"resolved_datetimes": ["2026-08-15T00:00:00Z"]},
+        )
+        mock_llm_client.chat_completion.side_effect = [identical, identical]
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                self._executor_passthrough(mock_executor)
+                turn1 = await engine.execute(
+                    conversation_id=conv,
+                    messages=messages,
+                    tools=list(self.TOOL_SCHEMA),
+                    user_utterance="what's on my calendar today",
+                    max_iterations=3,
+                )
+                assert turn1["stop_reason"] == "tool_calls"
+                # Age the recorded issue beyond the 120s default window.
+                with cache.lock:
+                    for rec in cache.cache[conv]["issued_client_calls"]:
+                        rec["timestamp"] = _t.time() - 300
+                result = await engine.execute(
+                    conversation_id=conv,
+                    messages=messages,
+                    tools=list(self.TOOL_SCHEMA),
+                    user_utterance="check my calendar again",
+                    max_iterations=3,
+                )
+
+        assert result["stop_reason"] == "tool_calls"
+        assert mock_llm_client.chat_completion.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_second_identical_after_nudge_passes_through(
+        self, mock_llm_client
+    ):
+        """Fail-open: if the nudged model STILL wants the same call, it goes
+        through — the model may genuinely want a refresh."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        conv = "test-conv-dedupe-4"
+        cache = self._real_cache(conv)
+
+        identical = self._tool_call_response(
+            "get_calendar_events",
+            {"resolved_datetimes": ["2026-08-15T00:00:00Z"]},
+        )
+        mock_llm_client.chat_completion.side_effect = [
+            identical,  # turn 1: legitimate issue (recorded)
+            identical,  # turn 2, iter 1: duplicate → nudge
+            identical,  # turn 2, iter 2: STILL identical → pass through
+        ]
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                self._executor_passthrough(mock_executor)
+                turn1 = await engine.execute(
+                    conversation_id=conv,
+                    messages=messages,
+                    tools=list(self.TOOL_SCHEMA),
+                    user_utterance="what's on my calendar today",
+                    max_iterations=4,
+                )
+                assert turn1["stop_reason"] == "tool_calls"
+                result = await engine.execute(
+                    conversation_id=conv,
+                    messages=messages,
+                    tools=list(self.TOOL_SCHEMA),
+                    user_utterance="refresh my calendar",
+                    max_iterations=4,
+                )
+
+        assert result["stop_reason"] == "tool_calls", (
+            "One nudge only — a second identical request must pass through"
+        )
+        assert mock_llm_client.chat_completion.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_first_issue_is_recorded_for_later_dedupe(
+        self, mock_llm_client
+    ):
+        """Returning a 202 must record (name, canonical args) so the NEXT
+        identical request this conversation gets deduped."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        conv = "test-conv-dedupe-5"
+        cache = self._real_cache(conv)
+
+        mock_llm_client.chat_completion.return_value = self._tool_call_response(
+            "get_calendar_events",
+            {"resolved_datetimes": ["2026-08-15T00:00:00Z"]},
+        )
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                self._executor_passthrough(mock_executor)
+                result = await engine.execute(
+                    conversation_id=conv,
+                    messages=[{"role": "system", "content": "sys"}],
+                    tools=list(self.TOOL_SCHEMA),
+                    user_utterance="what's on my calendar",
+                    max_iterations=3,
+                )
+
+        assert result["stop_reason"] == "tool_calls"
+        issued = cache.get_issued_client_calls(conv)
+        assert len(issued) == 1
+        assert issued[0]["name"] == "get_calendar_events"
+        assert issued[0]["args_hash"]
+        assert issued[0]["timestamp"] > 0
+
+    @pytest.mark.asyncio
+    async def test_server_tools_are_not_deduped(self, mock_llm_client):
+        """Server tools have their own loop semantics — an identical server
+        call is executed, never nudged, and never recorded."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        conv = "test-conv-dedupe-6"
+        cache = self._real_cache(conv)
+
+        def _native_tool_response(name: str, arguments: dict):
+            return {
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_srv",
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                # The SAME server call twice in a row.
+                return _native_tool_response("recall_memory", {"query": "leo"})
+            return {
+                "choices": [{
+                    "message": {"content": "Leo is your dog."},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+
+        mock_llm_client.chat_completion.side_effect = side_effect
+        # Native provider so server-only results continue the loop in-engine
+        # (the text path returns for external formatting after one round).
+        mock_provider = MagicMock()
+        mock_provider.supports_native_tools = True
+        mock_provider.build_tools.return_value = []
+        mock_provider.sanitize_text.side_effect = lambda s: s
+        engine = ToolExecutionEngine(mock_llm_client, prompt_provider=mock_provider)
+        messages = [{"role": "system", "content": "sys"}]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", cache):
+            with patch("app.core.tool_execution_engine.tool_executor") as mock_executor:
+                # Executor classifies recall_memory as a SERVER tool.
+                mock_executor.execute_tool_calls.return_value = (
+                    [{"role": "tool", "tool_call_id": "call_srv", "content": "{}"}],
+                    [],
+                )
+                result = await engine.execute(
+                    conversation_id=conv,
+                    messages=messages,
+                    tools=[{"function": {"name": "recall_memory"}}],
+                    user_utterance="who is leo",
+                    max_iterations=5,
+                )
+
+        # Both identical server calls executed — no nudge interfered.
+        assert mock_executor.execute_tool_calls.call_count == 2
+        assert result["stop_reason"] == "complete"
+        assert cache.get_issued_client_calls(conv) == []
+        assert not any(
+            "[TOOL_DEDUPE]" in str(m.get("content", "")) for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_stale_dedupe_nudge_scrubbed_on_next_turn_entry(
+        self, mock_llm_client
+    ):
+        """Belt + suspenders: a [TOOL_DEDUPE] nudge left in the cached
+        transcript by a crashed turn is scrubbed on entry, same as stale
+        [MUST_CALL_RETRY] nags."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        conv = "test-conv-dedupe-7"
+        cache = self._real_cache(conv)
+        mock_llm_client.chat_completion.return_value = self._prose_response("Hi!")
+        engine = ToolExecutionEngine(mock_llm_client)
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old turn"},
+            {"role": "system", "content": "[TOOL_DEDUPE] stale nudge from last turn"},
+            {"role": "assistant", "content": "old answer"},
+        ]
+
+        with patch("app.core.tool_execution_engine.conversation_cache", cache):
+            await engine.execute(
+                conversation_id=conv,
+                messages=messages,
+                tools=[],
+                user_utterance="hello there",
+                max_iterations=2,
+            )
+
+        assert not any(
+            "[TOOL_DEDUPE]" in str(m.get("content", "")) for m in messages
+        )
+        assert any(m.get("content") == "old answer" for m in messages)

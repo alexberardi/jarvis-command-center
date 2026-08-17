@@ -508,3 +508,148 @@ class TestSelfPlaybackMediaContext:
         )
         assert hint is not None
         assert "own speaker" in hint
+
+
+class TestFollowUpNamedPersonAddressing:
+    """2026-08-17 prod incident: a follow-up captured "already done. Wow.
+    Miles, come here." — a parent calling their child, a KNOWN household
+    member. Telemetry: wake_verdict=none (no speaker clip → verification
+    never ran), so the unverified-keyed doubt machinery never engaged and
+    the normal follow-up posture answered into the family's conversation.
+
+    A transcript that directly addresses a household member by name is
+    near-certainly not for Jarvis — SHAPE evidence, not acoustic, so the
+    lean applies on ANY verdict. It is a hint, never a hard cut; the
+    imperative device/music guard stays senior; and with no member names
+    (old cache, resolve failure) or no match the hint is byte-identical.
+    """
+
+    INCIDENT = "already done. Wow. Miles, come here."
+    MEMBERS = ["Miles", "Alex"]
+
+    def test_incident_transcript_gets_addressing_lean(self):
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript=self.INCIDENT,
+            member_names=self.MEMBERS,
+        )
+        assert hint is not None
+        assert "directly addresses Miles" in hint
+        assert "another member of this household" in hint
+        assert "<not_for_me/>" in hint
+
+    def test_addressing_lean_is_not_a_hard_cut(self):
+        # The hint must keep the answer path open for "Miles, ask Jarvis
+        # what time it is" style utterances.
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript=self.INCIDENT,
+            member_names=self.MEMBERS,
+        )
+        assert "unless it ALSO asks you something directly" in hint
+
+    def test_applies_on_any_verdict_not_just_doubted(self):
+        # The incident's exact telemetry: no conversation_wake_verdict at
+        # all — the lean must not be keyed on "unverified".
+        for verdict in (None, "verified", "clip_unreliable", "unverified"):
+            hint = build_turn_hint(
+                "follow_up",
+                follow_up_iteration=1,
+                transcript=self.INCIDENT,
+                member_names=self.MEMBERS,
+                conversation_wake_verdict=verdict,
+            )
+            assert "directly addresses Miles" in hint, f"verdict={verdict}"
+
+    def test_no_member_names_is_byte_identical(self):
+        base = build_turn_hint(
+            "follow_up", follow_up_iteration=1, transcript=self.INCIDENT
+        )
+        for names in (None, []):
+            assert build_turn_hint(
+                "follow_up",
+                follow_up_iteration=1,
+                transcript=self.INCIDENT,
+                member_names=names,
+            ) == base
+
+    def test_no_name_match_is_byte_identical(self):
+        transcript = "what about tomorrow then"
+        base = build_turn_hint(
+            "follow_up", follow_up_iteration=1, transcript=transcript
+        )
+        assert build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript=transcript,
+            member_names=self.MEMBERS,
+        ) == base
+
+    def test_jarvis_name_is_excluded(self):
+        # A household member literally named "Jarvis" (or the wake phrase
+        # itself) must never earn the not-for-you lean — "Jarvis, what
+        # time is it" is the MOST directed shape there is.
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript="Jarvis, what about tomorrow",
+            member_names=["Jarvis", "Miles"],
+        )
+        assert "directly addresses" not in hint
+
+    def test_device_command_guard_stays_senior(self):
+        # "Miles, turn off the lights" — imperative device shape wins;
+        # the model must not be talked out of a real command.
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript="Miles, turn off the lights",
+            member_names=self.MEMBERS,
+        )
+        assert "directly addresses" not in hint
+
+    def test_music_control_guard_stays_senior_during_playback(self):
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript="Miles, pause",
+            member_names=self.MEMBERS,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert "directly addresses" not in hint
+
+    def test_doubted_posture_also_carries_the_lean(self):
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=2,
+            transcript=self.INCIDENT,
+            member_names=self.MEMBERS,
+            conversation_wake_verdict="unverified",
+        )
+        assert "suspected detector misfire" in hint
+        assert "directly addresses Miles" in hint
+
+    def test_wake_turns_are_unaffected(self):
+        # Shape lean is follow-up-only: a fresh wake saying a member's
+        # name ("Jarvis, call Miles down for dinner" mis-split) keeps the
+        # directed posture.
+        base = build_turn_hint("wake", wake_confidence=0.9, transcript=self.INCIDENT)
+        assert build_turn_hint(
+            "wake",
+            wake_confidence=0.9,
+            transcript=self.INCIDENT,
+            member_names=self.MEMBERS,
+        ) == base
+
+    def test_hint_stays_bracketed(self):
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript=self.INCIDENT,
+            member_names=self.MEMBERS,
+        )
+        assert hint.startswith("[turn context:")
+        assert hint.endswith("]")
