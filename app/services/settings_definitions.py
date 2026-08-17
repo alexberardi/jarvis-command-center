@@ -615,6 +615,25 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         ),
     ),
     SettingDefinition(
+        key="voice.tool_dedupe_window_seconds",
+        category="voice",
+        value_type="float",
+        default=120.0,
+        description=(
+            "Seconds an issued CLIENT tool call (name + canonicalized "
+            "args) blocks an IDENTICAL re-issue in the same conversation. "
+            "A repeat inside the window is answered with a one-shot system "
+            "nudge ('the results are already in this conversation above — "
+            "answer from them') instead of a 202; whatever the model "
+            "returns next is accepted, and a second identical request "
+            "after the nudge passes through (fail-open — the model may "
+            "genuinely want a refresh). 0 disables. Server tools are "
+            "excluded. Breaks the 2026-08-15 calendar loop: three "
+            "identical get_calendar_events in 25s, each follow-up "
+            "re-reading the whole calendar aloud."
+        ),
+    ),
+    SettingDefinition(
         key="voice.wake_verification_phrase",
         category="voice",
         value_type="string",

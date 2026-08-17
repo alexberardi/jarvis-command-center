@@ -135,6 +135,134 @@ def is_device_command_shaped(text: str | None) -> bool:
     return _DEVICE_COMMAND_RE.match(stripped) is not None
 
 
+# --- Action / report / question shapes (force-tool-calls gate) -------------
+#
+# DOCTRINE: the model decides when to talk and how to answer; guards force
+# tools ONLY where not-acting is a correctness failure — imperative ACTIONS
+# ("turn off the lights", "set a timer") and REPORTS that trigger logging
+# tools ("Leo took his medicine") — NEVER on questions or conversation.
+# Live incident (2026-08-17): "What should I do with Miles today?"
+# keyword-matched a calendar command, the force-tool-calls guard popped the
+# model's prose answer and [MUST_CALL_RETRY]-ed it into get_calendar_events —
+# the whole calendar read aloud in answer to an open question. These
+# detectors give the guard a SHAPE requirement on top of its keyword
+# requirement. Like every detector in this module they classify FORM, not
+# meaning.
+
+# Imperative verbs that open an actionable command. Extends the household-
+# device vocabulary with the wider "do something for me" verbs that map to
+# tools (timers, reminders, logging, media, communication). Generic
+# human-directed verbs ("eat", "get", "take") stay out — overheard family
+# imperatives must not earn a forced tool call.
+_ACTION_COMMAND_VERBS = _DEVICE_COMMAND_VERBS + (
+    "play", "log", "add", "remind", "cancel", "mark", "record", "create",
+    "delete", "remove", "schedule", "send", "text", "call", "snooze",
+    "skip", "mute", "unmute", "check", "save", "note", "clear",
+)
+
+_ACTION_COMMAND_RE: re.Pattern[str] = re.compile(
+    rf"^\s*(?:hey\s+)?(?:\w+[,.!]\s+)?(?:please,?\s+)?"
+    rf"(?:{'|'.join(_ACTION_COMMAND_VERBS)})\b\s+\S+",
+    re.IGNORECASE,
+)
+
+# Leading words that mark an utterance as a QUESTION (interrogative or
+# auxiliary-fronted). Question shapes never qualify for tool-forcing — the
+# model owns how to answer a question.
+_QUESTION_LEAD_WORDS = (
+    "what", "how", "why", "when", "where", "who", "whose", "which",
+    "should", "could", "can", "would", "will", "shall", "may", "might",
+    "do", "does", "did", "is", "are", "am", "was", "were", "have", "has",
+    "isn't", "aren't", "don't", "doesn't", "didn't", "won't", "wouldn't",
+    "couldn't", "shouldn't",
+)
+
+_QUESTION_LEAD_RE: re.Pattern[str] = re.compile(
+    rf"^\s*(?:hey\s+)?(?:\w+[,.!]\s+)?(?:please,?\s+)?"
+    rf"(?:{'|'.join(_QUESTION_LEAD_WORDS)})\b",
+    re.IGNORECASE,
+)
+
+# Report shapes that feed logging tools: "<subject> took/gave/administered
+# <possessive/object> ..." — "Leo took his medicine", "I took my pills",
+# "she gave the dog its meds". The verb vocabulary mirrors the medication
+# command's declared keywords (took/take my, gave, administered). Kept
+# moderately generous on purpose: the force-tool gate ALSO requires a
+# command-keyword match, so "I took a walk" never forces anything.
+_REPORT_SHAPE_RE: re.Pattern[str] = re.compile(
+    r"^\s*(?:hey\s+)?(?:\w+[,.!]\s+)?"
+    r"(?:the\s+)?[\w']+\s+"
+    r"(?:just\s+|already\s+|finally\s+)?"
+    r"(?:took|takes|taken|gave|given|administered|got)\s+"
+    r"(?:his|her|their|my|our|its|the|a|an|some|him|them)\b",
+    re.IGNORECASE,
+)
+
+
+def is_question_shaped(text: str | None) -> bool:
+    """True when the transcript reads as a question.
+
+    A trailing/embedded ``?`` or a leading interrogative / fronted-auxiliary
+    word ("what", "how", "should", "can", "is", "do", ...) after an optional
+    politeness/wake prefix. Question shapes are EXEMPT from every
+    tool-forcing guard: the model decides how to answer a question, even
+    when the words keyword-match a command (the 2026-08-17 "What should I
+    do with Miles today?" calendar incident).
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if "?" in stripped:
+        return True
+    return _QUESTION_LEAD_RE.match(stripped) is not None
+
+
+def is_action_command_shaped(text: str | None) -> bool:
+    """True when the transcript reads as an imperative actionable command.
+
+    Generalizes ``is_device_command_shaped`` beyond household-device verbs:
+    an imperative action verb ("set", "start", "stop", "turn", "play",
+    "pause", "lock", "log", "add", "remind", "cancel", ...) followed by an
+    object, single-speaker (no dash markers), and not a question. This is
+    the ONLY imperative shape allowed to arm the force-tool-calls guard —
+    not-acting on "turn off the living room lights" is a correctness
+    failure; not-calling-a-tool on chatter never is.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if is_question_shaped(stripped):
+        return False
+    if has_multi_speaker_markers(stripped):
+        return False
+    return _ACTION_COMMAND_RE.match(stripped) is not None
+
+
+def is_report_shaped(text: str | None) -> bool:
+    """True when the transcript reads as a done-that report for a logger.
+
+    Shape: ``<subject> took/gave/administered <possessive/object> ...`` —
+    "Leo took his medicine", "I took my pills". Reports are the second (and
+    last) utterance family where a forced tool call is legitimate: failing
+    to log a reported dose is a correctness failure. Single-speaker, never
+    a question.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if is_question_shaped(stripped):
+        return False
+    if has_multi_speaker_markers(stripped):
+        return False
+    return _REPORT_SHAPE_RE.match(stripped) is not None
+
+
 def is_music_control_shaped(text: str | None) -> bool:
     """True when the transcript reads as a music-control command.
 

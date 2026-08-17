@@ -402,3 +402,120 @@ class TestAddressedHouseholdMember:
         assert addressed_household_member(
             "Miles, come here", [None, 42, "Miles"]  # type: ignore[list-item]
         ) == "Miles"
+
+
+class TestIsQuestionShaped:
+    """Question shapes are exempt from every tool-forcing guard (2026-08-17
+    doctrine: the model owns how to answer questions)."""
+
+    def test_incident_utterance_is_question(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert is_question_shaped("What should I do with Miles today?")
+
+    def test_leading_question_word_without_question_mark(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert is_question_shaped("what does my schedule look like today")
+        assert is_question_shaped("should I bring an umbrella")
+        assert is_question_shaped("can you turn on the lights")
+        assert is_question_shaped("is there anything on my calendar")
+        assert is_question_shaped("do we have milk")
+
+    def test_trailing_question_mark_alone_qualifies(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert is_question_shaped("turn off the lights?")
+
+    def test_wake_prefix_is_skipped(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert is_question_shaped("Jarvis, what is on my calendar")
+        assert is_question_shaped("hey jarvis, when is my meeting")
+
+    def test_imperatives_and_reports_are_not_questions(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert not is_question_shaped("Turn off the living room lights")
+        assert not is_question_shaped("Leo took his medicine")
+        assert not is_question_shaped("Set a timer for ten minutes")
+
+    def test_empty_and_none(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert not is_question_shaped(None)
+        assert not is_question_shaped("")
+        assert not is_question_shaped("   ")
+
+
+class TestIsActionCommandShaped:
+    """Generalized imperative shape — the only utterance family (with
+    reports) allowed to arm the force-tool-calls guard."""
+
+    def test_device_imperatives_still_match(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert is_action_command_shaped("Turn off the living room lights")
+        assert is_action_command_shaped("set the thermostat to 68")
+        assert is_action_command_shaped("lock the front door")
+
+    def test_extended_action_verbs_match(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert is_action_command_shaped("Play some jazz")
+        assert is_action_command_shaped("Remind me to call mom")
+        assert is_action_command_shaped("Add milk to the shopping list")
+        assert is_action_command_shaped("Cancel my three o'clock")
+        assert is_action_command_shaped("Log that Leo took his medicine")
+
+    def test_questions_never_match(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert not is_action_command_shaped("What should I do with Miles today?")
+        assert not is_action_command_shaped("can you turn on the lights")
+        assert not is_action_command_shaped("turn off the lights?")
+
+    def test_conversational_prose_does_not_match(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert not is_action_command_shaped("Thank you.")
+        assert not is_action_command_shaped("Yum.")
+        assert not is_action_command_shaped("the lights in here are so warm")
+
+    def test_multi_speaker_transcripts_do_not_match(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert not is_action_command_shaped("- Uh-huh. - Turn it off.")
+
+    def test_empty_and_none(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert not is_action_command_shaped(None)
+        assert not is_action_command_shaped("")
+
+
+class TestIsReportShaped:
+    """Reports feeding logging tools ("Leo took his medicine") — the second
+    utterance family where a forced tool call is legitimate."""
+
+    def test_third_person_medication_report(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert is_report_shaped("Leo took his medicine")
+        assert is_report_shaped("Leo took his medicine.")
+
+    def test_first_person_medication_report(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert is_report_shaped("I took my pills")
+        assert is_report_shaped("I just took my morning meds")
+
+    def test_gave_and_administered_forms(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert is_report_shaped("She gave the dog its meds")
+        assert is_report_shaped("Sam administered the insulin")
+
+    def test_questions_never_match(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert not is_report_shaped("did Leo take his medicine?")
+        assert not is_report_shaped("did I take my pills")
+
+    def test_conversational_prose_does_not_match(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert not is_report_shaped("Thank you.")
+        assert not is_report_shaped("that was so good")
+
+    def test_multi_speaker_transcripts_do_not_match(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert not is_report_shaped("- Leo took his medicine. - Good boy.")
+
+    def test_empty_and_none(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert not is_report_shaped(None)
+        assert not is_report_shaped("")

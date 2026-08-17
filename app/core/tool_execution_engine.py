@@ -5,6 +5,7 @@ This module handles the tool execution loop: call LLM, execute server tools,
 repeat until completion or client tool calls are needed.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +38,11 @@ from app.core.interfaces.ijarvis_prompt_provider import IJarvisPromptProvider
 from app.core.tool_builder import ToolBuilder
 from app.core.tool_executor import tool_executor
 from app.core.tool_routing import collect_tool_keywords, utterance_matches_keywords
+from app.core.transcript_filter import (
+    is_action_command_shaped,
+    is_question_shaped,
+    is_report_shaped,
+)
 from app.core.tool_call_parser import tool_call_parser
 from app.core.utils.latency_logger import latency_logger
 
@@ -125,6 +131,33 @@ def _is_retry_nag(msg: Dict[str, Any], tag: str = "[MUST_CALL_RETRY]") -> bool:
     )
 
 
+# One-shot system nudge injected when the model re-requests a CLIENT tool
+# call identical to one already issued this conversation (see the
+# identical-tool-call dedupe in execute()). Standalone message, same
+# hygiene rules as [MUST_CALL_RETRY].
+_TOOL_DEDUPE_TAG = "[TOOL_DEDUPE]"
+
+
+def _canonical_args_key(arguments: Any) -> str | None:
+    """Stable digest of a tool call's arguments for identical-call dedupe.
+
+    Parses the JSON argument payload and re-serializes with sorted keys so
+    key order / whitespace differences can't defeat matching, then hashes.
+    Returns None when the arguments can't be parsed — dedupe then FAILS
+    OPEN for that call (an un-canonicalizable call is never blocked).
+    """
+    try:
+        parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if parsed is None:
+        parsed = {}
+    try:
+        canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 class ToolExecutionEngine:
     """
@@ -197,9 +230,15 @@ class ToolExecutionEngine:
         # (core_rules.py), and a substring scrub deletes messages[0] — the
         # persona, rules, and every tool schema. Never touch the leading
         # system prefix.
-        if any(_is_retry_nag(m) for m in messages[1:]):
-            logger.info("Scrubbing stale [MUST_CALL_RETRY] messages from prior turns")
-            messages[1:] = [m for m in messages[1:] if not _is_retry_nag(m)]
+        # [TOOL_DEDUPE] nudges get the same one-shot hygiene.
+        _stale_nag_tags = ("[MUST_CALL_RETRY]", _TOOL_DEDUPE_TAG)
+
+        def _is_stale_nag(m: Dict[str, Any]) -> bool:
+            return any(_is_retry_nag(m, tag) for tag in _stale_nag_tags)
+
+        if any(_is_stale_nag(m) for m in messages[1:]):
+            logger.info("Scrubbing stale steering nags from prior turns")
+            messages[1:] = [m for m in messages[1:] if not _is_stale_nag(m)]
 
         # Build adapter_settings from node's adapter_hash if present
         node_context = conversation_cache.get_node_context(conversation_id) or {}
@@ -601,6 +640,72 @@ class ToolExecutionEngine:
         # clearly-directed wakes (see sentinel_double_check).
         double_checked: bool = False
         _DC_TAG = "[NOT_FOR_ME_DOUBLE_CHECK]"
+        # Identical-tool-call dedupe state (2026-08-15 incident: three
+        # get_calendar_events with identical args in 25s — each follow-up
+        # re-read the whole calendar aloud). Keys we already nudged about
+        # this turn: a SECOND identical request after the nudge passes
+        # through (fail-open — the model may genuinely want a refresh).
+        dedupe_nudged_keys: set[tuple[str, str]] = set()
+        # The pending nudge (tool + seconds_since) awaiting an outcome, for
+        # the structured tool_dedupe_nudge log.
+        dedupe_nudge_info: Dict[str, Any] | None = None
+
+        def _log_dedupe_outcome(outcome: str) -> None:
+            nonlocal dedupe_nudge_info
+            if dedupe_nudge_info is None:
+                return
+            logger.info(
+                "tool_dedupe_nudge tool=%s seconds_since=%.1f outcome=%s",
+                dedupe_nudge_info["tool"],
+                dedupe_nudge_info["seconds_since"],
+                outcome,
+            )
+            dedupe_nudge_info = None
+
+        def _find_duplicate_issued_call(
+            calls: List[Dict[str, Any]],
+        ) -> tuple[str, str, float] | None:
+            """First CLIENT call in ``calls`` identical (name + canonical
+            args) to one already issued this conversation inside the dedupe
+            window. Server tools never reach this path — they have their own
+            loop semantics. Returns (name, args_key, seconds_since) or None;
+            every failure mode fails OPEN (call goes through)."""
+            try:
+                window = float(
+                    get_settings_service().get_float(
+                        "voice.tool_dedupe_window_seconds", 120.0
+                    )
+                )
+            except (TypeError, ValueError):
+                window = 120.0
+            if window <= 0:
+                return None
+            issued = conversation_cache.get_issued_client_calls(conversation_id)
+            if not isinstance(issued, list) or not issued:
+                return None
+            now = _time.time()
+            for call in calls:
+                func = call.get("function", {})
+                name = func.get("name") if isinstance(func, dict) else None
+                if not name:
+                    continue
+                args_key = _canonical_args_key(func.get("arguments"))
+                if args_key is None:
+                    continue
+                if (name, args_key) in dedupe_nudged_keys:
+                    continue  # already nudged once — pass through
+                for rec in issued:
+                    if not isinstance(rec, dict):
+                        continue
+                    ts = rec.get("timestamp")
+                    if (
+                        rec.get("name") == name
+                        and rec.get("args_hash") == args_key
+                        and isinstance(ts, (int, float))
+                        and (now - ts) <= window
+                    ):
+                        return name, args_key, now - ts
+            return None
         # Per-iteration completion budget. The double-check pass runs with
         # /think and needs real reasoning room — 256 truncated it
         # mid-thought in the 2026-07-27 validation run (finish=length).
@@ -781,6 +886,16 @@ class ToolExecutionEngine:
                     if _DC_TAG not in str(m.get("content", ""))
                 ]
 
+            # Same hygiene for the identical-tool-call dedupe nudge: it is a
+            # one-shot steering message, scrubbed as soon as the model has
+            # replied to it so it can't suppress legitimate tool calls on
+            # later turns.
+            if dedupe_nudge_info is not None:
+                messages[:] = [
+                    m for m in messages
+                    if not _is_retry_nag(m, _TOOL_DEDUPE_TAG)
+                ]
+
             # ``<not_for_me/>`` short-circuit. Must run BEFORE the
             # force-tool-calls / must-call retry guards below: those treat
             # ``finish_reason="stop"`` with no tool call as "the model
@@ -934,33 +1049,64 @@ class ToolExecutionEngine:
                 # "turn on the lights" → control_device) all carried command
                 # keywords in the utterance. So: only force a retry when the
                 # utterance keyword-matches a declared command/tool keyword.
-                # If no keywords are declared at all (old node clients) or
-                # the utterance is unknown, keep the legacy always-retry
-                # behavior — the gate only ever skips on positive evidence
-                # that no tool was being addressed.
+                #
+                # Shape gate (2026-08-17 incident): keywords alone are not
+                # enough. "What should I do with Miles today?" matched a
+                # calendar keyword, so the guard popped the model's prose and
+                # retried it into get_calendar_events — the whole calendar
+                # read aloud in answer to an open question. DOCTRINE: the
+                # model decides when to talk and how to answer; the guard
+                # forces tools ONLY where not-acting is a correctness
+                # failure. Retry therefore requires the utterance to be
+                # ACTION-shaped (imperative command: "turn off the lights")
+                # or REPORT-shaped ("Leo took his medicine") — QUESTION
+                # shapes never qualify, even with keyword matches. Both
+                # requirements (keyword AND shape) must hold. Without an
+                # utterance the gates have nothing to classify — keep the
+                # legacy always-retry behavior; an empty keyword pool (old
+                # node clients) only relaxes the keyword half.
                 force_tools = conversation_cache.get_force_tool_calls(conversation_id)
                 retry_count = _must_call_retry_count()
+                utterance_is_question = bool(user_utterance) and is_question_shaped(
+                    user_utterance
+                )
                 if (
                     force_tools
                     and retry_count < 2
                     and not double_checked
                     and not has_terminal_sentinel
+                    and user_utterance
                 ):
-                    keyword_pool = collect_tool_keywords(
-                        conversation_cache.get_available_commands(conversation_id),
-                        conversation_cache.get_tools(conversation_id),
-                        tools,
-                    )
-                    if (
-                        user_utterance
-                        and keyword_pool
-                        and not utterance_matches_keywords(user_utterance, keyword_pool)
-                    ):
+                    if utterance_is_question:
                         logger.info(
-                            "Force-tool-calls guard skipped — utterance matches "
-                            "no command keywords; accepting direct answer"
+                            "Force-tool-calls guard skipped — question-shaped "
+                            "utterance; the model owns how to answer questions"
                         )
                         force_tools = False
+                    elif not (
+                        is_action_command_shaped(user_utterance)
+                        or is_report_shaped(user_utterance)
+                    ):
+                        logger.info(
+                            "Force-tool-calls guard skipped — utterance is "
+                            "neither action- nor report-shaped; accepting "
+                            "direct answer"
+                        )
+                        force_tools = False
+                    else:
+                        keyword_pool = collect_tool_keywords(
+                            conversation_cache.get_available_commands(conversation_id),
+                            conversation_cache.get_tools(conversation_id),
+                            tools,
+                        )
+                        if keyword_pool and not utterance_matches_keywords(
+                            user_utterance, keyword_pool
+                        ):
+                            logger.info(
+                                "Force-tool-calls guard skipped — utterance matches "
+                                "no command keywords; accepting direct answer"
+                            )
+                            force_tools = False
                 # A prose answer produced by the double-check rescue is the
                 # rescue — never feed it back into the must-call machinery
                 # that manufactured the corner in the first place.
@@ -993,12 +1139,23 @@ class ToolExecutionEngine:
                     and router_decision.get("used", False)
                 )
                 must_call_tools = _get_must_call_tools()
+                # allow_direct_answer=False commands explicitly opted in to
+                # forced calls, so the action/report shape requirement does
+                # NOT apply here — but question shapes are exempt even so:
+                # a question is never a correctness failure to answer in
+                # prose (same doctrine as the force-tools gate above).
+                if must_call_tools and router_matched and utterance_is_question:
+                    logger.info(
+                        "Must-call guard skipped — question-shaped utterance "
+                        "is exempt from tool-forcing"
+                    )
                 if (
                     must_call_tools
                     and router_matched
                     and retry_count < 1
                     and not double_checked
                     and not has_terminal_sentinel
+                    and not utterance_is_question
                 ):
                     # Same stash as the force-tools guard above.
                     if isinstance(assistant_message, str) and assistant_message.strip():
@@ -1045,6 +1202,10 @@ class ToolExecutionEngine:
                             "tts sanitize trimmed %d chars off response",
                             len(original) - len(cleaned),
                         )
+                # A prose answer after a dedupe nudge is the intended
+                # outcome — the model answered from the results already in
+                # context instead of re-running the tool.
+                _log_dedupe_outcome("prose_accepted")
                 _log_usage(iteration + 1, "complete")
                 result = {
                     "stop_reason": "complete",
@@ -1182,6 +1343,48 @@ class ToolExecutionEngine:
                             client_calls, all_tools, user_utterance, self.llm_client
                         )
 
+                    # Identical-tool-call dedupe (2026-08-15 incident: three
+                    # get_calendar_events with identical args in 25s — each
+                    # follow-up re-read the whole calendar aloud). When a
+                    # CLIENT call matches one already issued in this
+                    # conversation inside voice.tool_dedupe_window_seconds,
+                    # do NOT return the 202: re-call the LLM once with a
+                    # system nudge to answer from the results already above.
+                    # Whatever it returns next is accepted — prose, a
+                    # DIFFERENT tool call, or even the same call again
+                    # (fail-open: the model may genuinely want a refresh).
+                    # Server tools are excluded — they never reach this path.
+                    duplicate = _find_duplicate_issued_call(client_calls)
+                    if duplicate is not None:
+                        dup_name, dup_key, seconds_since = duplicate
+                        dedupe_nudged_keys.add((dup_name, dup_key))
+                        dedupe_nudge_info = {
+                            "tool": dup_name,
+                            "seconds_since": seconds_since,
+                        }
+                        logger.info(
+                            "tool_dedupe_nudge tool=%s seconds_since=%.1f "
+                            "outcome=nudge_issued",
+                            dup_name,
+                            seconds_since,
+                        )
+                        # Drop the assistant message carrying the duplicate
+                        # call so the transcript never holds an unfulfilled
+                        # tool_calls entry, then nudge.
+                        if messages and messages[-1].get("role") == "assistant":
+                            messages.pop()
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                f"{_TOOL_DEDUPE_TAG} The results of {dup_name} "
+                                "with those arguments are already in this "
+                                "conversation above — answer from them "
+                                "concisely; do not re-run the tool or repeat "
+                                "the full results aloud."
+                            ),
+                        })
+                        continue
+
                     invalid_params = _validate_client_tool_params(client_calls)
                     if invalid_params:
                         max_retries = _env_int("JARVIS_INVALID_PARAM_RETRY_MAX", 1 if small_mode else 2)
@@ -1196,6 +1399,28 @@ class ToolExecutionEngine:
                             messages.append({"role": "system", "content": retry_message})
                             logger.info("Invalid parameter guard triggered; retrying tool call formatting")
                             continue
+
+                    # Record what we're issuing so a later identical request
+                    # in this conversation can be deduped, and resolve any
+                    # pending nudge's outcome.
+                    _passed_through_repeat = False
+                    for _cc in client_calls:
+                        _fn = _cc.get("function", {})
+                        _name = _fn.get("name") if isinstance(_fn, dict) else None
+                        if not _name:
+                            continue
+                        _args_key = _canonical_args_key(_fn.get("arguments"))
+                        if _args_key is None:
+                            continue
+                        if (_name, _args_key) in dedupe_nudged_keys:
+                            _passed_through_repeat = True
+                        conversation_cache.record_issued_client_call(
+                            conversation_id, _name, _args_key
+                        )
+                    _log_dedupe_outcome(
+                        "repeat_pass_through" if _passed_through_repeat
+                        else "different_tool_call"
+                    )
 
                     logger.info(f"Returning {len(client_calls)} client tool calls (no server tools to wait for)")
                     _log_usage(iteration + 1, "tool_calls")

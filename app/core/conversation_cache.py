@@ -315,6 +315,45 @@ class ConversationCache:
             return entry.get('referenced_items') or []
 
 
+    def record_issued_client_call(
+        self, conversation_id: str, tool_name: str, args_hash: str
+    ) -> None:
+        """Record a CLIENT tool call issued to the node this conversation.
+
+        Feeds the identical-tool-call dedupe in the tool execution engine
+        (2026-08-15 incident: three get_calendar_events with identical args
+        in 25s). ``args_hash`` is the engine's canonicalized-argument digest.
+        Server tools are never recorded — they have their own loop
+        semantics. Missing/expired conversations are a silent no-op (the
+        dedupe fails open)."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                return
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                return
+            entry.setdefault('issued_client_calls', []).append({
+                'name': tool_name,
+                'args_hash': args_hash,
+                'timestamp': time.time(),
+            })
+
+    def get_issued_client_calls(self, conversation_id: str) -> List[Dict]:
+        """Client tool calls issued this conversation (empty if none/expired).
+
+        Each record: {'name': str, 'args_hash': str, 'timestamp': float}."""
+        with self.lock:
+            if conversation_id not in self.cache:
+                return []
+            entry = self.cache[conversation_id]
+            age_seconds = time.time() - entry['timestamp']
+            if age_seconds > self.ttl_seconds:
+                del self.cache[conversation_id]
+                return []
+            return list(entry.get('issued_client_calls') or [])
+
     def add_message(self, conversation_id: str, message: ConversationMessage) -> None:
         """Add a message to the existing conversation."""
         with self.lock:
