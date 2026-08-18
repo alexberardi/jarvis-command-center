@@ -1,10 +1,16 @@
 """Shared read/write of the per-household ``signals.automations`` setting.
 
 The setting is a JSON object mapping a signal kind to
-``{"instruction": str, "enabled": bool}`` — the free-text rule a household admin
-authored on the signal-automations screen. Both the mobile authoring endpoint
-(read + write) and the execution reaction (read the enabled instruction) go
-through here so the storage shape lives in exactly one place.
+``{"instruction": str, "enabled": bool, "delivery": "automatic"|"notification"}``
+— the free-text rule a household admin authored on the signal-automations screen,
+plus how they want it delivered. Both the mobile authoring endpoint (read + write)
+and the execution reaction (read the enabled rule) go through here so the storage
+shape lives in exactly one place.
+
+``delivery`` is the USER'S per-rule choice — "automatic" runs the action
+immediately, "notification" proposes it as a tap-to-confirm card. It defaults to
+the safe "notification" when unset (legacy rules), so nothing runs unattended
+unless the user opts into it.
 """
 
 from __future__ import annotations
@@ -16,6 +22,14 @@ from typing import Any
 logger = logging.getLogger("uvicorn")
 
 SETTING_KEY = "signals.automations"
+
+DELIVERY_MODES = ("automatic", "notification")
+DEFAULT_DELIVERY = "notification"
+
+
+def normalize_delivery(value: Any) -> str:
+    """Coerce a stored/received delivery value to a valid mode (safe default)."""
+    return value if value in DELIVERY_MODES else DEFAULT_DELIVERY
 
 
 def load_rules(household_id: str) -> dict[str, dict[str, Any]]:
@@ -45,10 +59,14 @@ def save_rules(household_id: str, rules: dict[str, dict[str, Any]]) -> bool:
     )
 
 
-def get_enabled_instruction(household_id: str, kind: str) -> str | None:
-    """The household's ENABLED, non-blank instruction for ``kind`` — or None if
-    there is no rule, it's disabled, or the text is empty. This is the execution
-    gate: no enabled instruction ⇒ the automation reaction does nothing."""
+def get_enabled_rule(household_id: str, kind: str) -> dict[str, str] | None:
+    """The household's ENABLED rule for ``kind`` as
+    ``{"instruction": str, "delivery": "automatic"|"notification"}`` — or None if
+    there is no rule, it's disabled, or the instruction is blank. This is the
+    execution gate: no enabled rule ⇒ the automation reaction does nothing.
+    Delivery is normalized to a valid mode (safe default)."""
     rule = load_rules(household_id).get(kind) or {}
     instruction = (rule.get("instruction") or "").strip()
-    return instruction if instruction and rule.get("enabled") else None
+    if not (instruction and rule.get("enabled")):
+        return None
+    return {"instruction": instruction, "delivery": normalize_delivery(rule.get("delivery"))}

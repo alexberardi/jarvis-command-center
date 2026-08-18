@@ -54,16 +54,6 @@ _LLM_MAX_TOKENS = 512
 _DISPATCH_TIMEOUT_S = 20.0
 _TOOLS_TIMEOUT_S = 4.0
 
-# Reversible = safe to auto-run. Everything NOT in here (incl. unknown) → confirm.
-_REVERSIBLE_CONTROL_ACTIONS = frozenset(
-    {
-        "turn_on", "turn_off", "lock", "play", "pause", "stop",
-        "volume_up", "volume_down", "next", "previous",
-        "set_color", "set_temperature", "set_mode", "set_brightness",
-    }
-)
-_REVERSIBLE_COMMANDS = frozenset({"reminder", "get_drive_time"})
-
 # In-process per-(household, user, kind) signature of the last signal we acted on,
 # so a heartbeat re-assert / calendar re-emit doesn't re-run the LLM + re-actuate.
 # Resets on restart (a first post-restart signal acts once). See presence_automation
@@ -74,18 +64,6 @@ _last_signature: dict[tuple[str, str, str], str] = {}
 def clear_state() -> None:
     """Test hook — drop the per-(household, user, kind) dedup memory."""
     _last_signature.clear()
-
-
-# ── classification ──────────────────────────────────────────────────────────
-def _classify(command_name: str, arguments: dict[str, Any]) -> str:
-    """'reversible' (auto-run) or 'sensitive' (tap-to-confirm). Fail-safe: any
-    command/action we don't explicitly recognize as reversible → sensitive."""
-    if command_name == "control_device":
-        action = str(arguments.get("action", "")).strip().lower()
-        return "reversible" if action in _REVERSIBLE_CONTROL_ACTIONS else "sensitive"
-    if command_name in _REVERSIBLE_COMMANDS:
-        return "reversible"
-    return "sensitive"
 
 
 def _signature(facts: dict[str, Any]) -> str:
@@ -184,10 +162,11 @@ def _dispatch_ok(out: Any) -> bool:
     return bool(isinstance(out, dict) and out.get("success", True) and not out.get("timeout"))
 
 
-async def _dispatch_reversible(
+async def _dispatch_now(
     node_id: str, command_name: str, arguments: dict[str, Any], user_id: int | None
 ) -> bool:
-    """Run a reversible action on the node immediately (no confirmation)."""
+    """Run the chosen action on the node immediately (automatic delivery — no
+    confirmation)."""
     from app.services.node_command_service import dispatch_node_command
 
     out = await dispatch_node_command(
@@ -267,24 +246,28 @@ def _emit_confirm_card(
 async def react_to_signal_automation(
     ctx: ReactionContext,
     *,
-    get_instruction: Callable[[str, str], str | None] | None = None,
+    get_rule: Callable[[str, str], dict[str, str] | None] | None = None,
     resolve: Callable[..., Awaitable[tuple[str | None, list[dict[str, Any]]]]] | None = None,
     pick: Callable[..., Awaitable[tuple[str, dict[str, Any]] | None]] | None = None,
-    run_reversible: Callable[..., Awaitable[bool]] | None = None,
+    run_automatic: Callable[..., Awaitable[bool]] | None = None,
     emit_confirm: Callable[..., bool] | None = None,
 ) -> str:
-    """Interpret the household's instruction for this signal and act.
+    """Interpret the household's instruction for this signal and act, per the rule's
+    DELIVERY choice (the user's, not our guess): ``automatic`` runs the chosen
+    action immediately; ``notification`` proposes it as a tap-to-confirm card.
 
-    Status strings (logging/tests): ``no_rule`` (no enabled instruction),
-    ``unchanged`` (a re-assert we already handled), ``no_tools`` (no reachable node
-    / tools), ``no_action`` (the model chose nothing), ``ran:<cmd>`` /
-    ``failed:<cmd>`` (reversible auto-run), ``confirm:<cmd>`` / ``confirm_failed``
-    (sensitive → card), ``error``. Never raises.
+    Status strings (logging/tests): ``no_rule`` (no enabled rule), ``unchanged``
+    (a re-assert we already handled), ``no_tools`` (no reachable node / tools),
+    ``no_action`` (the model chose nothing), ``ran:<cmd>`` / ``failed:<cmd>``
+    (automatic delivery), ``confirm:<cmd>`` / ``confirm_failed`` (notification
+    delivery), ``error``. Never raises.
     """
-    get_instruction = get_instruction or _get_enabled_instruction
-    instruction = get_instruction(ctx.household_id, ctx.kind)
-    if not instruction:
+    get_rule = get_rule or _get_enabled_rule
+    rule = get_rule(ctx.household_id, ctx.kind)
+    if not rule:
         return "no_rule"
+    instruction = rule["instruction"]
+    delivery = rule.get("delivery") or "notification"
 
     # Act once per distinct signal occurrence (skip heartbeat re-asserts / re-emits).
     sig = _signature(ctx.facts or {})
@@ -310,9 +293,9 @@ async def react_to_signal_automation(
             return "no_action"
 
         command_name, arguments = chosen
-        if _classify(command_name, arguments) == "reversible":
-            run_reversible = run_reversible or _dispatch_reversible
-            ok = await run_reversible(node_id, command_name, arguments, ctx.user_id)
+        if delivery == "automatic":
+            run_automatic = run_automatic or _dispatch_now
+            ok = await run_automatic(node_id, command_name, arguments, ctx.user_id)
             return f"ran:{command_name}" if ok else f"failed:{command_name}"
 
         emit_confirm = emit_confirm or _emit_confirm_card
@@ -333,10 +316,10 @@ async def react_to_signal_automation(
         return "error"
 
 
-def _get_enabled_instruction(household_id: str, kind: str) -> str | None:
-    from app.services.signal_automation_store import get_enabled_instruction
+def _get_enabled_rule(household_id: str, kind: str) -> dict[str, str] | None:
+    from app.services.signal_automation_store import get_enabled_rule
 
-    return get_enabled_instruction(household_id, kind)
+    return get_enabled_rule(household_id, kind)
 
 
 # ── the confirm-card server callback ────────────────────────────────────────
