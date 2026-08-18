@@ -512,6 +512,8 @@ async def startup_event():
     set_reaction_loop(asyncio.get_running_loop())
     from app.services.signal_reaction_bridge import register_leave_by_reaction
     register_leave_by_reaction()
+    from app.services.signal_automation_executor import register_signal_automation_executor
+    register_signal_automation_executor()
 
     async def _periodic_phone_reaper() -> None:
         while True:

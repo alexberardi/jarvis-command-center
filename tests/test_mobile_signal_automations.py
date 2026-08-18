@@ -18,7 +18,9 @@ BASE = "/api/v0/mobile/household/hh-1/signal-automations"
 TOKEN_UID = 42
 MOD = "app.api.mobile_signal_automations"
 ROLE = f"{MOD}.verify_household_role"
-SETTINGS = f"{MOD}.get_settings_service"
+# Reads/writes go through the shared store, which imports get_settings_service
+# function-locally — so patch it at the source module.
+SETTINGS = "app.services.settings_service.get_settings_service"
 OBSERVED = f"{MOD}._observed_kinds"
 
 

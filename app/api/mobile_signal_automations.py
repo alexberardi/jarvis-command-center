@@ -19,7 +19,6 @@ Auth mirrors the household-settings + presence routers: JWT + household role
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -29,32 +28,16 @@ from pydantic import BaseModel, Field
 
 from app.deps import AuthenticatedUser, verify_household_role, verify_user_jwt
 from app.services import signal_catalog
-from app.services.settings_service import get_settings_service
+from app.services.signal_automation_store import load_rules, save_rules
 
 logger = logging.getLogger("uvicorn")
 
 router = APIRouter(tags=["mobile-signal-automations"])
 
-# The per-household JSON setting holding all rules (declared in settings_definitions).
-_SETTING_KEY = "signals.automations"
 _READ_ROLE = "member"
 _WRITE_ROLE = "admin"
 # Bounds the free text (it's read at fire time into a prompt) — generous but finite.
 _MAX_INSTRUCTION_CHARS = 500
-
-
-def _load_rules(household_id: str) -> dict[str, dict[str, Any]]:
-    """Parse the household's ``signals.automations`` setting. Never raises — a
-    missing/garbage value reads as no rules (the automations screen must render)."""
-    raw = get_settings_service().get(_SETTING_KEY, household_id=str(household_id))
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw) if isinstance(raw, str) else raw
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, TypeError):
-        logger.warning("household %s has an unparseable %s", household_id, _SETTING_KEY)
-        return {}
 
 
 def _observed_kinds(household_id: str) -> set[str]:
@@ -102,7 +85,7 @@ async def list_signal_automations(
     """
     verify_household_role(user.user_id, household_id, required_role=_READ_ROLE)
 
-    rules = _load_rules(household_id)
+    rules = load_rules(household_id)
     observed = _observed_kinds(household_id)
     items: list[dict[str, Any]] = []
     for s in signal_catalog.catalog():
@@ -142,16 +125,13 @@ async def set_signal_automation(
     verify_household_role(user.user_id, household_id, required_role=_WRITE_ROLE)
 
     instruction = body.instruction.strip()
-    rules = _load_rules(household_id)
+    rules = load_rules(household_id)
     if not instruction:
         rules.pop(kind, None)  # empty clears the rule
     else:
         rules[kind] = {"instruction": instruction, "enabled": bool(body.enabled)}
 
-    ok = get_settings_service().set(
-        _SETTING_KEY, json.dumps(rules), household_id=str(household_id)
-    )
-    if not ok:
+    if not save_rules(household_id, rules):
         raise HTTPException(status_code=500, detail="Failed to save automation")
 
     logger.info(
