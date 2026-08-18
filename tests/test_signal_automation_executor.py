@@ -155,12 +155,49 @@ def test_no_action_still_latches_so_reasserts_do_not_rerun():
     assert pick.await_count == 1
 
 
-def test_a_transition_after_dedup_acts_again():
+def test_leave_arrive_leave_all_act():
+    # The bug this pins: presence.left ALWAYS carries state="away", so a per-kind
+    # dedup would latch "away" and skip every departure after the first. Sharing the
+    # presence key with the arrival ("home") resets it, so leave→arrive→leave all act.
     run_rev = AsyncMock(return_value=True)
-    pick = AsyncMock(return_value=("control_device", {"action": "lock"}))
-    assert _run(_ctx(facts={"state": "away"}), run_reversible=run_rev, pick=pick) == "ran:control_device"
-    # away → home is a genuinely different occurrence → acts again.
-    assert _run(_ctx(facts={"state": "home"}), run_reversible=run_rev, pick=pick) == "ran:control_device"
+    leave_pick = AsyncMock(return_value=("control_device", {"action": "lock"}))
+    arrive_pick = AsyncMock(return_value=("control_device", {"action": "turn_on"}))
+    assert (
+        _run(_ctx("presence.left", facts={"state": "away"}), run_reversible=run_rev, pick=leave_pick)
+        == "ran:control_device"
+    )
+    assert (
+        _run(
+            _ctx("presence.seen", facts={"state": "home"}),
+            instruction="lights on",
+            run_reversible=run_rev,
+            pick=arrive_pick,
+        )
+        == "ran:control_device"
+    )
+    # The SECOND departure must act (it did NOT before the shared-key fix).
+    assert (
+        _run(_ctx("presence.left", facts={"state": "away"}), run_reversible=run_rev, pick=leave_pick)
+        == "ran:control_device"
+    )
+    assert run_rev.await_count == 3
+
+
+def test_event_kinds_dedup_per_event_id():
+    run_rev = AsyncMock(return_value=True)
+    pick = AsyncMock(return_value=("reminder", {"text": "leave"}))
+
+    def _appt(eid):
+        return ReactionContext(
+            household_id="hh-1", node_id="n", user_id=7, kind="appt.upcoming",
+            facts={"event_id": eid},
+        )
+
+    assert _run(_appt("e1"), instruction="remind me", run_reversible=run_rev, pick=pick) == "ran:reminder"
+    # Same event re-emitted next calendar cycle → one occurrence.
+    assert _run(_appt("e1"), instruction="remind me", run_reversible=run_rev, pick=pick) == "unchanged"
+    # A different event → acts.
+    assert _run(_appt("e2"), instruction="remind me", run_reversible=run_rev, pick=pick) == "ran:reminder"
     assert run_rev.await_count == 2
 
 

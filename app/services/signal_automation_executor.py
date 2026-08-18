@@ -88,14 +88,23 @@ def _classify(command_name: str, arguments: dict[str, Any]) -> str:
     return "sensitive"
 
 
-def _signature(facts: dict[str, Any]) -> str:
-    """A stable identity for the signal instance — presence state, else calendar
-    event id, else a sorted repr — so we only act once per distinct occurrence."""
-    return str(
-        facts.get("state")
-        or facts.get("event_id")
-        or facts.get("id")
-        or sorted((facts or {}).items())
+def _dedup_identity(ctx: ReactionContext) -> tuple[tuple[str, str, str], str]:
+    """The dedup (key, value) for a signal occurrence — we act once per distinct
+    value under a key.
+
+    presence.left / presence.seen SHARE one key (…, "presence") whose value is the
+    state, so an arrival ("home") resets the departure dedup: a leave→arrive→leave
+    cycle acts all three times, while a same-state heartbeat re-assert is skipped.
+    (Keying per-kind instead would latch "away" forever after the first leave —
+    every later departure would be wrongly skipped.) Event-scoped kinds dedup
+    per-kind on the event identity (a calendar re-emit of the same event is one
+    occurrence)."""
+    facts = ctx.facts or {}
+    hh, uid = str(ctx.household_id), str(ctx.user_id)
+    if ctx.kind in ("presence.left", "presence.seen"):
+        return (hh, uid, "presence"), str(facts.get("state") or ctx.kind)
+    return (hh, uid, ctx.kind), str(
+        facts.get("event_id") or facts.get("id") or sorted(facts.items())
     )
 
 
@@ -287,8 +296,7 @@ async def react_to_signal_automation(
         return "no_rule"
 
     # Act once per distinct signal occurrence (skip heartbeat re-asserts / re-emits).
-    sig = _signature(ctx.facts or {})
-    dkey = (str(ctx.household_id), str(ctx.user_id), ctx.kind)
+    dkey, sig = _dedup_identity(ctx)
     if _last_signature.get(dkey) == sig:
         return "unchanged"
 
