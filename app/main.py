@@ -512,6 +512,8 @@ async def startup_event():
     set_reaction_loop(asyncio.get_running_loop())
     from app.services.signal_reaction_bridge import register_leave_by_reaction
     register_leave_by_reaction()
+    from app.services.signal_automation_executor import register_signal_automation_executor
+    register_signal_automation_executor()
 
     async def _periodic_phone_reaper() -> None:
         while True:
@@ -836,6 +838,10 @@ app.include_router(mobile_household_settings.router, prefix="/api/v0/mobile", ta
 
 from app.api import mobile_presence
 app.include_router(mobile_presence.router, prefix="/api/v0/mobile", tags=["mobile-presence"])
+from app.api import mobile_signal_automations
+app.include_router(
+    mobile_signal_automations.router, prefix="/api/v0/mobile", tags=["mobile-signal-automations"]
+)
 
 from app.api import mobile_phone_contacts
 app.include_router(mobile_phone_contacts.router, prefix="/api/v0/mobile", tags=["mobile-phone-contacts"])

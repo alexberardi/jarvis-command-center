@@ -56,6 +56,20 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         default=True,
         description="Enable the Signal Bus ingress + reactive rendering for this household",
     ),
+    SettingDefinition(
+        key="signals.automations",
+        category="signals",
+        value_type="string",
+        default="{}",
+        description=(
+            "Per-household signal automations as a JSON object mapping a signal "
+            "kind to {\"instruction\": str, \"enabled\": bool} — the user's "
+            "free-text instruction for what should happen when that signal fires "
+            "(interpreted at fire time). Edited from mobile via the "
+            "signal-automations endpoint; the authorable kinds come from "
+            "signal_catalog."
+        ),
+    ),
 
     # Tool router settings
     # Transcription settings
