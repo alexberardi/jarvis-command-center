@@ -45,15 +45,38 @@ def test_save_rules_encodes_and_writes(monkeypatch):
     assert json.loads(fake.saved)["presence.seen"]["instruction"] == "Lights"
 
 
-def test_get_enabled_instruction_when_enabled(monkeypatch):
+def test_normalize_delivery():
+    assert store.normalize_delivery("automatic") == "automatic"
+    assert store.normalize_delivery("notification") == "notification"
+    assert store.normalize_delivery("garbage") == "notification"  # safe default
+    assert store.normalize_delivery(None) == "notification"
+
+
+def test_get_enabled_rule_returns_instruction_and_delivery(monkeypatch):
+    _patch(
+        monkeypatch,
+        _FakeSettings(
+            json.dumps(
+                {"presence.left": {"instruction": "Lock", "enabled": True, "delivery": "automatic"}}
+            )
+        ),
+    )
+    assert store.get_enabled_rule("hh-1", "presence.left") == {
+        "instruction": "Lock",
+        "delivery": "automatic",
+    }
+
+
+def test_get_enabled_rule_defaults_delivery_to_notification(monkeypatch):
+    # A legacy rule with no delivery reads as the safe "notification".
     _patch(monkeypatch, _FakeSettings(json.dumps({"presence.left": {"instruction": "Lock", "enabled": True}})))
-    assert store.get_enabled_instruction("hh-1", "presence.left") == "Lock"
+    assert store.get_enabled_rule("hh-1", "presence.left")["delivery"] == "notification"
 
 
-def test_get_enabled_instruction_none_when_disabled_blank_or_missing(monkeypatch):
+def test_get_enabled_rule_none_when_disabled_blank_or_missing(monkeypatch):
     _patch(monkeypatch, _FakeSettings(json.dumps({"presence.left": {"instruction": "Lock", "enabled": False}})))
-    assert store.get_enabled_instruction("hh-1", "presence.left") is None
+    assert store.get_enabled_rule("hh-1", "presence.left") is None
     _patch(monkeypatch, _FakeSettings(json.dumps({"presence.left": {"instruction": "   ", "enabled": True}})))
-    assert store.get_enabled_instruction("hh-1", "presence.left") is None
+    assert store.get_enabled_rule("hh-1", "presence.left") is None
     _patch(monkeypatch, _FakeSettings("{}"))
-    assert store.get_enabled_instruction("hh-1", "presence.left") is None
+    assert store.get_enabled_rule("hh-1", "presence.left") is None

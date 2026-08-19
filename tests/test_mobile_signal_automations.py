@@ -55,6 +55,7 @@ def test_get_lists_catalog_with_observed_and_current_rule(client):
     left = items["presence.left"]
     assert left["instruction"] == "Lock the door" and left["enabled"] is True
     assert left["observed"] is True
+    assert left["delivery"] == "notification"  # stored rule had no delivery → normalized
     # A kind with no rule + never observed reads as blank + not observed.
     assert items["appt.upcoming"]["instruction"] == ""
     assert items["appt.upcoming"]["observed"] is False
@@ -77,8 +78,37 @@ def test_put_sets_a_rule_via_read_modify_write(client):
     assert r.status_code == 200
     body = r.json()
     assert body["success"] is True and body["cleared"] is False
+    assert body["delivery"] == "notification"  # default when the client omits it
     saved = json.loads(svc.set.call_args.args[1])
-    assert saved["presence.left"] == {"instruction": "Lock the door", "enabled": True}
+    assert saved["presence.left"] == {
+        "instruction": "Lock the door",
+        "enabled": True,
+        "delivery": "notification",
+    }
+
+
+def test_put_stores_the_chosen_delivery(client):
+    svc = _settings("{}")
+    with patch(ROLE), patch(SETTINGS, return_value=svc):
+        r = client.put(
+            f"{BASE}/presence.seen",
+            json={"instruction": "Unlock the door", "enabled": True, "delivery": "automatic"},
+        )
+    assert r.status_code == 200
+    assert r.json()["delivery"] == "automatic"
+    saved = json.loads(svc.set.call_args.args[1])
+    assert saved["presence.seen"]["delivery"] == "automatic"
+
+
+def test_put_rejects_an_invalid_delivery(client):
+    svc = _settings("{}")
+    with patch(ROLE), patch(SETTINGS, return_value=svc):
+        r = client.put(
+            f"{BASE}/presence.left",
+            json={"instruction": "Lock", "enabled": True, "delivery": "carrier-pigeon"},
+        )
+    assert r.status_code == 400  # Literal validation → 400 (app maps it)
+    svc.set.assert_not_called()
 
 
 def test_put_preserves_other_kinds_rules(client):
@@ -88,8 +118,13 @@ def test_put_preserves_other_kinds_rules(client):
         r = client.put(f"{BASE}/presence.left", json={"instruction": "Lock up", "enabled": False})
     assert r.status_code == 200
     saved = json.loads(svc.set.call_args.args[1])
+    # The untouched kind is preserved verbatim (delivery not injected into others).
     assert saved["presence.seen"] == {"instruction": "Lights on", "enabled": True}
-    assert saved["presence.left"] == {"instruction": "Lock up", "enabled": False}
+    assert saved["presence.left"] == {
+        "instruction": "Lock up",
+        "enabled": False,
+        "delivery": "notification",
+    }
 
 
 def test_put_blank_instruction_clears_the_rule(client):

@@ -1,8 +1,8 @@
 """Signal-automation execution — interpret a free-text instruction at fire time.
 
-Pins the DECISION logic via dependency injection: the reversible-vs-sensitive
-classifier, the no-rule / dedup / no-tools / no-action paths, the reversible
-auto-run vs sensitive confirm-card branch, the confirmed-action server callback,
+Pins the DECISION logic via dependency injection: the rule's DELIVERY choice
+(automatic runs / notification confirms — the user's choice, not a classifier), the
+no-rule / dedup / no-tools / no-action paths, the confirmed-action server callback,
 and registration. The LLM inference, node dispatch, and inbox post are injected.
 """
 import asyncio
@@ -36,42 +36,25 @@ def _run(
     ctx,
     *,
     instruction="Lock the door",
+    delivery="automatic",
     resolve=None,
     pick=None,
-    run_reversible=None,
+    run_automatic=None,
     emit_confirm=None,
 ):
+    # instruction=None models "no enabled rule" (get_rule → None).
+    rule = None if instruction is None else {"instruction": instruction, "delivery": delivery}
     return asyncio.run(
         ex.react_to_signal_automation(
             ctx,
-            get_instruction=lambda hh, kind: instruction,
+            get_rule=lambda hh, kind: rule,
             resolve=resolve or AsyncMock(return_value=("node-1", [{"type": "function"}])),
             pick=pick
             or AsyncMock(return_value=("control_device", {"action": "lock", "entity_id": "lock.front"})),
-            run_reversible=run_reversible or AsyncMock(return_value=True),
+            run_automatic=run_automatic or AsyncMock(return_value=True),
             emit_confirm=emit_confirm or Mock(return_value=True),
         )
     )
-
-
-# ── classification (the guardrail boundary) ──────────────────────────────────
-@pytest.mark.parametrize(
-    "cmd,args,expected",
-    [
-        ("control_device", {"action": "lock"}, "reversible"),
-        ("control_device", {"action": "turn_on"}, "reversible"),
-        ("control_device", {"action": "turn_off"}, "reversible"),
-        ("control_device", {"action": "unlock"}, "sensitive"),  # opens a door
-        ("control_device", {"action": "frobnicate"}, "sensitive"),  # unknown action
-        ("control_device", {}, "sensitive"),  # no action → fail-safe
-        ("reminder", {}, "reversible"),
-        ("get_drive_time", {}, "reversible"),
-        ("send_message", {}, "sensitive"),  # unknown command → fail-safe
-        ("place_call", {}, "sensitive"),
-    ],
-)
-def test_classify(cmd, args, expected):
-    assert ex._classify(cmd, args) == expected
 
 
 # ── the reaction ─────────────────────────────────────────────────────────────
@@ -81,53 +64,48 @@ def test_no_enabled_rule_is_a_noop():
     resolve.assert_not_awaited()
 
 
-def test_reversible_action_auto_runs():
-    run_rev = AsyncMock(return_value=True)
+def test_automatic_delivery_runs_immediately():
+    run_auto = AsyncMock(return_value=True)
     emit = Mock(return_value=True)
     result = _run(
         _ctx(),
-        pick=AsyncMock(return_value=("control_device", {"action": "lock"})),
-        run_reversible=run_rev,
+        delivery="automatic",
+        pick=AsyncMock(return_value=("control_device", {"action": "unlock"})),
+        run_automatic=run_auto,
         emit_confirm=emit,
     )
     assert result == "ran:control_device"
-    run_rev.assert_awaited_once()
-    emit.assert_not_called()  # reversible never posts a card
+    run_auto.assert_awaited_once()
+    emit.assert_not_called()  # automatic never posts a card — even for unlock
 
 
-def test_reversible_dispatch_failure_reported():
+def test_automatic_dispatch_failure_is_reported():
     result = _run(
         _ctx(),
-        pick=AsyncMock(return_value=("control_device", {"action": "lock"})),
-        run_reversible=AsyncMock(return_value=False),
+        delivery="automatic",
+        run_automatic=AsyncMock(return_value=False),
     )
     assert result == "failed:control_device"
 
 
-def test_sensitive_action_posts_a_confirm_card_and_does_not_run():
-    run_rev = AsyncMock(return_value=True)
+def test_notification_delivery_posts_a_card_and_does_not_run():
+    run_auto = AsyncMock(return_value=True)
     emit = Mock(return_value=True)
     result = _run(
         _ctx(),
-        pick=AsyncMock(return_value=("control_device", {"action": "unlock"})),
-        run_reversible=run_rev,
+        delivery="notification",
+        pick=AsyncMock(return_value=("control_device", {"action": "lock"})),
+        run_automatic=run_auto,
         emit_confirm=emit,
     )
     assert result == "confirm:control_device"
     emit.assert_called_once()
-    run_rev.assert_not_awaited()  # sensitive is NEVER auto-run
+    run_auto.assert_not_awaited()  # notification NEVER auto-runs — even a lock
 
 
-def test_unknown_command_is_treated_as_sensitive():
-    emit = Mock(return_value=True)
-    result = _run(
-        _ctx(),
-        pick=AsyncMock(return_value=("send_message", {"to": "mom", "text": "hi"})),
-        run_reversible=AsyncMock(return_value=True),
-        emit_confirm=emit,
-    )
-    assert result == "confirm:send_message"
-    emit.assert_called_once()
+def test_notification_delivery_reports_a_failed_card_post():
+    result = _run(_ctx(), delivery="notification", emit_confirm=Mock(return_value=False))
+    assert result == "confirm_failed"
 
 
 def test_no_tool_chosen_is_noop():
@@ -138,13 +116,14 @@ def test_no_reachable_node_or_tools():
     assert _run(_ctx(), resolve=AsyncMock(return_value=(None, []))) == "no_tools"
 
 
+# ── transition dedup (heartbeat re-asserts must not re-act) ──────────────────
 def test_repeated_same_signal_is_deduped():
     ctx = _ctx(facts={"state": "away"})
-    run_rev = AsyncMock(return_value=True)
+    run_auto = AsyncMock(return_value=True)
     pick = AsyncMock(return_value=("control_device", {"action": "lock"}))
-    assert _run(ctx, run_reversible=run_rev, pick=pick) == "ran:control_device"
-    assert _run(ctx, run_reversible=run_rev, pick=pick) == "unchanged"
-    assert run_rev.await_count == 1  # the re-assert did NOT re-run the LLM/action
+    assert _run(ctx, run_automatic=run_auto, pick=pick) == "ran:control_device"
+    assert _run(ctx, run_automatic=run_auto, pick=pick) == "unchanged"
+    assert run_auto.await_count == 1
 
 
 def test_no_action_still_latches_so_reasserts_do_not_rerun():
@@ -156,35 +135,33 @@ def test_no_action_still_latches_so_reasserts_do_not_rerun():
 
 
 def test_leave_arrive_leave_all_act():
-    # The bug this pins: presence.left ALWAYS carries state="away", so a per-kind
-    # dedup would latch "away" and skip every departure after the first. Sharing the
-    # presence key with the arrival ("home") resets it, so leave→arrive→leave all act.
-    run_rev = AsyncMock(return_value=True)
+    # presence.left ALWAYS carries state="away"; a shared presence key keeps
+    # leave→arrive→leave from latching "away" and skipping the second departure.
+    run_auto = AsyncMock(return_value=True)
     leave_pick = AsyncMock(return_value=("control_device", {"action": "lock"}))
     arrive_pick = AsyncMock(return_value=("control_device", {"action": "turn_on"}))
     assert (
-        _run(_ctx("presence.left", facts={"state": "away"}), run_reversible=run_rev, pick=leave_pick)
+        _run(_ctx("presence.left", facts={"state": "away"}), run_automatic=run_auto, pick=leave_pick)
         == "ran:control_device"
     )
     assert (
         _run(
             _ctx("presence.seen", facts={"state": "home"}),
             instruction="lights on",
-            run_reversible=run_rev,
+            run_automatic=run_auto,
             pick=arrive_pick,
         )
         == "ran:control_device"
     )
-    # The SECOND departure must act (it did NOT before the shared-key fix).
     assert (
-        _run(_ctx("presence.left", facts={"state": "away"}), run_reversible=run_rev, pick=leave_pick)
+        _run(_ctx("presence.left", facts={"state": "away"}), run_automatic=run_auto, pick=leave_pick)
         == "ran:control_device"
     )
-    assert run_rev.await_count == 3
+    assert run_auto.await_count == 3
 
 
 def test_event_kinds_dedup_per_event_id():
-    run_rev = AsyncMock(return_value=True)
+    run_auto = AsyncMock(return_value=True)
     pick = AsyncMock(return_value=("reminder", {"text": "leave"}))
 
     def _appt(eid):
@@ -193,12 +170,10 @@ def test_event_kinds_dedup_per_event_id():
             facts={"event_id": eid},
         )
 
-    assert _run(_appt("e1"), instruction="remind me", run_reversible=run_rev, pick=pick) == "ran:reminder"
-    # Same event re-emitted next calendar cycle → one occurrence.
-    assert _run(_appt("e1"), instruction="remind me", run_reversible=run_rev, pick=pick) == "unchanged"
-    # A different event → acts.
-    assert _run(_appt("e2"), instruction="remind me", run_reversible=run_rev, pick=pick) == "ran:reminder"
-    assert run_rev.await_count == 2
+    assert _run(_appt("e1"), instruction="remind me", run_automatic=run_auto, pick=pick) == "ran:reminder"
+    assert _run(_appt("e1"), instruction="remind me", run_automatic=run_auto, pick=pick) == "unchanged"
+    assert _run(_appt("e2"), instruction="remind me", run_automatic=run_auto, pick=pick) == "ran:reminder"
+    assert run_auto.await_count == 2
 
 
 def test_an_error_never_raises():

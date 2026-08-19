@@ -21,14 +21,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 
 from app.deps import AuthenticatedUser, verify_household_role, verify_user_jwt
 from app.services import signal_catalog
-from app.services.signal_automation_store import load_rules, save_rules
+from app.services.signal_automation_store import load_rules, normalize_delivery, save_rules
 
 logger = logging.getLogger("uvicorn")
 
@@ -71,6 +71,9 @@ def _observed_kinds(household_id: str) -> set[str]:
 class RuleIn(BaseModel):
     instruction: str = Field("", max_length=_MAX_INSTRUCTION_CHARS)
     enabled: bool = Field(True)
+    # How the user wants it delivered when the signal fires. THEIR choice, not
+    # ours: "automatic" runs the action; "notification" proposes a confirm card.
+    delivery: Literal["automatic", "notification"] = Field("notification")
 
 
 @router.get("/household/{household_id}/signal-automations")
@@ -101,6 +104,7 @@ async def list_signal_automations(
                 "observed": s.kind in observed,
                 "instruction": rule.get("instruction", ""),
                 "enabled": bool(rule.get("enabled", False)),
+                "delivery": normalize_delivery(rule.get("delivery")),
             }
         )
     return {"household_id": household_id, "automations": items}
@@ -129,19 +133,24 @@ async def set_signal_automation(
     if not instruction:
         rules.pop(kind, None)  # empty clears the rule
     else:
-        rules[kind] = {"instruction": instruction, "enabled": bool(body.enabled)}
+        rules[kind] = {
+            "instruction": instruction,
+            "enabled": bool(body.enabled),
+            "delivery": normalize_delivery(body.delivery),
+        }
 
     if not save_rules(household_id, rules):
         raise HTTPException(status_code=500, detail="Failed to save automation")
 
     logger.info(
-        "household %s set automation for %s (enabled=%s, %d chars)",
-        household_id, kind, body.enabled, len(instruction),
+        "household %s set automation for %s (enabled=%s, delivery=%s, %d chars)",
+        household_id, kind, body.enabled, body.delivery, len(instruction),
     )
     return {
         "success": True,
         "kind": kind,
         "instruction": instruction,
         "enabled": bool(body.enabled) if instruction else False,
+        "delivery": normalize_delivery(body.delivery),
         "cleared": not instruction,
     }
