@@ -99,3 +99,423 @@ class TestIsSttNoiseLegitimateUtterances:
     def test_command_starting_with_punctuation(self):
         # An accidental leading punctuation char shouldn't sink the rest.
         assert not is_stt_noise("?what time is it")
+
+
+class TestIsDeviceCommandShaped:
+    """The imperative device-command guard (2026-08-15): a transcript shaped
+    like "turn on the ... lights" must be recognizable so acoustic-side
+    evidence alone can never produce a suppression-leaning hint for it."""
+
+    def test_the_two_real_suppressed_commands(self):
+        # The literal 2026-08-15 losses — suppressed by wake verification
+        # reading garbage clips. These MUST match.
+        from app.core.transcript_filter import is_device_command_shaped
+
+        assert is_device_command_shaped("Turn on the living room lights.")
+        assert is_device_command_shaped("Turn on the playroom lights.")
+
+    def test_common_device_imperatives_match(self):
+        from app.core.transcript_filter import is_device_command_shaped
+
+        assert is_device_command_shaped("turn off the kitchen lights")
+        assert is_device_command_shaped("switch off the fan")
+        assert is_device_command_shaped("dim the bedroom lights")
+        assert is_device_command_shaped("lock the front door")
+        assert is_device_command_shaped("unlock the back door")
+        assert is_device_command_shaped("set the thermostat to 70")
+        assert is_device_command_shaped("start the coffee maker")
+        assert is_device_command_shaped("stop the music")
+
+    def test_politeness_prefix_matches(self):
+        from app.core.transcript_filter import is_device_command_shaped
+
+        assert is_device_command_shaped("please turn on the lights")
+        assert is_device_command_shaped("Jarvis, turn on the lights")
+
+    def test_junk_counter_examples_do_not_match(self):
+        # The real prod junk that SHOULD keep its ambient-leaning hints.
+        from app.core.transcript_filter import is_device_command_shaped
+
+        assert not is_device_command_shaped("- Uh-huh. - Eat it.")
+        assert not is_device_command_shaped(
+            "Where's your nose? Oh, you want to do this?"
+        )
+
+    def test_questions_do_not_match(self):
+        from app.core.transcript_filter import is_device_command_shaped
+
+        assert not is_device_command_shaped("Can you turn on the lights?")
+        assert not is_device_command_shaped("Did you turn off the oven?")
+
+    def test_generic_speech_does_not_match(self):
+        from app.core.transcript_filter import is_device_command_shaped
+
+        assert not is_device_command_shaped("Leo took his medicine.")
+        assert not is_device_command_shaped("Eat it.")
+        assert not is_device_command_shaped("We got paid last year in August")
+        assert not is_device_command_shaped("")
+        assert not is_device_command_shaped(None)
+
+    def test_bare_verb_without_object_does_not_match(self):
+        # "Stop." alone is a follow-up/fragment, not a device command shape.
+        from app.core.transcript_filter import is_device_command_shaped
+
+        assert not is_device_command_shaped("Stop.")
+
+    def test_multi_speaker_device_command_does_not_match(self):
+        # Dash-marked dialogue containing an imperative is still dialogue.
+        from app.core.transcript_filter import is_device_command_shaped
+
+        assert not is_device_command_shaped("- Turn on the lights. - No, don't.")
+
+
+class TestHasMultiSpeakerMarkers:
+    def test_dialogue_matches(self):
+        from app.core.transcript_filter import has_multi_speaker_markers
+
+        assert has_multi_speaker_markers("- Uh-huh. - Eat it.")
+        assert has_multi_speaker_markers("- Yeah. - Eat it.")
+
+    def test_single_leading_dash_is_not_dialogue(self):
+        # Whisper sometimes prefixes a lone utterance with one dash.
+        from app.core.transcript_filter import has_multi_speaker_markers
+
+        assert not has_multi_speaker_markers("- Turn on the lights")
+
+    def test_hyphenated_words_do_not_match(self):
+        from app.core.transcript_filter import has_multi_speaker_markers
+
+        assert not has_multi_speaker_markers("Uh-huh, that's a mother-in-law")
+
+    def test_plain_speech_does_not_match(self):
+        from app.core.transcript_filter import has_multi_speaker_markers
+
+        assert not has_multi_speaker_markers("turn on the lights")
+        assert not has_multi_speaker_markers("")
+        assert not has_multi_speaker_markers(None)
+
+
+class TestIsShortNonCommandFragment:
+    def test_two_word_fragments_match(self):
+        from app.core.transcript_filter import is_short_non_command_fragment
+
+        assert is_short_non_command_fragment("Eat it.")
+        assert is_short_non_command_fragment("Oh.")
+
+    def test_device_shaped_two_worders_are_excluded(self):
+        # The imperative guard is senior to the junk-shape signals.
+        from app.core.transcript_filter import is_short_non_command_fragment
+
+        assert not is_short_non_command_fragment("stop music")
+
+    def test_three_plus_words_are_not_fragments(self):
+        from app.core.transcript_filter import is_short_non_command_fragment
+
+        assert not is_short_non_command_fragment("what time is it")
+
+    def test_empty_is_not_a_fragment(self):
+        # Empty input is the STT-noise filter's job, not the fragment hint's.
+        from app.core.transcript_filter import is_short_non_command_fragment
+
+        assert not is_short_non_command_fragment("")
+        assert not is_short_non_command_fragment(None)
+
+
+class TestIsMusicControlShaped:
+    """Music-control shape detector for SELF-PLAYBACK turns. Unlike the
+    device-command guard, bare verbs count ("pause", "skip") — the playing
+    music supplies the object. Only ever consulted when the node reported
+    self-playback, and only ever PREVENTS a suppression-leaning hint."""
+
+    def test_bare_verbs_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        for cmd in ("Pause.", "Stop", "Skip.", "Next", "Resume.", "Mute"):
+            assert is_music_control_shaped(cmd), cmd
+
+    def test_verb_object_forms_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        for cmd in (
+            "Stop the music.",
+            "Skip this song.",
+            "Next track.",
+            "Play some jazz.",
+            "Play the next one.",
+            "Turn it down.",
+            "Turn down the volume.",
+            "Turn off the music.",
+            "Volume up.",
+            "Louder.",
+            "Quieter.",
+        ):
+            assert is_music_control_shaped(cmd), cmd
+
+    def test_politeness_and_wake_prefixes_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        assert is_music_control_shaped("Jarvis, skip this song.")
+        assert is_music_control_shaped("Please pause.")
+        assert is_music_control_shaped("Hey Jarvis, turn it down.")
+
+    def test_questions_do_not_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        assert not is_music_control_shaped("Can you skip this song?")
+        assert not is_music_control_shaped("Skip this one?")
+
+    def test_multi_speaker_dialogue_does_not_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        assert not is_music_control_shaped("- Pause. - Eat it.")
+
+    def test_generic_speech_does_not_match(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        for text in (
+            "I love this song.",
+            "We stopped by the store earlier.",
+            "He was going to play outside.",
+            "Eat it.",
+            "Oh.",
+        ):
+            assert not is_music_control_shaped(text), text
+
+    def test_empty_is_not_music_control(self):
+        from app.core.transcript_filter import is_music_control_shaped
+
+        assert not is_music_control_shaped("")
+        assert not is_music_control_shaped(None)
+
+    def test_mid_word_verb_prefix_does_not_match(self):
+        # "stopped"/"playing" must not read as "stop"/"play" (word boundary).
+        from app.core.transcript_filter import is_music_control_shaped
+
+        assert not is_music_control_shaped("Stopping by later.")
+        assert not is_music_control_shaped("Playtime is over soon.")
+
+
+class TestAddressedHouseholdMember:
+    """Named-person addressing shapes (2026-08-17 incident: a follow-up
+    captured "already done. Wow. Miles, come here." — a parent calling
+    their child by name). Form-only detection, feeding a lean hint; the
+    device/music guards stay senior at every call site."""
+
+    MEMBERS = ["Miles", "Jess", "Alex"]
+
+    def test_incident_transcript_matches(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        # Vocative in the THIRD sentence — matching must be per-sentence.
+        assert addressed_household_member(
+            "already done. Wow. Miles, come here.", self.MEMBERS
+        ) == "Miles"
+
+    def test_leading_name_with_comma_matches(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "Jess, can you grab that", self.MEMBERS
+        ) == "Jess"
+
+    def test_leading_name_into_imperative_matches(self):
+        # STT frequently drops the vocative comma.
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "Miles come here", self.MEMBERS
+        ) == "Miles"
+
+    def test_trailing_vocative_matches(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "come here, Miles", self.MEMBERS
+        ) == "Miles"
+        assert addressed_household_member(
+            "come here Miles", self.MEMBERS
+        ) == "Miles"
+
+    def test_case_insensitive(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "miles, come here", self.MEMBERS
+        ) == "Miles"
+
+    def test_speech_about_a_member_does_not_match(self):
+        from app.core.transcript_filter import is_addressed_to_other_person
+
+        for text in (
+            "Miles said he wants pizza",
+            "I told Miles to clean his room already",
+            "Miles is a little busy with his toys",
+            "we should take Miles to the park tomorrow",
+        ):
+            assert not is_addressed_to_other_person(text, self.MEMBERS), text
+
+    def test_word_boundary_no_substring_match(self):
+        from app.core.transcript_filter import is_addressed_to_other_person
+
+        # "Milestone, come quick" must not read as addressing Miles.
+        assert not is_addressed_to_other_person(
+            "Milestone, come quick", self.MEMBERS
+        )
+
+    def test_jarvis_and_wake_phrase_excluded(self):
+        from app.core.transcript_filter import is_addressed_to_other_person
+
+        assert not is_addressed_to_other_person(
+            "Jarvis, what time is it", ["Jarvis", "Miles"]
+        )
+        assert not is_addressed_to_other_person(
+            "hey, come look at this", ["Hey", "Miles"]
+        )
+
+    def test_no_members_is_a_no_op(self):
+        from app.core.transcript_filter import (
+            addressed_household_member,
+            is_addressed_to_other_person,
+        )
+
+        text = "Miles, come here"
+        assert addressed_household_member(text, None) is None
+        assert addressed_household_member(text, []) is None
+        assert not is_addressed_to_other_person(text, None)
+
+    def test_empty_transcript_is_a_no_op(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(None, self.MEMBERS) is None
+        assert addressed_household_member("", self.MEMBERS) is None
+
+    def test_multi_word_display_name_uses_first_token(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "Jess, come here", ["Jess Berardi"]
+        ) == "Jess"
+
+    def test_non_string_member_entries_are_ignored(self):
+        from app.core.transcript_filter import addressed_household_member
+
+        assert addressed_household_member(
+            "Miles, come here", [None, 42, "Miles"]  # type: ignore[list-item]
+        ) == "Miles"
+
+
+class TestIsQuestionShaped:
+    """Question shapes are exempt from every tool-forcing guard (2026-08-17
+    doctrine: the model owns how to answer questions)."""
+
+    def test_incident_utterance_is_question(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert is_question_shaped("What should I do with Miles today?")
+
+    def test_leading_question_word_without_question_mark(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert is_question_shaped("what does my schedule look like today")
+        assert is_question_shaped("should I bring an umbrella")
+        assert is_question_shaped("can you turn on the lights")
+        assert is_question_shaped("is there anything on my calendar")
+        assert is_question_shaped("do we have milk")
+
+    def test_trailing_question_mark_alone_qualifies(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert is_question_shaped("turn off the lights?")
+
+    def test_wake_prefix_is_skipped(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert is_question_shaped("Jarvis, what is on my calendar")
+        assert is_question_shaped("hey jarvis, when is my meeting")
+
+    def test_imperatives_and_reports_are_not_questions(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert not is_question_shaped("Turn off the living room lights")
+        assert not is_question_shaped("Leo took his medicine")
+        assert not is_question_shaped("Set a timer for ten minutes")
+
+    def test_empty_and_none(self):
+        from app.core.transcript_filter import is_question_shaped
+        assert not is_question_shaped(None)
+        assert not is_question_shaped("")
+        assert not is_question_shaped("   ")
+
+
+class TestIsActionCommandShaped:
+    """Generalized imperative shape — the only utterance family (with
+    reports) allowed to arm the force-tool-calls guard."""
+
+    def test_device_imperatives_still_match(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert is_action_command_shaped("Turn off the living room lights")
+        assert is_action_command_shaped("set the thermostat to 68")
+        assert is_action_command_shaped("lock the front door")
+
+    def test_extended_action_verbs_match(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert is_action_command_shaped("Play some jazz")
+        assert is_action_command_shaped("Remind me to call mom")
+        assert is_action_command_shaped("Add milk to the shopping list")
+        assert is_action_command_shaped("Cancel my three o'clock")
+        assert is_action_command_shaped("Log that Leo took his medicine")
+
+    def test_questions_never_match(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert not is_action_command_shaped("What should I do with Miles today?")
+        assert not is_action_command_shaped("can you turn on the lights")
+        assert not is_action_command_shaped("turn off the lights?")
+
+    def test_conversational_prose_does_not_match(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert not is_action_command_shaped("Thank you.")
+        assert not is_action_command_shaped("Yum.")
+        assert not is_action_command_shaped("the lights in here are so warm")
+
+    def test_multi_speaker_transcripts_do_not_match(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert not is_action_command_shaped("- Uh-huh. - Turn it off.")
+
+    def test_empty_and_none(self):
+        from app.core.transcript_filter import is_action_command_shaped
+        assert not is_action_command_shaped(None)
+        assert not is_action_command_shaped("")
+
+
+class TestIsReportShaped:
+    """Reports feeding logging tools ("Leo took his medicine") — the second
+    utterance family where a forced tool call is legitimate."""
+
+    def test_third_person_medication_report(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert is_report_shaped("Leo took his medicine")
+        assert is_report_shaped("Leo took his medicine.")
+
+    def test_first_person_medication_report(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert is_report_shaped("I took my pills")
+        assert is_report_shaped("I just took my morning meds")
+
+    def test_gave_and_administered_forms(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert is_report_shaped("She gave the dog its meds")
+        assert is_report_shaped("Sam administered the insulin")
+
+    def test_questions_never_match(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert not is_report_shaped("did Leo take his medicine?")
+        assert not is_report_shaped("did I take my pills")
+
+    def test_conversational_prose_does_not_match(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert not is_report_shaped("Thank you.")
+        assert not is_report_shaped("that was so good")
+
+    def test_multi_speaker_transcripts_do_not_match(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert not is_report_shaped("- Leo took his medicine. - Good boy.")
+
+    def test_empty_and_none(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert not is_report_shaped(None)
+        assert not is_report_shaped("")

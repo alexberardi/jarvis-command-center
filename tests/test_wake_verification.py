@@ -106,3 +106,302 @@ class TestResolveWakeVerification:
     def test_pending_verdict_times_out_open(self, monkeypatch):
         monkeypatch.setattr(wv, "VERDICT_WAIT_SECONDS", 0.2)
         assert self._resolve({"source": "wake"}) is None
+
+
+class TestGetModeFailSafe:
+    """_get_mode fails SAFE to off on BOTH failure classes: unreachable
+    settings service and unrecognized stored values. A typo'd mode must
+    disable the feature, never silently activate bias."""
+
+    def _mode_with_setting(self, raw):
+        import unittest.mock as m
+
+        svc = m.MagicMock()
+        svc.get.return_value = raw
+        with m.patch(
+            "app.services.settings_service.get_settings_service", return_value=svc
+        ):
+            return wv._get_mode("hh-1", "node-1")
+
+    def test_recognized_values_pass_through(self):
+        assert self._mode_with_setting("bias") == "bias"
+        assert self._mode_with_setting("enforce") == "enforce"
+        assert self._mode_with_setting("off") == "off"
+        assert self._mode_with_setting("  Bias ") == "bias"
+
+    def test_unrecognized_value_is_off(self):
+        # Was "bias" before 2026-08-15 — a typo silently enabled the feature.
+        assert self._mode_with_setting("banana") == "off"
+        assert self._mode_with_setting("biased") == "off"
+
+    def test_missing_row_is_off(self):
+        assert self._mode_with_setting(None) == "off"
+        assert self._mode_with_setting("") == "off"
+
+    def test_settings_service_error_is_off(self):
+        import unittest.mock as m
+
+        with m.patch(
+            "app.services.settings_service.get_settings_service",
+            side_effect=RuntimeError("db down"),
+        ):
+            assert wv._get_mode() == "off"
+
+    def test_setting_definition_default_is_off(self):
+        from app.services.settings_definitions import SETTINGS_DEFINITIONS
+
+        definition = next(
+            d for d in SETTINGS_DEFINITIONS
+            if d.key == "voice.wake_verification_mode"
+        )
+        assert definition.default == "off"
+
+
+class TestWakePhraseSimilarity:
+    def test_exact_and_substring_are_full_similarity(self):
+        assert wv.wake_phrase_similarity("hey jarvis") == 1.0
+        assert wv.wake_phrase_similarity("jarvis, lights") == 1.0
+
+    def test_whisper_manglings_score_high(self):
+        assert wv.wake_phrase_similarity("hey travis") >= wv.CLIP_SIMILARITY_FLOOR
+        assert wv.wake_phrase_similarity("jervis") >= wv.CLIP_SIMILARITY_FLOOR
+
+    def test_partially_wake_shaped_scores_above_floor(self):
+        # "harvest" shares 'arv...s' with 'jarvis' — a trace, not zero.
+        assert wv.wake_phrase_similarity("the harvest is ready") >= wv.CLIP_SIMILARITY_FLOOR
+
+    def test_garbage_clips_score_below_floor(self):
+        # The capture-bug signature: nothing remotely wake-shaped.
+        assert wv.wake_phrase_similarity("Turn on the living room lights.") < wv.CLIP_SIMILARITY_FLOOR
+        assert wv.wake_phrase_similarity("Eat it.") < wv.CLIP_SIMILARITY_FLOOR
+        assert wv.wake_phrase_similarity("") == 0.0
+        assert wv.wake_phrase_similarity(None) == 0.0
+
+    def test_blank_phrase_is_full_similarity(self):
+        assert wv.wake_phrase_similarity("anything", phrase="") == 1.0
+
+
+class TestClipPlausibilityGate:
+    """A 0.9+ OWW fire whose verify clip has ZERO fuzzy trace of the wake
+    phrase is the capture-bug signature, not the misfire signature (prod
+    2026-08-15: two real lights commands suppressed by garbage clips).
+    Verdict becomes clip_unreliable and downstream treats it as no-verdict
+    (fail open)."""
+
+    def setup_method(self):
+        conversation_cache.set(
+            "conv-cpg", [{"role": "system", "content": "x"}], [], "UTC", [], {}
+        )
+
+    def teardown_method(self):
+        conversation_cache.remove("conv-cpg")
+
+    def _resolve(self, turn_context, mode="bias"):
+        async def _run():
+            return await wv.resolve_wake_verification("conv-cpg", turn_context)
+        import unittest.mock as m
+        with m.patch.object(wv, "_get_mode", return_value=mode):
+            return asyncio.run(_run())
+
+    def _store(self, transcript, similarity=None, **extra):
+        verdict = {
+            "verified": False,
+            "verdict": "unverified",
+            "transcript": transcript,
+            "phrase": "jarvis",
+            "node_id": "node-1",
+            **extra,
+        }
+        if similarity is not None:
+            verdict["similarity"] = similarity
+        conversation_cache.set_wake_verification("conv-cpg", verdict)
+
+    def test_high_confidence_zero_similarity_fails_open(self):
+        self._store("Turn on the living room lights.", similarity=0.2)
+        resolved = self._resolve({"source": "wake", "wake_confidence": 0.97})
+        assert resolved is None  # treated like no-verdict downstream
+
+    def test_relabels_cached_verdict_as_clip_unreliable(self):
+        self._store("Turn on the living room lights.", similarity=0.2)
+        self._resolve({"source": "wake", "wake_confidence": 0.97})
+        cached = conversation_cache.get_wake_verification("conv-cpg")
+        assert cached["verdict"] == "clip_unreliable"
+
+    def test_low_confidence_zero_similarity_stays_unverified(self):
+        # A marginal fire with a garbage clip really is a misfire signature.
+        self._store("Eat it.", similarity=0.1)
+        resolved = self._resolve({"source": "wake", "wake_confidence": 0.55})
+        assert resolved is not None
+        assert resolved["verified"] is False
+
+    def test_high_confidence_partial_similarity_stays_unverified(self):
+        # A trace of the phrase means the clip pipeline worked — the fuzzy
+        # match just failed. That is NOT the capture-bug signature.
+        self._store("the harvest is ready", similarity=0.62)
+        resolved = self._resolve({"source": "wake", "wake_confidence": 0.97})
+        assert resolved is not None
+        assert resolved["verified"] is False
+
+    def test_missing_wake_confidence_stays_unverified(self):
+        self._store("Eat it.", similarity=0.0)
+        resolved = self._resolve({"source": "wake"})
+        assert resolved is not None
+        assert resolved["verified"] is False
+
+    def test_similarity_recomputed_when_absent(self):
+        # Verdicts stored before the similarity field existed still gate.
+        self._store("Turn on the living room lights.")
+        resolved = self._resolve({"source": "wake", "wake_confidence": 0.97})
+        assert resolved is None
+
+    def test_boundary_confidence_gates(self):
+        self._store("Eat it.", similarity=0.0)
+        resolved = self._resolve(
+            {"source": "wake", "wake_confidence": wv.CLIP_UNRELIABLE_WAKE_CONFIDENCE}
+        )
+        assert resolved is None
+
+    def test_verified_clip_unaffected(self):
+        conversation_cache.set_wake_verification(
+            "conv-cpg",
+            {"verified": True, "verdict": "verified", "transcript": "hey jarvis",
+             "phrase": "jarvis", "similarity": 1.0},
+        )
+        resolved = self._resolve({"source": "wake", "wake_confidence": 0.97})
+        assert resolved is not None
+        assert resolved["verified"] is True
+
+
+class TestClipPlausibilityGateSelfPlayback:
+    """Self-playback relaxation: with the node's own music in the wake clip,
+    the verify transcript is degraded by bleed, so "unverified with zero
+    wake-phrase trace" is the EXPECTED reading on a real mid-music wake.
+    The confidence bar for the clip_unreliable/fail-open treatment drops to
+    the node's trigger threshold (0.5) — soft-bias stance: never
+    hard-suppress on acoustic evidence during music."""
+
+    def setup_method(self):
+        conversation_cache.set(
+            "conv-spb", [{"role": "system", "content": "x"}], [], "UTC", [], {}
+        )
+
+    def teardown_method(self):
+        conversation_cache.remove("conv-spb")
+
+    def _resolve(self, turn_context, mode="bias"):
+        async def _run():
+            return await wv.resolve_wake_verification("conv-spb", turn_context)
+        import unittest.mock as m
+        with m.patch.object(wv, "_get_mode", return_value=mode):
+            return asyncio.run(_run())
+
+    def _store(self, transcript, similarity):
+        conversation_cache.set_wake_verification(
+            "conv-spb",
+            {
+                "verified": False,
+                "verdict": "unverified",
+                "transcript": transcript,
+                "phrase": "jarvis",
+                "similarity": similarity,
+                "node_id": "node-1",
+            },
+        )
+
+    def test_mid_confidence_no_trace_fails_open_during_media(self):
+        # 0.6 is below the normal 0.9 bar — off-music this stays unverified;
+        # during self-playback it reads as a bleed-degraded clip instead.
+        self._store("thunder only happens when it's raining", similarity=0.1)
+        resolved = self._resolve(
+            {
+                "source": "wake",
+                "wake_confidence": 0.6,
+                "self_playback": True,
+                "self_playback_kind": "music",
+            }
+        )
+        assert resolved is None  # clip_unreliable → treated as no-verdict
+
+    def test_relabels_verdict_during_media(self):
+        self._store("thunder only happens when it's raining", similarity=0.1)
+        self._resolve(
+            {
+                "source": "wake",
+                "wake_confidence": 0.6,
+                "self_playback": True,
+                "self_playback_kind": "music",
+            }
+        )
+        cached = conversation_cache.get_wake_verification("conv-spb")
+        assert cached["verdict"] == "clip_unreliable"
+
+    def test_same_confidence_without_media_stays_unverified(self):
+        # The relaxation is scoped to self-playback turns only.
+        self._store("thunder only happens when it's raining", similarity=0.1)
+        resolved = self._resolve({"source": "wake", "wake_confidence": 0.6})
+        assert resolved is not None
+        assert resolved["verified"] is False
+
+    def test_below_trigger_threshold_stays_unverified_even_during_media(self):
+        self._store("thunder only happens when it's raining", similarity=0.1)
+        resolved = self._resolve(
+            {
+                "source": "wake",
+                "wake_confidence": wv.CLIP_UNRELIABLE_WAKE_CONFIDENCE_SELF_PLAYBACK
+                - 0.05,
+                "self_playback": True,
+                "self_playback_kind": "music",
+            }
+        )
+        assert resolved is not None
+        assert resolved["verified"] is False
+
+    def test_missing_wake_confidence_stays_unverified_during_media(self):
+        # Still requires a reported score — no score, no capture-bug claim.
+        self._store("thunder only happens when it's raining", similarity=0.1)
+        resolved = self._resolve(
+            {"source": "wake", "self_playback": True, "self_playback_kind": "music"}
+        )
+        assert resolved is not None
+        assert resolved["verified"] is False
+
+    def test_phrase_trace_stays_unverified_during_media(self):
+        # A trace of the wake phrase means the clip pipeline worked; the
+        # soft unverified lean (not fail-open) is the right treatment.
+        self._store("the harvest is ready", similarity=0.62)
+        resolved = self._resolve(
+            {
+                "source": "wake",
+                "wake_confidence": 0.6,
+                "self_playback": True,
+                "self_playback_kind": "music",
+            }
+        )
+        assert resolved is not None
+        assert resolved["verified"] is False
+
+    def test_missing_kind_counts_as_music(self):
+        self._store("thunder only happens when it's raining", similarity=0.1)
+        resolved = self._resolve(
+            {"source": "wake", "wake_confidence": 0.6, "self_playback": True}
+        )
+        assert resolved is None
+
+    def test_future_non_music_kind_keeps_normal_bar(self):
+        self._store("thunder only happens when it's raining", similarity=0.1)
+        resolved = self._resolve(
+            {
+                "source": "wake",
+                "wake_confidence": 0.6,
+                "self_playback": True,
+                "self_playback_kind": "podcast",
+            }
+        )
+        assert resolved is not None
+        assert resolved["verified"] is False
+
+    def test_high_confidence_gate_unchanged_without_media_fields(self):
+        # Old nodes: the 0.9 capture-bug gate keeps working exactly as before.
+        self._store("Turn on the living room lights.", similarity=0.2)
+        resolved = self._resolve({"source": "wake", "wake_confidence": 0.97})
+        assert resolved is None

@@ -268,3 +268,388 @@ class TestChatSource:
         hint = build_turn_hint("chat")
         assert "wake" not in hint.lower()
         assert "confidence" not in hint.lower()
+
+
+class TestWakeVerifiedSoftBias:
+    """2026-08-15 regression pins: verified=False demoted from a hard
+    suppression instruction to a mild ambient lean. Two REAL lights commands
+    were suppressed because wake verification read garbage clips — one bad
+    clip must never single-handedly silence a turn."""
+
+    def test_unverified_hint_is_a_mild_lean_not_an_instruction(self):
+        hint = build_turn_hint("wake", wake_confidence=0.95, wake_verified=False)
+        assert hint is not None
+        assert "one signal" in hint
+        # The old hard posture must be gone.
+        assert "almost certainly" not in hint
+        assert "Do NOT act" not in hint
+
+    def test_unverified_hint_keeps_the_answer_path_open(self):
+        hint = build_turn_hint("wake", wake_confidence=0.95, wake_verified=False)
+        assert "should still be answered" in hint
+
+    def test_unverified_hint_does_not_require_addressing_by_name(self):
+        # The old text demanded the transcript "explicitly addresses you by
+        # name" — nobody says "Jarvis" mid-command after the wake word.
+        hint = build_turn_hint("wake", wake_confidence=0.95, wake_verified=False)
+        assert "by name" not in hint
+
+    def test_device_command_overrides_unverified_lean(self):
+        # Imperative guard senior to the verdict: the literal 2026-08-15
+        # losses keep the normal directed posture.
+        for cmd in (
+            "Turn on the living room lights.",
+            "Turn on the playroom lights.",
+        ):
+            hint = build_turn_hint(
+                "wake",
+                wake_confidence=0.97,
+                wake_verified=False,
+                transcript=cmd,
+            )
+            assert hint is not None
+            assert "addressed to you" in hint.lower()
+            assert "misfire" not in hint.lower()
+
+    def test_junk_transcript_keeps_unverified_lean(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.97,
+            wake_verified=False,
+            transcript="- Uh-huh. - Eat it.",
+        )
+        assert hint is not None
+        assert "one signal" in hint
+
+    def test_verified_true_gets_normal_posture(self):
+        hint = build_turn_hint("wake", wake_confidence=0.95, wake_verified=True)
+        assert "addressed to you" in hint.lower()
+
+
+class TestUnverifiedWakeKeepsSentinelRescue:
+    """The /think sentinel double-check must stay available on
+    unverified-clip turns — the verify clip itself can be garbage
+    (2026-08-15), so the rescue is the last line against a wrong silence."""
+
+    def test_signature_no_longer_takes_wake_verified(self):
+        import inspect
+
+        from app.core.turn_context import should_double_check_sentinel
+
+        params = inspect.signature(should_double_check_sentinel).parameters
+        assert "wake_verified" not in params
+
+    def test_confident_wake_qualifies_regardless_of_clip_verdict(self):
+        # Before: wake_verified=False short-circuited the rescue off. Now
+        # the verdict is not consulted at all — a confident wake keeps it.
+        from app.core.turn_context import should_double_check_sentinel
+
+        assert should_double_check_sentinel("wake", 0.97, None, None) is True
+
+
+class TestSharedConfidenceConstant:
+    def test_threshold_is_the_direction_hint_constant(self):
+        # Item 7 hygiene: the duplicated 0.75s are unified — one source.
+        from app.core.direction_hint import BORDERLINE_CONFIDENCE
+
+        assert WAKE_CONFIDENT_THRESHOLD is BORDERLINE_CONFIDENCE or (
+            WAKE_CONFIDENT_THRESHOLD == BORDERLINE_CONFIDENCE
+        )
+
+
+class TestSelfPlaybackMediaContext:
+    """Media-aware wake hints: when the node reported SELF-PLAYBACK (its own
+    speaker was playing music at wake), the wake hint carries a mild
+    two-sided media-context line — music is a known false-wake source, but
+    users also talk to Jarvis over music, most often to control it. Soft
+    bias only; never a suppression instruction."""
+
+    def test_wake_hint_carries_media_context_line(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert hint is not None
+        assert hint.startswith("[turn context:")
+        assert hint.endswith("]")
+        assert "own speaker" in hint
+        assert "music" in hint.lower()
+
+    def test_media_line_is_two_sided_not_a_suppression(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        # Both sides present: false-wake awareness AND talk-over-music.
+        assert "false-wake" in hint or "false wake" in hint.lower()
+        assert "talk to you over" in hint or "over their music" in hint
+        # And it must never instruct silence outright.
+        assert "do not act" not in hint.lower()
+
+    def test_media_line_calls_music_control_directed(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert "music-control" in hint.lower()
+        assert "directed at you" in hint.lower()
+
+    def test_no_media_line_without_self_playback(self):
+        for kwargs in (
+            {},
+            {"self_playback": None, "self_playback_kind": None},
+            {"self_playback": False, "self_playback_kind": None},
+        ):
+            hint = build_turn_hint("wake", wake_confidence=0.95, **kwargs)
+            assert "own speaker" not in hint
+
+    def test_old_node_missing_fields_identical_output(self):
+        assert build_turn_hint("wake", wake_confidence=0.95) == build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            self_playback=None,
+            self_playback_kind=None,
+        )
+
+    def test_future_non_music_kind_gets_no_media_line(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            self_playback=True,
+            self_playback_kind="podcast",
+        )
+        assert "own speaker" not in hint
+
+    def test_missing_kind_still_counts_as_music(self):
+        hint = build_turn_hint(
+            "wake", wake_confidence=0.95, self_playback=True
+        )
+        assert "own speaker" in hint
+
+    def test_low_confidence_variant_also_carries_media_line(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=WAKE_CONFIDENT_THRESHOLD - 0.2,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert "low confidence" in hint.lower()
+        assert "own speaker" in hint
+
+    def test_unverified_lean_also_carries_media_line(self):
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.95,
+            wake_verified=False,
+            transcript="what's the weather tomorrow",
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert "one signal" in hint
+        assert "own speaker" in hint
+
+    def test_music_control_overrides_unverified_lean_during_media(self):
+        # Residual music bleed degrades the verify clip, so unverified is
+        # the EXPECTED verdict on a real mid-music wake — and a bare
+        # music-control command is the most likely real utterance. It gets
+        # the directed posture, like the device-command guard.
+        for cmd in ("Pause.", "Skip this song.", "Turn it down."):
+            hint = build_turn_hint(
+                "wake",
+                wake_confidence=0.97,
+                wake_verified=False,
+                transcript=cmd,
+                self_playback=True,
+                self_playback_kind="music",
+            )
+            assert hint is not None, cmd
+            assert "addressed to you" in hint.lower(), cmd
+            assert "misfire" not in hint.lower(), cmd
+
+    def test_music_control_without_media_keeps_unverified_lean(self):
+        # Off-music, a bare "Pause." with an unverified clip keeps the
+        # existing soft misfire lean — the music-control guard only exists
+        # during self-playback.
+        hint = build_turn_hint(
+            "wake",
+            wake_confidence=0.97,
+            wake_verified=False,
+            transcript="Pause.",
+        )
+        assert "one signal" in hint
+
+    def test_follow_up_hint_unaffected_by_self_playback(self):
+        assert build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            self_playback=True,
+            self_playback_kind="music",
+        ) == build_turn_hint("follow_up", follow_up_iteration=1)
+
+    def test_chat_hint_unaffected_by_self_playback(self):
+        assert build_turn_hint(
+            "chat", self_playback=True, self_playback_kind="music"
+        ) == build_turn_hint("chat")
+
+    def test_inferred_wake_carries_media_line(self):
+        # Old-signature path (no turn_source, pre-wake present) still routes
+        # media context when the new fields ride along.
+        hint = build_turn_hint(
+            None,
+            pre_wake_speech_seconds=0.0,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert hint is not None
+        assert "own speaker" in hint
+
+
+class TestFollowUpNamedPersonAddressing:
+    """2026-08-17 prod incident: a follow-up captured "already done. Wow.
+    Miles, come here." — a parent calling their child, a KNOWN household
+    member. Telemetry: wake_verdict=none (no speaker clip → verification
+    never ran), so the unverified-keyed doubt machinery never engaged and
+    the normal follow-up posture answered into the family's conversation.
+
+    A transcript that directly addresses a household member by name is
+    near-certainly not for Jarvis — SHAPE evidence, not acoustic, so the
+    lean applies on ANY verdict. It is a hint, never a hard cut; the
+    imperative device/music guard stays senior; and with no member names
+    (old cache, resolve failure) or no match the hint is byte-identical.
+    """
+
+    INCIDENT = "already done. Wow. Miles, come here."
+    MEMBERS = ["Miles", "Alex"]
+
+    def test_incident_transcript_gets_addressing_lean(self):
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript=self.INCIDENT,
+            member_names=self.MEMBERS,
+        )
+        assert hint is not None
+        assert "directly addresses Miles" in hint
+        assert "another member of this household" in hint
+        assert "<not_for_me/>" in hint
+
+    def test_addressing_lean_is_not_a_hard_cut(self):
+        # The hint must keep the answer path open for "Miles, ask Jarvis
+        # what time it is" style utterances.
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript=self.INCIDENT,
+            member_names=self.MEMBERS,
+        )
+        assert "unless it ALSO asks you something directly" in hint
+
+    def test_applies_on_any_verdict_not_just_doubted(self):
+        # The incident's exact telemetry: no conversation_wake_verdict at
+        # all — the lean must not be keyed on "unverified".
+        for verdict in (None, "verified", "clip_unreliable", "unverified"):
+            hint = build_turn_hint(
+                "follow_up",
+                follow_up_iteration=1,
+                transcript=self.INCIDENT,
+                member_names=self.MEMBERS,
+                conversation_wake_verdict=verdict,
+            )
+            assert "directly addresses Miles" in hint, f"verdict={verdict}"
+
+    def test_no_member_names_is_byte_identical(self):
+        base = build_turn_hint(
+            "follow_up", follow_up_iteration=1, transcript=self.INCIDENT
+        )
+        for names in (None, []):
+            assert build_turn_hint(
+                "follow_up",
+                follow_up_iteration=1,
+                transcript=self.INCIDENT,
+                member_names=names,
+            ) == base
+
+    def test_no_name_match_is_byte_identical(self):
+        transcript = "what about tomorrow then"
+        base = build_turn_hint(
+            "follow_up", follow_up_iteration=1, transcript=transcript
+        )
+        assert build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript=transcript,
+            member_names=self.MEMBERS,
+        ) == base
+
+    def test_jarvis_name_is_excluded(self):
+        # A household member literally named "Jarvis" (or the wake phrase
+        # itself) must never earn the not-for-you lean — "Jarvis, what
+        # time is it" is the MOST directed shape there is.
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript="Jarvis, what about tomorrow",
+            member_names=["Jarvis", "Miles"],
+        )
+        assert "directly addresses" not in hint
+
+    def test_device_command_guard_stays_senior(self):
+        # "Miles, turn off the lights" — imperative device shape wins;
+        # the model must not be talked out of a real command.
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript="Miles, turn off the lights",
+            member_names=self.MEMBERS,
+        )
+        assert "directly addresses" not in hint
+
+    def test_music_control_guard_stays_senior_during_playback(self):
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript="Miles, pause",
+            member_names=self.MEMBERS,
+            self_playback=True,
+            self_playback_kind="music",
+        )
+        assert "directly addresses" not in hint
+
+    def test_doubted_posture_also_carries_the_lean(self):
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=2,
+            transcript=self.INCIDENT,
+            member_names=self.MEMBERS,
+            conversation_wake_verdict="unverified",
+        )
+        assert "suspected detector misfire" in hint
+        assert "directly addresses Miles" in hint
+
+    def test_wake_turns_are_unaffected(self):
+        # Shape lean is follow-up-only: a fresh wake saying a member's
+        # name ("Jarvis, call Miles down for dinner" mis-split) keeps the
+        # directed posture.
+        base = build_turn_hint("wake", wake_confidence=0.9, transcript=self.INCIDENT)
+        assert build_turn_hint(
+            "wake",
+            wake_confidence=0.9,
+            transcript=self.INCIDENT,
+            member_names=self.MEMBERS,
+        ) == base
+
+    def test_hint_stays_bracketed(self):
+        hint = build_turn_hint(
+            "follow_up",
+            follow_up_iteration=1,
+            transcript=self.INCIDENT,
+            member_names=self.MEMBERS,
+        )
+        assert hint.startswith("[turn context:")
+        assert hint.endswith("]")

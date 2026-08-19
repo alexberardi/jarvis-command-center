@@ -13,9 +13,31 @@ borderline middle band, a LOW-confidence wake fire upgrades the combined
 signal to actionable (intermittent room speech + a barely-over-threshold
 score is the kitchen-conversation signature; prod 2026-08-15). A middle
 band wake at normal confidence stays silent as before.
+
+Beyond the VAD cue, two transcript-shape signals feed this hint on wake
+turns (both ambient-LEANING only, never a hard suppression instruction):
+multi-speaker dash notation ("- Yeah. - Eat it.") and ≤2-word non-command
+fragments from an unrecognized speaker. Senior to both is the imperative
+device-command guard: a transcript shaped like "turn on the ... lights"
+never receives an ambient-leaning hint from acoustic/shape evidence alone
+(prod 2026-08-15: two real lights commands were suppressed that way).
+
+Self-playback (node reported its own speaker was playing music at wake):
+the VAD calibrated against the music bleed, so the reading is
+uninformative in BOTH directions — ~0s is the normal mid-music reading,
+not a quiet room, and a high reading is just the music. All VAD-derived
+branches are suppressed for the turn; the junk-shape signals still apply,
+and music-control shapes ("pause", "skip") join the device-command guard.
 """
 
 from __future__ import annotations
+
+from app.core.transcript_filter import (
+    has_multi_speaker_markers,
+    is_device_command_shaped,
+    is_music_control_shaped,
+    is_short_non_command_fragment,
+)
 
 # Below this: "quiet before wake" — actively boost confidence in "directed".
 # Raised from 0.5s after the 2026-06-02 prod incident where side-conversation
@@ -38,16 +60,50 @@ ACTIVE_THRESHOLD_S: float = 4.5
 # even if the node changes its window (we'd update both sides together).
 WINDOW_SECONDS: float = 5.0
 # Below this OWW score a middle-band wake reads as "marginal fire during
-# room speech" and gets the combined-signal hint. Mirrors
-# turn_context.WAKE_CONFIDENT_THRESHOLD (not imported — turn_context
-# imports from this module; keep the values in sync by hand).
+# room speech" and gets the combined-signal hint. SINGLE SOURCE for the
+# confident/marginal wake-score boundary — turn_context imports this as
+# WAKE_CONFIDENT_THRESHOLD (turn_context already imports from this module,
+# so the dependency direction is fixed).
 BORDERLINE_CONFIDENCE: float = 0.75
+
+
+# Appended to ambient-leaning hints when the speaker's voice matched a
+# known household member — a recognized voice is directed-leaning evidence
+# that must temper any acoustic ambient signal.
+_SPEAKER_KNOWN_NOTE = (
+    " Note: the speaker's voice matched a known household member, which "
+    "leans toward this being directed at you."
+)
+
+
+def is_media_self_playback(
+    self_playback: bool | None, self_playback_kind: str | None
+) -> bool:
+    """True when the node reported its OWN speaker was playing music at wake.
+
+    During self-playback the node's pre-wake VAD calibrates against the
+    music bleed, so ``pre_wake_speech_seconds`` reads ~0 on a REAL mid-music
+    wake — the quiet-room fingerprint. Every VAD-derived branch must treat
+    the signal as uninformative for these turns.
+
+    ``self_playback_kind`` is "music" today; a missing kind on a node that
+    set the flag still counts as music (the only kind that exists) so a
+    slightly-older node build doesn't silently lose the treatment. A future
+    NON-music kind will NOT inherit it without a deliberate decision here.
+    """
+    if not self_playback:
+        return False
+    return self_playback_kind is None or self_playback_kind == "music"
 
 
 def build_direction_hint(
     pre_wake_speech_seconds: float | None,
     wake_confidence: float | None = None,
     turn_source: str | None = None,
+    transcript: str | None = None,
+    speaker_known: bool | None = None,
+    self_playback: bool | None = None,
+    self_playback_kind: str | None = None,
 ) -> str | None:
     """Return a one-line hint, or None when the signal isn't actionable.
 
@@ -59,27 +115,108 @@ def build_direction_hint(
             in the ambiguous middle band, where a marginal score upgrades
             the combined signal to an ambient-leaning hint.
         turn_source: Turn provenance ("wake" / "follow_up" / "chat"). The
-            combined-signal branch applies to wake turns only.
+            combined-signal and transcript-shape branches apply to wake
+            turns only.
+        transcript: The command transcript, when available. Feeds the
+            imperative device-command guard (senior: suppresses every
+            ambient-leaning branch) and the junk-shape signals (dash
+            markers, short fragments).
+        speaker_known: True when the speaker was voice-matched to a
+            household member — a directed-leaning input that tempers
+            ambient-leaning hints and disables the fragment signal.
+        self_playback: The node was playing media from its OWN speaker when
+            the wake fired. Makes every VAD-derived branch uninformative:
+            the node's pre-wake VAD calibrated against the music bleed, so
+            ~0s is the NORMAL reading on a real mid-music wake (and a high
+            reading is just the music). Junk-shape signals still apply.
+        self_playback_kind: What was playing ("music"). See
+            ``is_media_self_playback``.
 
     Returns:
         A short bracketed hint to append to the user message, or ``None``
-        when no hint should be added (signal missing, or ambiguous middle
-        band without a marginal wake score).
+        when no hint should be added (signal missing, ambiguous middle
+        band without a marginal wake score, or VAD-only signal during
+        self-playback).
     """
-    if pre_wake_speech_seconds is None:
-        return None
-    if pre_wake_speech_seconds < QUIET_THRESHOLD_S:
-        return (
+    media_playback = is_media_self_playback(self_playback, self_playback_kind)
+
+    quiet_hint = (
+        (
             f"[direction hint: room was quiet "
             f"({pre_wake_speech_seconds:.1f}s of speech in the "
             f"{WINDOW_SECONDS:.0f}s before wake) — strong signal this is directed at you]"
         )
+        if (
+            not media_playback  # VAD reads ~0 DURING music — not a quiet room
+            and pre_wake_speech_seconds is not None
+            and pre_wake_speech_seconds < QUIET_THRESHOLD_S
+        )
+        else None
+    )
+
+    # IMPERATIVE DEVICE-COMMAND GUARD (senior to every ambient-leaning
+    # signal below): "turn on the living room lights" must never receive a
+    # suppression-leaning hint from acoustic-side evidence alone. Directed
+    # evidence (quiet room) still surfaces; everything ambient-leaning is
+    # muted (prod 2026-08-15: two real lights commands suppressed by wake
+    # verification reading garbage clips). During self-playback,
+    # music-control shapes ("pause", "skip", "turn it down") get the same
+    # seniority — talking over the music to control it is the single most
+    # expected mid-music utterance, and a bare "pause" must not fall
+    # through to the short-fragment junk signal below.
+    if transcript is not None and (
+        is_device_command_shaped(transcript)
+        or (media_playback and is_music_control_shaped(transcript))
+    ):
+        return quiet_hint
+
+    ambient_note = _SPEAKER_KNOWN_NOTE if speaker_known else ""
+
+    # Transcript-shape signals (wake turns only). Both are LEANING hints —
+    # they present evidence and leave the call to the model; neither ever
+    # instructs a hard suppression. They outrank the VAD branches because
+    # the pre-wake VAD signal can flatline (prod: 0.00 for 14 days straight)
+    # and a dead-quiet reading must not mask direct transcript evidence of
+    # a dialogue.
+    if turn_source == "wake" and transcript:
+        if has_multi_speaker_markers(transcript):
+            return (
+                f"[direction hint: the transcript contains multi-speaker "
+                f"dialogue markers (dash-prefixed turns) — this usually "
+                f"means the mic caught people (or a TV) talking to each "
+                f"other, which leans toward <not_for_me/>. Still answer if "
+                f"the content is unmistakably addressed to you."
+                f"{ambient_note}]"
+            )
+        if speaker_known is not True and is_short_non_command_fragment(
+            transcript
+        ):
+            return (
+                "[direction hint: the transcript is a very short fragment "
+                "from an unrecognized speaker — on a wake turn this is "
+                "usually an STT fragment or overheard cross-talk, which "
+                "leans toward <not_for_me/>. Still answer if it is a real "
+                "request to you.]"
+            )
+
+    # During self-playback every remaining branch is VAD-derived and the
+    # VAD is measuring the node's own music, not the room — no reading in
+    # either direction is trustworthy. Suppress them all for the turn (the
+    # media context itself is surfaced by the turn hint, not here).
+    if media_playback:
+        return None
+
+    if pre_wake_speech_seconds is None:
+        return None
+    if quiet_hint is not None:
+        return quiet_hint
     if pre_wake_speech_seconds > ACTIVE_THRESHOLD_S:
         return (
             f"[direction hint: continuous speech detected "
             f"({pre_wake_speech_seconds:.1f}s in the {WINDOW_SECONDS:.0f}s before wake) — "
             f"wake may have fired during a conversation between people; "
-            f"emit <not_for_me/> unless the transcript is clearly addressed to you]"
+            f"emit <not_for_me/> unless the transcript is clearly addressed to you."
+            f"{ambient_note}]"
         )
     # Ambiguous middle band: the VAD cue alone isn't actionable, but paired
     # with a marginal wake score it is — intermittent room speech + a
@@ -100,6 +237,6 @@ def build_direction_hint(
             f"you: if the transcript reads like people talking to each other "
             f"(replies to something you didn't say, third-person references, "
             f"mid-story fragments, 'we/let's' plans), emit <not_for_me/>. "
-            f"Answer only if it plausibly addresses you.]"
+            f"Answer only if it plausibly addresses you.{ambient_note}]"
         )
     return None

@@ -596,17 +596,55 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         key="voice.wake_verification_mode",
         category="voice",
         value_type="string",
-        default="bias",
+        default="off",
         description=(
             "Wake-clip verification: transcribe the ~2s clip that fired the "
             "wake word and check it actually contains the wake phrase. "
-            "'off' = disabled; 'bias' = an unverified wake injects a strong "
-            "not_for_me-leaning prompt hint; 'enforce' = an unverified wake "
-            "is silently dropped (like the STT-noise prefilter). Catches "
+            "'off' = disabled; 'bias' = an unverified wake injects a mild "
+            "misfire-leaning prompt hint (one signal, never a suppression "
+            "instruction); 'enforce' = an unverified wake is silently "
+            "dropped (like the STT-noise prefilter). Catches "
             "high-confidence openWakeWord misfires that score/VAD cannot "
             "(prod 2026-08-15: a 0.95 misfire marked a medication as taken "
-            "off overheard family talk). Always fails OPEN on missing/"
-            "pending/errored verdicts."
+            "off overheard family talk). Fail SAFE: missing rows and "
+            "unrecognized values both mean 'off', and missing/pending/"
+            "errored verdicts always fail OPEN."
+        ),
+    ),
+    SettingDefinition(
+        key="voice.followup_doubt_max_rounds",
+        category="voice",
+        value_type="int",
+        default=2,
+        description=(
+            "Answered (non-sentinel) rounds a DOUBTED conversation — one "
+            "whose wake-clip verdict was 'unverified' — gets before "
+            "follow-up turns gain a strong wrap-up lean (answer briefly "
+            "and close with <exchange_complete/>, or <not_for_me/> if not "
+            "addressed). A prompt lean, never a hard cut; conversations "
+            "with a verified wake are exempt. Breaks the kitchen runaway "
+            "(2026-08-15): an answered false wake opened the follow-up "
+            "window onto the family's conversation and Jarvis answered "
+            "non-stop."
+        ),
+    ),
+    SettingDefinition(
+        key="voice.tool_dedupe_window_seconds",
+        category="voice",
+        value_type="float",
+        default=120.0,
+        description=(
+            "Seconds an issued CLIENT tool call (name + canonicalized "
+            "args) blocks an IDENTICAL re-issue in the same conversation. "
+            "A repeat inside the window is answered with a one-shot system "
+            "nudge ('the results are already in this conversation above — "
+            "answer from them') instead of a 202; whatever the model "
+            "returns next is accepted, and a second identical request "
+            "after the nudge passes through (fail-open — the model may "
+            "genuinely want a refresh). 0 disables. Server tools are "
+            "excluded. Breaks the 2026-08-15 calendar loop: three "
+            "identical get_calendar_events in 25s, each follow-up "
+            "re-reading the whole calendar aloud."
         ),
     ),
     SettingDefinition(
