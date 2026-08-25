@@ -264,8 +264,28 @@ class TestBuildSpeakerBlock:
         assert "MUST call the tool" in result
         assert "- Likes coffee black" in result
 
-    def test_default_name_no_memories_is_empty(self):
-        assert build_speaker_block("default", "") == ""
+    def test_unknown_speaker_gets_an_explicit_anonymity_instruction(self):
+        """2026-08-25 prod incident: the wake turn shipped no speaker audio, so
+        the speaker was unresolved and this returned "" — no identity text at
+        all. Meanwhile DEFAULT_PERSONA tells the model "Call the person by name
+        when it feels natural." Nothing supplied a name and nothing said it
+        didn't have one, so the model filled the blank with the household's
+        primary user and greeted the wrong person by name.
+
+        Silence is not neutral here. An unknown speaker needs a POSITIVE
+        instruction not to guess."""
+        result = build_speaker_block("default", "")
+        assert result, "unknown speaker must not produce an empty block"
+        assert "do not know who is speaking" in result.lower()
+        assert "name" in result.lower()
+        # It must not leak a guess of its own.
+        assert "You are speaking with" not in result
+
+    def test_unknown_speaker_block_does_not_invite_an_announcement(self):
+        # The model must simply omit the name, not narrate its uncertainty
+        # out loud ("I'm not sure who you are") — that is worse than silence.
+        result = build_speaker_block("default", "")
+        assert "don't mention" in result.lower() or "do not mention" in result.lower()
 
     def test_name_only(self):
         result = build_speaker_block("alex", "")
@@ -280,7 +300,9 @@ class TestBuildSpeakerBlock:
         assert "- Vegetarian" in result
 
     def test_empty_inputs(self):
-        assert build_speaker_block("", "") == ""
+        # An empty name is the same "we don't know" state as the sentinel.
+        result = build_speaker_block("", "")
+        assert "do not know who is speaking" in result.lower()
 
 
 class TestBuildPersonalityBlock:
