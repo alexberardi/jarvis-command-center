@@ -198,6 +198,12 @@ _REPORT_SHAPE_RE: re.Pattern[str] = re.compile(
     r"(?:the\s+)?[\w']+\s+"
     r"(?:just\s+|already\s+|finally\s+)?"
     r"(?:took|takes|taken|gave|given|administered|got)\s+"
+    # Optional INDIRECT OBJECT — "gave [Leo] his medicine", "gave [the dog] his
+    # meds". Without it, naming the recipient was the one phrasing that failed
+    # the gate while every other form of the same sentence passed, and the dose
+    # went unlogged (prod 2026-08-25 evening). Optional + backtracking, so
+    # "Leo took his medicine" still matches by skipping the group entirely.
+    r"(?:(?:the\s+)?[\w']+\s+)?"
     r"(?:his|her|their|my|our|its|the|a|an|some|him|them)\b",
     re.IGNORECASE,
 )
