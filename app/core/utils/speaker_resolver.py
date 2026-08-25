@@ -6,6 +6,7 @@ Uses a TTL cache to avoid repeated auth-service calls for the same user.
 import logging
 import time
 from typing import Optional
+from urllib.parse import urlencode
 
 from app.core.utils.rest_client import get
 
@@ -86,8 +87,15 @@ async def resolve_member_names(
 
     if missing:
         try:
-            joined = ",".join(str(u) for u in missing)
-            url = f"{auth_base_url}/internal/users/batch?user_ids={joined}"
+            # Repeated params, NOT comma-joined. jarvis-auth declares
+            # `user_ids: List[int] = Query(...)`; FastAPI reads that as
+            # `?user_ids=1&user_ids=2`, and a comma-joined "1,2" fails int
+            # coercion → 422 for every multi-id call. Because this helper fails
+            # soft (best-effort hint signal), the breakage never surfaced as an
+            # error — it just looked like a household with no other members.
+            # Observed in prod on every conversation start, 2026-08-25.
+            query = urlencode([("user_ids", u) for u in missing])
+            url = f"{auth_base_url}/internal/users/batch?{query}"
             result = await get(url, timeout=5)
             users = result.get("users") if isinstance(result, dict) else None
             if isinstance(users, dict):
