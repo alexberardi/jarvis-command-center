@@ -588,3 +588,51 @@ class TestResponseClaimsAction:
         assert not response_claims_action(None)
         assert not response_claims_action("")
         assert not response_claims_action("   ")
+
+
+class TestReportShapeDitransitive:
+    """`<subject> gave <indirect object> <possessive> <thing>` is report shape.
+
+    2026-08-25 evening, prod: "I gave Leo his medicine." — clean transcript, no
+    truncation — logged "Force-tool-calls guard skipped — utterance is neither
+    action- nor report-shaped" and the dose went unlogged, twice on voice and
+    twice more in the app.
+
+    _REPORT_SHAPE_RE only accepted `<subject> gave <possessive>`, so naming the
+    recipient broke it. Every other phrasing of the same sentence passed. The
+    most natural way to say it was the one way that failed.
+    """
+
+    def test_named_recipient_is_report_shaped(self):
+        from app.core.transcript_filter import is_report_shaped
+        # The exact prod utterance.
+        assert is_report_shaped("I gave Leo his medicine.")
+        assert is_report_shaped("I gave Leo his meds")
+        assert is_report_shaped("Kait gave Groot his pill")
+        assert is_report_shaped("I gave the dog his medicine")
+        assert is_report_shaped("I gave the kids their vitamins")
+
+    def test_previously_working_shapes_still_work(self):
+        from app.core.transcript_filter import is_report_shaped
+        # Regression net: these all passed before the ditransitive change and
+        # must keep passing (the optional indirect object has to backtrack out).
+        assert is_report_shaped("Leo took his medicine")
+        assert is_report_shaped("I took my pills")
+        assert is_report_shaped("I gave him his medicine")
+        assert is_report_shaped("she gave the dog its meds")
+        assert is_report_shaped("Leo got his pill")
+        assert is_report_shaped("Leo already took his medicine")
+
+    def test_questions_and_multi_speaker_still_excluded(self):
+        from app.core.transcript_filter import is_report_shaped
+        # The senior guards are unchanged: a question is never a report, and
+        # dash-marked cross-talk is never a single-speaker report.
+        assert not is_report_shaped("Did I give Leo his medicine?")
+        assert not is_report_shaped("Should I give Leo his medicine")
+        assert not is_report_shaped("- I gave Leo his medicine. - Did you?")
+
+    def test_non_reports_still_rejected(self):
+        from app.core.transcript_filter import is_report_shaped
+        assert not is_report_shaped("what's the weather")
+        assert not is_report_shaped("turn off the lights")
+        assert not is_report_shaped("his medicine.")
