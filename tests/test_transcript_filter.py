@@ -519,3 +519,72 @@ class TestIsReportShaped:
         from app.core.transcript_filter import is_report_shaped
         assert not is_report_shaped(None)
         assert not is_report_shaped("")
+
+
+class TestResponseClaimsAction:
+    """``response_claims_action`` classifies the MODEL's own reply, not the
+    user's transcript.
+
+    2026-08-25 prod incident (kitchen, 7:03 AM): STT truncated "Leo took his
+    medicine" down to "his medicine." — the verb was lost with the head of the
+    utterance. The force-tool-calls guard classifies by UTTERANCE shape, so a
+    bare noun phrase read as "neither action- nor report-shaped" and the guard
+    stood down. The model answered "I'll check on Leo's meds for you." with
+    ``tool_calls: []`` and nothing ran; the dose went unlogged. The same model
+    failure on the typed path ("Leo took his medicine" — report-shaped) WAS
+    caught and retried into ``medication(action=mark)``.
+
+    The model's own words are the signal the truncated transcript lost: a reply
+    that PROMISES or CLAIMS an action while calling no tool is a correctness
+    failure regardless of how the transcript reads.
+    """
+
+    def test_promise_to_act_is_a_claim(self):
+        from app.core.transcript_filter import response_claims_action
+        # The exact prod line that went unlogged.
+        assert response_claims_action("I'll check on Leo's meds for you.")
+        assert response_claims_action("I will turn off the lights.")
+        assert response_claims_action("Sure, I'll add that to your list.")
+        assert response_claims_action("Let me look that up for you.")
+        assert response_claims_action("I'm going to set a reminder.")
+
+    def test_claim_of_completed_action(self):
+        from app.core.transcript_filter import response_claims_action
+        # The typed-path line the guard already catches — same shape family.
+        assert response_claims_action("Got it, Leo's medicine is marked as taken.")
+        assert response_claims_action("I've marked it as taken.")
+        assert response_claims_action("Done — I added that to your list.")
+        assert response_claims_action("I just logged that for you.")
+        assert response_claims_action("That's been scheduled.")
+
+    def test_in_progress_claim(self):
+        from app.core.transcript_filter import response_claims_action
+        assert response_claims_action("I'm marking that now.")
+        assert response_claims_action("Setting a reminder for 8 AM.")
+
+    def test_plain_answers_are_not_claims(self):
+        from app.core.transcript_filter import response_claims_action
+        # 2026-08-17 calendar incident: the model ANSWERED an open question.
+        # Widening the guard must not drag these back into a forced retry.
+        assert not response_claims_action(
+            "You've got soccer at four and dinner with the Harrisons at six."
+        )
+        assert not response_claims_action("It's seventy-two degrees and sunny.")
+        assert not response_claims_action("Hey there. What's on your mind?")
+        assert not response_claims_action("Sounds like someone's been busy.")
+
+    def test_non_action_first_person_is_not_a_claim(self):
+        from app.core.transcript_filter import response_claims_action
+        # "Let me know" / "I'll keep" are conversational, not tool work — the
+        # verb list is the wall.
+        assert not response_claims_action("Let me know if you need anything else.")
+        assert not response_claims_action("I'll keep that in mind.")
+        assert not response_claims_action("I'm not sure what you mean.")
+        assert not response_claims_action("I don't know that one.")
+        assert not response_claims_action("I'm a bit confused — what did you say?")
+
+    def test_empty_and_none(self):
+        from app.core.transcript_filter import response_claims_action
+        assert not response_claims_action(None)
+        assert not response_claims_action("")
+        assert not response_claims_action("   ")

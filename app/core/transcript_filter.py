@@ -25,6 +25,10 @@ never its meaning, and feed the direction/turn hints — a device-shaped
 imperative must never be talked out of by acoustic-side evidence alone
 (prod 2026-08-15: two real "turn on the ... lights" commands were
 suppressed because wake verification read garbage clips).
+
+``response_claims_action`` is the one detector here that reads the MODEL's
+reply instead of the user's transcript — the signal that survives when STT
+truncates the utterance out from under the shape gates (prod 2026-08-25).
 """
 
 from __future__ import annotations
@@ -262,6 +266,102 @@ def is_report_shaped(text: str | None) -> bool:
         return False
     return _REPORT_SHAPE_RE.match(stripped) is not None
 
+
+# Verb vocabulary for ``response_claims_action`` — the work a TOOL does, in the
+# three tenses the model uses to talk about it. Enumerated per-form rather than
+# stem+suffix because the useful ones double their final consonant ("logging",
+# "setting", "putting") or go irregular ("sent", "put"). Conversational verbs
+# ("know", "keep", "think", "hope") are deliberately absent: "Let me know if you
+# need anything" and "I'll keep that in mind" must never read as tool work.
+_CLAIM_BASE_VERBS = (
+    "check", "look", "mark", "log", "record", "add", "set", "remind",
+    "schedule", "cancel", "delete", "remove", "turn", "play", "pause",
+    "start", "send", "update", "save", "note", "create", "put", "track",
+    "book", "order", "text", "message",
+)
+
+_CLAIM_PAST_VERBS = (
+    "checked", "looked", "marked", "logged", "recorded", "added", "set",
+    "reminded", "scheduled", "cancelled", "canceled", "deleted", "removed",
+    "turned", "played", "paused", "started", "sent", "updated", "saved",
+    "noted", "created", "put", "tracked", "booked", "ordered", "texted",
+    "messaged",
+)
+
+_CLAIM_ING_VERBS = (
+    "checking", "looking", "marking", "logging", "recording", "adding",
+    "setting", "reminding", "scheduling", "cancelling", "canceling",
+    "deleting", "removing", "turning", "playing", "pausing", "starting",
+    "sending", "updating", "saving", "noting", "creating", "putting",
+    "tracking", "booking", "ordering", "texting", "messaging",
+)
+
+# "I'll check on Leo's meds", "Let me look that up", "I'm going to set a timer".
+_CLAIM_INTENT_RE: re.Pattern[str] = re.compile(
+    rf"\b(?:i'?ll|i\s+will|i'?m\s+going\s+to|i\s+am\s+going\s+to|let\s+me|i\s+can)\s+"
+    rf"(?:go\s+ahead\s+and\s+)?(?:just\s+|now\s+)?"
+    rf"(?:{'|'.join(_CLAIM_BASE_VERBS)})\b",
+    re.IGNORECASE,
+)
+
+# "I've marked it as taken", "Done — I added that", "I just logged it".
+_CLAIM_DONE_RE: re.Pattern[str] = re.compile(
+    rf"\b(?:i'?ve|i\s+have|i)\s+"
+    rf"(?:just\s+|already\s+)?"
+    rf"(?:{'|'.join(_CLAIM_PAST_VERBS)})\b",
+    re.IGNORECASE,
+)
+
+# "Leo's medicine is marked as taken", "That's been scheduled" — the claim
+# stated about the thing rather than about the assistant.
+_CLAIM_PASSIVE_RE: re.Pattern[str] = re.compile(
+    rf"\b(?:is|are|was|were|'s|'re|has|have|had)\s+(?:been\s+)?"
+    rf"(?:now\s+|already\s+)?"
+    rf"(?:{'|'.join(_CLAIM_PAST_VERBS)})\b",
+    re.IGNORECASE,
+)
+
+# "I'm marking that now", or a bare gerund opener: "Setting a reminder for 8".
+_CLAIM_PROGRESS_RE: re.Pattern[str] = re.compile(
+    rf"(?:\bi'?m\s+(?:just\s+|now\s+)?|^\s*)"
+    rf"(?:{'|'.join(_CLAIM_ING_VERBS)})\b",
+    re.IGNORECASE,
+)
+
+
+def response_claims_action(text: str | None) -> bool:
+    """True when the MODEL's own reply promises or claims a tool action.
+
+    Note the inversion: every other detector here classifies the user's
+    transcript. This one reads the assistant's response, because that is where
+    the signal survives when the transcript does not.
+
+    2026-08-25 prod incident: STT truncated "Leo took his medicine" to "his
+    medicine." — the head of the utterance, verb included, was lost. The
+    force-tool-calls guard gates on utterance SHAPE, so a bare noun phrase
+    scored as neither action- nor report-shaped, the guard stood down, and the
+    model's "I'll check on Leo's meds for you." shipped with ``tool_calls: []``.
+    Nothing ran and the dose went unlogged. The identical model failure on the
+    typed path was caught, because "Leo took his medicine" reads as a report.
+
+    A reply that says it acted, or is about to, while calling no tool is a
+    correctness failure no matter how the transcript reads — so this arms the
+    guard as a third qualifying shape. It does NOT widen the guard on its own:
+    the keyword gate still has to agree, and question-shaped utterances stay
+    exempt (the 2026-08-17 calendar incident), so a plain answer to a plain
+    question is untouched.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return bool(
+        _CLAIM_INTENT_RE.search(stripped)
+        or _CLAIM_DONE_RE.search(stripped)
+        or _CLAIM_PASSIVE_RE.search(stripped)
+        or _CLAIM_PROGRESS_RE.search(stripped)
+    )
 
 def is_music_control_shaped(text: str | None) -> bool:
     """True when the transcript reads as a music-control command.

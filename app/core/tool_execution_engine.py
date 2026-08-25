@@ -42,6 +42,7 @@ from app.core.transcript_filter import (
     is_action_command_shaped,
     is_question_shaped,
     is_report_shaped,
+    response_claims_action,
 )
 from app.core.tool_call_parser import tool_call_parser
 from app.core.utils.latency_logger import latency_logger
@@ -1070,6 +1071,22 @@ class ToolExecutionEngine:
                 utterance_is_question = bool(user_utterance) and is_question_shaped(
                     user_utterance
                 )
+                # Reply gate (2026-08-25 incident): the two utterance shapes
+                # above both classify the TRANSCRIPT, so a truncated transcript
+                # disarms the guard. STT delivered "his medicine." with "Leo
+                # took" clipped off; the bare noun phrase scored as neither
+                # shape, the guard stood down, and "I'll check on Leo's meds for
+                # you." shipped with no tool call. The dose went unlogged. The
+                # model's own reply is the signal that survived the truncation:
+                # prose that PROMISES or CLAIMS an action while calling nothing
+                # is a correctness failure whatever the transcript looks like.
+                _utterance_is_actionable = bool(user_utterance) and (
+                    is_action_command_shaped(user_utterance)
+                    or is_report_shaped(user_utterance)
+                )
+                _reply_claims_action = any(
+                    response_claims_action(t) for t in _terminal_texts
+                )
                 if (
                     force_tools
                     and retry_count < 2
@@ -1083,14 +1100,11 @@ class ToolExecutionEngine:
                             "utterance; the model owns how to answer questions"
                         )
                         force_tools = False
-                    elif not (
-                        is_action_command_shaped(user_utterance)
-                        or is_report_shaped(user_utterance)
-                    ):
+                    elif not (_utterance_is_actionable or _reply_claims_action):
                         logger.info(
                             "Force-tool-calls guard skipped — utterance is "
-                            "neither action- nor report-shaped; accepting "
-                            "direct answer"
+                            "neither action- nor report-shaped and the reply "
+                            "claims no action; accepting direct answer"
                         )
                         force_tools = False
                     else:
@@ -1099,14 +1113,32 @@ class ToolExecutionEngine:
                             conversation_cache.get_tools(conversation_id),
                             tools,
                         )
+                        # Truncation rescue: when the REPLY is the only thing
+                        # that armed the guard, the transcript is precisely what
+                        # we don't trust — so let the reply satisfy the keyword
+                        # gate too. "his medicine." keeps its noun, but a clip
+                        # that loses it entirely still matches on the model's
+                        # own "Leo's meds". Both walls still stand: an
+                        # action-shaped utterance is matched on its own words.
+                        keyword_text = user_utterance
+                        if _reply_claims_action and not _utterance_is_actionable:
+                            keyword_text = " ".join(
+                                [user_utterance, *(t for t in _terminal_texts if t)]
+                            )
                         if keyword_pool and not utterance_matches_keywords(
-                            user_utterance, keyword_pool
+                            keyword_text, keyword_pool
                         ):
                             logger.info(
                                 "Force-tool-calls guard skipped — utterance matches "
                                 "no command keywords; accepting direct answer"
                             )
                             force_tools = False
+                        elif _reply_claims_action and not _utterance_is_actionable:
+                            logger.info(
+                                "Force-tool-calls guard armed by reply — utterance "
+                                "not action-shaped (possible STT truncation) but the "
+                                "reply claims an action with no tool call"
+                            )
                 # A prose answer produced by the double-check rescue is the
                 # rescue — never feed it back into the must-call machinery
                 # that manufactured the corner in the first place.

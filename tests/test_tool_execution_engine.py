@@ -3046,3 +3046,145 @@ class TestIdenticalToolCallDedupe:
             "[TOOL_DEDUPE]" in str(m.get("content", "")) for m in messages
         )
         assert any(m.get("content") == "old answer" for m in messages)
+
+
+class TestTruncatedUtteranceClaimsActionGuard:
+    """2026-08-25 prod incident (kitchen node, 7:03 AM).
+
+    STT delivered "his medicine." — "Leo took" was lost with the head of the
+    utterance. The force-tool-calls guard classifies by utterance SHAPE, so the
+    bare noun phrase read as neither action- nor report-shaped, the guard stood
+    down, and the model's "I'll check on Leo's meds for you." shipped with
+    ``tool_calls: []``. The dose was never logged. Forty-five seconds later the
+    same request typed into the app ("Leo took his medicine" — report-shaped)
+    hit the guard, retried, and produced ``medication(action=mark)``.
+
+    The model's own reply is the signal the transcript lost. These tests lock in
+    that a promise-to-act with no tool call arms the guard, and that the
+    2026-08-17 doctrine still holds: questions stay exempt and plain answers are
+    never forced into a tool.
+    """
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        client = MagicMock()
+        client.chat_completion = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_conversation_cache(self):
+        cache = MagicMock()
+        cache.get_node_context.return_value = {}
+        cache.get_timezone.return_value = "UTC"
+        # Keyword pool: the guard requires a command-keyword match as well as a
+        # qualifying shape. "medicine" is what the truncated transcript kept.
+        cache.get_available_commands.return_value = [
+            {"name": "medication", "keywords": ["medicine", "meds", "medication"]}
+        ]
+        cache.get_tools.return_value = [{"function": {"name": "medication"}}]
+        cache.get_force_tool_calls.return_value = True
+        cache.get_router_decision.return_value = None
+        return cache
+
+    @staticmethod
+    def _prose(text):
+        return {
+            "choices": [{
+                "message": {"content": '{"message": "%s", "tool_calls": []}' % text},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    @pytest.mark.asyncio
+    async def test_promise_to_act_on_truncated_utterance_retries(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The incident, replayed: truncated transcript + a reply that promises
+        an action must NOT be accepted as a final answer."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        calls = []
+
+        def side_effect(*args, **kwargs):
+            calls.append(1)
+            return self._prose("I'll check on Leo's meds for you.")
+
+        mock_llm_client.chat_completion.side_effect = side_effect
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-claims",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "medication"}}],
+                max_iterations=3,
+                user_utterance="his medicine.",
+            )
+
+        assert len(calls) > 1, (
+            "A promise-to-act with no tool call must arm the force-tool-calls "
+            "guard even when STT truncated the verb out of the utterance."
+        )
+
+    @pytest.mark.asyncio
+    async def test_plain_answer_on_truncated_utterance_is_left_alone(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """The other half of the doctrine: prose that answers rather than
+        claims must still be accepted on the first pass. Widening the guard
+        must not turn every short fragment into a forced tool call."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        calls = []
+
+        def side_effect(*args, **kwargs):
+            calls.append(1)
+            return self._prose("His medicine is the white one, twice a day.")
+
+        mock_llm_client.chat_completion.side_effect = side_effect
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-plain",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "medication"}}],
+                max_iterations=3,
+                user_utterance="his medicine.",
+            )
+
+        assert len(calls) == 1, (
+            "A plain answer to a non-action utterance must be accepted as-is."
+        )
+
+    @pytest.mark.asyncio
+    async def test_question_stays_exempt_even_when_reply_claims_action(
+        self, mock_llm_client, mock_conversation_cache
+    ):
+        """2026-08-17 calendar incident guard rail: question shapes are exempt
+        from tool forcing, and the new response signal must not override that.
+        The model owns how it answers a question."""
+        from app.core.tool_execution_engine import ToolExecutionEngine
+
+        calls = []
+
+        def side_effect(*args, **kwargs):
+            calls.append(1)
+            return self._prose("I'll check on that for you.")
+
+        mock_llm_client.chat_completion.side_effect = side_effect
+        engine = ToolExecutionEngine(mock_llm_client)
+
+        with patch("app.core.tool_execution_engine.conversation_cache", mock_conversation_cache):
+            await engine.execute(
+                conversation_id="test-conv-question",
+                messages=[{"role": "system", "content": "sys"}],
+                tools=[{"function": {"name": "medication"}}],
+                max_iterations=3,
+                user_utterance="Did he take his medicine?",
+            )
+
+        assert len(calls) == 1, (
+            "Question-shaped utterances must remain exempt from the guard."
+        )
