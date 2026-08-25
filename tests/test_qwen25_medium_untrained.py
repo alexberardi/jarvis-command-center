@@ -459,5 +459,9 @@ class TestSpeakerAgnosticPrompt:
         assert "You are speaking with alex." in block
         assert "Likes coffee black" in block
 
-    def test_speaker_context_empty_for_unknown(self, provider):
-        assert provider.build_speaker_context({"voice_mode": "brief"}) == ""
+    def test_speaker_context_warns_off_name_guessing_for_unknown(self, provider):
+        # Previously "" — see the 2026-08-25 misattribution incident. An
+        # unresolved speaker now gets an explicit don't-guess-a-name line.
+        block = provider.build_speaker_context({"voice_mode": "brief"})
+        assert "do not know who is speaking" in block.lower()
+        assert "You are speaking with" not in block

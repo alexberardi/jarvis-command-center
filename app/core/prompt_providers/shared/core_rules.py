@@ -264,6 +264,19 @@ def build_identity_header(
     )
 
 
+# Emitted when the turn's speaker could not be resolved at all — no name, no
+# memories. Counters the household persona's standing "call the person by name"
+# instruction, which is what turned an unresolved speaker into a confidently
+# wrong name in the 2026-08-25 kitchen incident. The last clause matters as much
+# as the first: the model must simply leave the name out, not announce that it
+# doesn't know who it's talking to.
+UNKNOWN_SPEAKER_BLOCK: str = (
+    "You do not know who is speaking. Do not address them by name and do not "
+    "guess which household member it is — answer without using a name. Don't "
+    "mention that you don't know; just leave the name out."
+)
+
+
 def build_speaker_block(speaker_name: str, user_memories: str = "") -> str:
     """Return the per-turn SPEAKER-SPECIFIC block (name + memories).
 
@@ -274,8 +287,17 @@ def build_speaker_block(speaker_name: str, user_memories: str = "") -> str:
     without reading the rule (a deliberate counter to the model's bias to
     stay silent about profile items).
 
-    Returns ``""`` when there is nothing speaker-specific to say (unknown
-    speaker, no memories) — callers should skip appending an empty block.
+    When NOTHING is known about the speaker this returns the anonymity
+    instruction rather than ``""``. That is deliberate (prod 2026-08-25): the
+    empty block left the model with no identity information at all, while the
+    household persona was still telling it to "Call the person by name when it
+    feels natural." With a name demanded and none supplied, the model guessed
+    the household's primary user and greeted the wrong person by name — on a
+    turn where the node had shipped no speaker audio. Silence reads as
+    permission; the model needs to be told it does not know.
+
+    The block is injected AFTER the cached prefix, so this costs no cache
+    invalidation — only a few tokens on turns where the speaker is unresolved.
 
     Example output::
 
@@ -305,7 +327,7 @@ def build_speaker_block(speaker_name: str, user_memories: str = "") -> str:
             f"asks you to record / change / do something, you MUST call the tool that "
             f"performs it, even when the subject is listed here:\n{user_memories}"
         )
-    return block
+    return block or UNKNOWN_SPEAKER_BLOCK
 
 
 def build_personality_block(persona_text: str | None) -> str:
