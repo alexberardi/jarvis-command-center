@@ -36,6 +36,7 @@ from app.core.transcript_filter import (
     addressed_household_member,
     is_device_command_shaped,
     is_music_control_shaped,
+    is_short_non_command_fragment,
 )
 
 # OWW detection scores at or above this are treated as a clean, deliberate
@@ -171,6 +172,8 @@ def should_double_check_sentinel(
     wake_confidence: float | None = None,
     follow_up_iteration: int | None = None,
     pre_wake_speech_seconds: float | None = None,
+    wake_verified: bool | None = None,
+    transcript: str | None = None,
 ) -> bool:
     """Should a first-look ``<not_for_me/>`` buy a reasoned second opinion?
 
@@ -186,10 +189,18 @@ def should_double_check_sentinel(
     snap-silenced by a first-look ``<not_for_me/>``. Late follow-up iterations
     stay single-pass — by then silence is the window's designed ending.
 
-    An unverified wake clip deliberately does NOT disable the rescue: the
+    An unverified wake clip alone still does NOT disable the rescue: the
     verify clip itself can be garbage (prod 2026-08-15: two real lights
     commands were suppressed because verification read junk clips), so one
-    bad clip must never single-handedly silence a turn. The verdict is a
+    bad clip must never single-handedly silence a turn. It takes TWO
+    independent signals (2026-08-26): an unverified clip AND a short
+    non-command fragment. The confidence gate below cannot separate these
+    on its own — prod false wakes fire at 0.94-0.99, so every one of them
+    qualified for a rescue whose whole purpose is to overturn the model's
+    <not_for_me/>. Both hallucinations captured on 08-25 began with the
+    model correctly declining and being talked out of it. A coherent
+    request or an imperative device command on an unverified clip keeps
+    the rescue; "Okay." does not. The verdict is a
     soft bias in the wake hint, and the /think re-check stays available to
     catch exactly that failure. The same holds for DOUBTED-conversation
     follow-ups (conversation_wake_verdict="unverified"): this gate never
@@ -206,6 +217,14 @@ def should_double_check_sentinel(
     # sentinel on it deserves the reasoned re-check.
     if turn_source == "chat":
         return True
+    # Two-signal misfire: no wake word in the clip AND a bare fragment for a
+    # command. Either alone is fail-open; together they are the television.
+    if (
+        turn_source == "wake"
+        and wake_verified is False
+        and is_short_non_command_fragment(transcript)
+    ):
+        return False
     if (
         turn_source == "wake"
         and wake_confidence is not None
@@ -275,7 +294,10 @@ def _wake_hint(
             "coherent command or question addressed to you should still be "
             "answered. Emit <not_for_me/> only when the transcript ALSO "
             "reads like speech meant for someone else (a reply to another "
-            "person, a mid-story line, a dialogue fragment).]",
+            "person, a mid-story line, a dialogue fragment) — and note that "
+            "bare interjections and one- or two-word fragments (\"Okay.\", "
+            "\"Wow.\", \"Thank you.\") are the single most common shape of a "
+            "detector misfire on an unverified clip.]",
             media_playback,
         )
     if wake_confidence is not None and wake_confidence < WAKE_CONFIDENT_THRESHOLD:

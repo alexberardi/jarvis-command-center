@@ -231,14 +231,26 @@ class TestDoubtedFollowUpKeepsSentinelRescue:
     """Rule 3: the /think rescue stays available on doubted follow-ups —
     the gate never consults the verdict (fail-open)."""
 
-    def test_gate_signature_has_no_verdict_params(self):
+    def test_gate_never_takes_follow_up_doubt_state(self):
+        # The CONVERSATION-level doubt state must never reach the gate; an
+        # early follow-up keeps its rescue no matter how the wake turn scored.
         params = inspect.signature(should_double_check_sentinel).parameters
         assert "conversation_wake_verdict" not in params
-        assert "wake_verified" not in params
         assert "doubt_round" not in params
 
     def test_early_follow_up_qualifies_regardless_of_doubt(self):
         assert should_double_check_sentinel("follow_up", None, 1, None) is True
+
+    def test_follow_up_ignores_the_wake_fragment_withdrawal(self):
+        # `wake_verified` reached the gate on 2026-08-26 to withdraw the rescue
+        # from unverified WAKE fragments. Follow-up turns have no wake clip of
+        # their own and must be untouched by it — even a bare fragment.
+        assert should_double_check_sentinel(
+            "follow_up",
+            follow_up_iteration=1,
+            wake_verified=False,
+            transcript="Okay.",
+        ) is True
 
 
 class TestResolveFollowupDoubtIntoContext:

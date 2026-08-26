@@ -329,19 +329,30 @@ class TestWakeVerifiedSoftBias:
 class TestUnverifiedWakeKeepsSentinelRescue:
     """The /think sentinel double-check must stay available on
     unverified-clip turns — the verify clip itself can be garbage
-    (2026-08-15), so the rescue is the last line against a wrong silence."""
+    (2026-08-15), so the rescue is the last line against a wrong silence.
 
-    def test_signature_no_longer_takes_wake_verified(self):
-        import inspect
+    2026-08-26: the guard is now pinned by BEHAVIOUR rather than by the
+    function signature. `wake_verified` is consulted again, but never alone —
+    it only withdraws the rescue together with a short non-command fragment
+    (see TestSentinelRescueSkipsUnverifiedFragments). The protection this
+    class exists for is unchanged: a bad clip on its own still cannot
+    silence a turn.
+    """
 
+    def test_unverified_clip_alone_does_not_withdraw_the_rescue(self):
+        # The 2026-08-15 case, stated as behaviour: junk verify clip, real
+        # command. The rescue must survive.
         from app.core.turn_context import should_double_check_sentinel
 
-        params = inspect.signature(should_double_check_sentinel).parameters
-        assert "wake_verified" not in params
+        assert should_double_check_sentinel(
+            "wake",
+            wake_confidence=0.97,
+            wake_verified=False,
+            transcript="Turn on the living room lights.",
+        ) is True
 
-    def test_confident_wake_qualifies_regardless_of_clip_verdict(self):
-        # Before: wake_verified=False short-circuited the rescue off. Now
-        # the verdict is not consulted at all — a confident wake keeps it.
+    def test_confident_wake_qualifies_when_no_transcript_is_available(self):
+        # No transcript => no fragment evidence => fail open, exactly as before.
         from app.core.turn_context import should_double_check_sentinel
 
         assert should_double_check_sentinel("wake", 0.97, None, None) is True
@@ -653,3 +664,116 @@ class TestFollowUpNamedPersonAddressing:
         )
         assert hint.startswith("[turn context:")
         assert hint.endswith("]")
+
+
+class TestUnverifiedWakeFragmentLean:
+    """An unverified wake clip plus a fragment is the false-wake signature.
+
+    Prod, kitchen node, 2026-08-19 → 08-25: 73% of wake events failed clip
+    verification (49 verified vs 132 not), and 74% of those failures produced
+    spoken audio — roughly 13 unprompted replies a day into an empty room. The
+    source is the television; openWakeWord fires on broadcast dialogue at
+    0.94–0.99, so no confidence threshold can separate them.
+
+    The wake hint already leans ambient on an unverified clip, but it never
+    mentions fragments. The fragment guidance lives ONLY in the low-confidence
+    branch, which these turns never reach — they are maximally confident. So the
+    one posture that does fire on a false wake was silent about the shape that
+    most distinguishes it: measured on paired command transcripts, 48% of
+    unverified wakes are 1–2 words against 23% of verified ones.
+
+    A lean, never a cut. "Is it going to rain later?" drew an unverified verdict
+    in that same window and is a real question that must still be answered.
+    """
+
+    def test_unverified_wake_hint_names_the_fragment_signature(self):
+        from app.core.turn_context import build_turn_hint
+        hint = build_turn_hint("wake", wake_confidence=0.97, wake_verified=False,
+                               transcript="Good guys.")
+        assert hint is not None
+        low = hint.lower()
+        assert "not clearly contain the wake word" in low
+        # The NEW guidance — the pre-existing hint already said "dialogue
+        # fragment" in passing, so assert the shape rule specifically.
+        assert "one- or two-word" in low
+        assert "interjection" in low
+
+    def test_lean_stays_a_lean_not_an_instruction(self):
+        from app.core.turn_context import build_turn_hint
+        hint = build_turn_hint("wake", wake_confidence=0.97, wake_verified=False,
+                               transcript="Okay.")
+        # A coherent request must still be answerable — the hint may never
+        # order silence outright.
+        assert "should still be answered" in hint
+        assert "only when" in hint.lower()
+
+    def test_device_command_keeps_the_directed_posture(self):
+        from app.core.turn_context import build_turn_hint
+        # The imperative guard stays senior (prod 2026-08-15: two real lights
+        # commands suppressed off junk verify clips).
+        hint = build_turn_hint("wake", wake_confidence=0.97, wake_verified=False,
+                               transcript="turn off the playroom lights")
+        assert "fresh wake" in hint
+        assert "one- or two-word" not in hint.lower()
+
+    def test_verified_wake_hint_is_unchanged(self):
+        from app.core.turn_context import build_turn_hint
+        verified = build_turn_hint("wake", wake_confidence=0.97, wake_verified=True,
+                                   transcript="Leo took his medicine.")
+        assert "fresh wake" in verified
+        assert "one- or two-word" not in verified.lower()
+
+
+class TestSentinelRescueSkipsUnverifiedFragments:
+    """The /think rescue is gated on the false-wake signature itself.
+
+    ``should_double_check_sentinel`` qualifies a turn on ``wake_confidence >=
+    0.75``. Every false wake in the prod window fired at 0.94–0.99, so the
+    rescue armed on all of them — and it exists to talk the model OUT of a
+    ``<not_for_me/>``. Both hallucinations captured on 08-25 began with the
+    model correctly declining to answer, then being overruled:
+
+        <not_for_me/> -> "Miles is your dog — he's been napping by the back
+                          door since dinner."
+        <not_for_me/> -> "Oh, sorry about that — I was just calling you Sarah…"
+
+    Withdraw the rescue for the narrow case where two independent signals both
+    say misfire: the clip had no wake word AND the command is a short
+    non-command fragment. Everything else keeps it.
+    """
+
+    def test_rescue_withdrawn_when_clip_unverified_and_fragment(self):
+        from app.core.turn_context import should_double_check_sentinel
+        assert not should_double_check_sentinel(
+            "wake", wake_confidence=0.97, wake_verified=False, transcript="Okay.")
+
+    def test_rescue_kept_when_clip_verified(self):
+        from app.core.turn_context import should_double_check_sentinel
+        # A real wake that happens to be terse still gets its second opinion.
+        assert should_double_check_sentinel(
+            "wake", wake_confidence=0.97, wake_verified=True, transcript="Okay.")
+
+    def test_rescue_kept_for_a_coherent_request_on_an_unverified_clip(self):
+        from app.core.turn_context import should_double_check_sentinel
+        # Observed in prod with an unverified verdict — a real question.
+        assert should_double_check_sentinel(
+            "wake", wake_confidence=0.97, wake_verified=False,
+            transcript="Is it going to rain later?")
+
+    def test_rescue_kept_for_a_device_command_on_an_unverified_clip(self):
+        from app.core.turn_context import should_double_check_sentinel
+        assert should_double_check_sentinel(
+            "wake", wake_confidence=0.97, wake_verified=False,
+            transcript="stop music")
+
+    def test_no_verdict_behaves_exactly_as_before(self):
+        from app.core.turn_context import should_double_check_sentinel
+        # Fail open: absent verdict is no-signal, never doubt.
+        assert should_double_check_sentinel(
+            "wake", wake_confidence=0.97, wake_verified=None, transcript="Okay.")
+        assert should_double_check_sentinel("wake", wake_confidence=0.97)
+
+    def test_typed_chat_always_keeps_the_rescue(self):
+        from app.core.turn_context import should_double_check_sentinel
+        assert should_double_check_sentinel(
+            "chat", wake_verified=False, transcript="Okay.")
