@@ -547,4 +547,12 @@ def is_stt_noise(text: str | None) -> bool:
         return True
     if _BRACKETED_ONLY_RE.match(stripped):
         return True
+    # No word characters at all — punctuation, dashes, stray symbols. The
+    # filler and bracket rules each cover a specific shape and a bare "-"
+    # fell between them (prod 2026-08-26: transcript "-" reached the LLM and
+    # came back as "Hey Alex, what can I help you with?" into an empty room).
+    # Whatever the shape, a transcript with nothing word-like in it is not
+    # something the model can answer.
+    if not _WORD_RE.search(stripped):
+        return True
     return False

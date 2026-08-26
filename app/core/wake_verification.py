@@ -59,13 +59,12 @@ _VERDICT_POLL_SECONDS = 0.1
 # the wake phrase is below this floor contains NOTHING wake-shaped — not even
 # a whisper mangling ("travis", "service" all score well above it).
 CLIP_SIMILARITY_FLOOR = 0.5
-# Node-reported OWW score at/above which a nothing-wake-shaped verify clip
-# reads as a CAPTURE bug, not a misfire: a 0.97 fire means the detector heard
-# something extremely wake-like on the live mic, so a clip with zero trace of
-# it points at the clip pipeline (prod 2026-08-15: two real lights commands
-# suppressed by garbage verify clips). Verdict becomes "clip_unreliable" and
-# is treated like no-verdict downstream (fail open).
-CLIP_UNRELIABLE_WAKE_CONFIDENCE = 0.9
+# RETIRED 2026-08-26. This was the non-playback capture-bug bar: a >= 0.9 fire
+# with a no-trace verify clip was read as a broken clip rather than a misfire.
+# Node telemetry disproves it (clip is the consumed-chunks audio 128/128, median
+# 1 ms after the fire), and the bar selected precisely for the false-wake
+# signature, since prod misfires score 0.94-0.99. See _is_clip_unreliable.
+# Only the self-playback bar below survives.
 # Relaxed threshold when the node reported SELF-PLAYBACK (its own speaker
 # was playing music at wake): residual music bleed in the wake clip degrades
 # the verify transcript, so "unverified with zero wake-phrase trace" is the
@@ -347,27 +346,43 @@ def _verdict_similarity(verdict: dict[str, Any]) -> float:
 def _is_clip_unreliable(
     verdict: dict[str, Any], turn_context: Optional[dict]
 ) -> bool:
-    """Unverified + zero wake-phrase trace + very confident node score.
+    """SELF-PLAYBACK ONLY: unverified + no wake-phrase trace + confident fire.
 
-    During self-playback the confidence bar drops to the node's trigger
-    threshold: music bleed in the wake clip degrades the verify transcript,
-    so a no-trace unverified verdict is the degraded-clip signature there,
-    and the fail-open treatment (clip_unreliable → treated as no-verdict)
-    is preferred over the unverified ambient lean. Soft-bias stance: never
-    hard-suppress on acoustic evidence during music.
+    Music bleed in the wake clip genuinely degrades the verify transcript,
+    so during self-playback a no-trace unverified verdict is the
+    degraded-clip signature rather than the misfire signature, and the
+    fail-open treatment (clip_unreliable → treated as no-verdict) beats an
+    ambient lean. Soft-bias stance: never hard-suppress on acoustic
+    evidence during music.
+
+    RETIRED for the non-playback case, 2026-08-26. The rule used to apply
+    whenever the node reported >= 0.9, reading a no-trace clip as a CAPTURE
+    bug: "a 0.97 fire means the detector heard something extremely
+    wake-like, so a clip with zero trace of it points at the clip
+    pipeline". Node telemetry disproves that — across 128 consecutive
+    fires the clip came from the consumed-chunks deque 128/128 times (it
+    IS the scored audio, by construction), written a median of 1 ms after
+    the fire, captured 128/128. There is no capture bug to fail open for,
+    and the 2026-08-15 incident this was built for predates v0.2.4, which
+    replaced the evictable ring-buffer snapshot that made those clips
+    garbage.
+
+    Worse, the bar selected FOR the false-wake signature: prod misfires
+    fire at 0.94-0.99, so every one of them was rescued into the full
+    directed posture. On 2026-08-26 "Okay." and "-" were both answered
+    aloud into an empty kitchen this way.
     """
     if verdict.get("verdict") == "clip_unreliable":
         return True  # already re-labeled on an earlier resolve
     if verdict.get("verified"):
         return False
     ctx = turn_context or {}
-    threshold = (
-        CLIP_UNRELIABLE_WAKE_CONFIDENCE_SELF_PLAYBACK
-        if is_media_self_playback(
-            ctx.get("self_playback"), ctx.get("self_playback_kind")
-        )
-        else CLIP_UNRELIABLE_WAKE_CONFIDENCE
-    )
+    if not is_media_self_playback(
+        ctx.get("self_playback"), ctx.get("self_playback_kind")
+    ):
+        # No playback => nothing to degrade the clip => trust the verdict.
+        return False
+    threshold = CLIP_UNRELIABLE_WAKE_CONFIDENCE_SELF_PLAYBACK
     wake_confidence = ctx.get("wake_confidence")
     if wake_confidence is None or wake_confidence < threshold:
         return False
