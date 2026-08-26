@@ -636,3 +636,31 @@ class TestReportShapeDitransitive:
         assert not is_report_shaped("what's the weather")
         assert not is_report_shaped("turn off the lights")
         assert not is_report_shaped("his medicine.")
+
+
+class TestWordlessTranscriptIsNoise:
+    """A transcript with no word characters at all is not an utterance.
+
+    Prod 2026-08-26 22:26: the command transcript was literally ``"-"``. It
+    cleared the noise prefilter, reached the LLM, and came back as "Hey Alex,
+    what can I help you with?" spoken into an empty kitchen. The bracketed and
+    punctuation-filler rules both missed a bare dash, and the fragment shape
+    rules need at least one word to classify, so nothing caught it.
+    """
+
+    def test_bare_dash_is_noise(self):
+        from app.core.transcript_filter import is_stt_noise
+        assert is_stt_noise("-")
+        assert is_stt_noise("- -")
+        assert is_stt_noise(" — ")
+
+    def test_other_wordless_strings_are_noise(self):
+        from app.core.transcript_filter import is_stt_noise
+        for t in ("~", "+", "//", "* *", ". -"):
+            assert is_stt_noise(t), t
+
+    def test_real_utterances_are_untouched(self):
+        from app.core.transcript_filter import is_stt_noise
+        for t in ("Okay.", "- Oh, oh.", "a new voice", "Turn on the lights",
+                  "It's broken.", "A"):
+            assert not is_stt_noise(t), t

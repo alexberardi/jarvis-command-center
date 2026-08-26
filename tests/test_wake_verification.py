@@ -216,16 +216,36 @@ class TestClipPlausibilityGate:
             verdict["similarity"] = similarity
         conversation_cache.set_wake_verification("conv-cpg", verdict)
 
-    def test_high_confidence_zero_similarity_fails_open(self):
+    def test_high_confidence_no_playback_stays_unverified(self):
+        """RETIRED 2026-08-26 — a confident fire no longer rescues a clip.
+
+        The rule read a 0.9+ fire with a no-trace clip as a CAPTURE bug:
+        "the detector heard something extremely wake-like, so a clip with
+        zero trace of it points at the clip pipeline". Node telemetry
+        disproves that. Across 128 consecutive fires the clip came from
+        the consumed-chunks deque 128/128 times — it IS the audio that was
+        scored, by construction — written a median of 1 ms after the fire.
+        There is no capture bug to fail open for.
+
+        The 2026-08-15 incident it was built for predates v0.2.4, which
+        replaced the evictable ring-buffer snapshot that produced those
+        garbage clips.
+
+        Meanwhile the rule fired on exactly the false-wake signature: prod
+        misfires score 0.94-0.99, so every one of them was rescued. On
+        2026-08-26 "Okay." and "-" both reached the model this way and were
+        answered aloud into an empty kitchen.
+        """
         self._store("Turn on the living room lights.", similarity=0.2)
         resolved = self._resolve({"source": "wake", "wake_confidence": 0.97})
-        assert resolved is None  # treated like no-verdict downstream
+        assert resolved is not None
+        assert resolved["verified"] is False
 
-    def test_relabels_cached_verdict_as_clip_unreliable(self):
+    def test_no_playback_verdict_stays_unverified_in_cache(self):
         self._store("Turn on the living room lights.", similarity=0.2)
         self._resolve({"source": "wake", "wake_confidence": 0.97})
         cached = conversation_cache.get_wake_verification("conv-cpg")
-        assert cached["verdict"] == "clip_unreliable"
+        assert cached["verdict"] == "unverified"
 
     def test_low_confidence_zero_similarity_stays_unverified(self):
         # A marginal fire with a garbage clip really is a misfire signature.
@@ -249,16 +269,23 @@ class TestClipPlausibilityGate:
         assert resolved["verified"] is False
 
     def test_similarity_recomputed_when_absent(self):
-        # Verdicts stored before the similarity field existed still gate.
+        # Verdicts stored before the similarity field existed still gate —
+        # exercised on the surviving self-playback path.
         self._store("Turn on the living room lights.")
-        resolved = self._resolve({"source": "wake", "wake_confidence": 0.97})
+        resolved = self._resolve({
+            "source": "wake", "wake_confidence": 0.97,
+            "self_playback": True, "self_playback_kind": "music",
+        })
         assert resolved is None
 
     def test_boundary_confidence_gates(self):
+        # The surviving bar is the self-playback one.
         self._store("Eat it.", similarity=0.0)
-        resolved = self._resolve(
-            {"source": "wake", "wake_confidence": wv.CLIP_UNRELIABLE_WAKE_CONFIDENCE}
-        )
+        resolved = self._resolve({
+            "source": "wake",
+            "wake_confidence": wv.CLIP_UNRELIABLE_WAKE_CONFIDENCE_SELF_PLAYBACK,
+            "self_playback": True, "self_playback_kind": "music",
+        })
         assert resolved is None
 
     def test_verified_clip_unaffected(self):
@@ -400,8 +427,10 @@ class TestClipPlausibilityGateSelfPlayback:
         assert resolved is not None
         assert resolved["verified"] is False
 
-    def test_high_confidence_gate_unchanged_without_media_fields(self):
-        # Old nodes: the 0.9 capture-bug gate keeps working exactly as before.
+    def test_no_media_fields_means_no_fail_open(self):
+        # Without a playback signal there is nothing to degrade the clip, so
+        # the verdict stands however confident the node was (retired 08-26).
         self._store("Turn on the living room lights.", similarity=0.2)
         resolved = self._resolve({"source": "wake", "wake_confidence": 0.97})
-        assert resolved is None
+        assert resolved is not None
+        assert resolved["verified"] is False
