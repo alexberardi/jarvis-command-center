@@ -988,16 +988,19 @@ class ConversationHandler:
                 user_utterance=voice_command,
                 max_iterations=max_iters,
                 agent_context_chars=len(agent_context) if agent_context else 0,
-                # NOTE: deliberately NOT keyed on wake_verified — the /think
-                # rescue stays available on unverified-clip turns because the
-                # verify clip itself can be garbage (2026-08-15: two real
-                # lights commands suppressed); one bad clip must never
-                # single-handedly silence a turn.
+                # A bad verify clip STILL never silences a turn on its own
+                # (2026-08-15: two real lights commands suppressed). But the
+                # confidence gate alone cannot see a false wake — prod misfires
+                # fire at 0.94-0.99 — so the verdict is passed in and withdraws
+                # the rescue ONLY alongside a short non-command fragment
+                # (2026-08-26). Coherent requests and device commands keep it.
                 sentinel_double_check=should_double_check_sentinel(
                     (turn_context or {}).get("source"),
                     wake_confidence=(turn_context or {}).get("wake_confidence"),
                     follow_up_iteration=(turn_context or {}).get("follow_up_iteration"),
                     pre_wake_speech_seconds=pre_wake_speech_seconds,
+                    wake_verified=(turn_context or {}).get("wake_verified"),
+                    transcript=voice_command,
                 ),
             )
 
