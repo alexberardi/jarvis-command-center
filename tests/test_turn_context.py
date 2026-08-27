@@ -753,10 +753,26 @@ class TestSentinelRescueSkipsUnverifiedFragments:
         assert should_double_check_sentinel(
             "wake", wake_confidence=0.97, wake_verified=True, transcript="Okay.")
 
-    def test_rescue_kept_for_a_coherent_request_on_an_unverified_clip(self):
+    def test_coherent_question_on_an_unverified_clip_loses_the_rescue(self):
+        """SUPERSEDED 2026-08-27 — and this is the accepted cost.
+
+        This used to assert the opposite. A coherent question on an
+        unverified clip ("Is it going to rain later?" — observed in prod
+        with an unverified verdict) now loses its /think rescue along with
+        everything else that isn't action- or report-shaped.
+
+        What that costs: if the model ALSO chose <not_for_me/> on such a
+        turn, it now stays silent instead of being re-checked, and the user
+        repeats themselves. What it buys: the television stops being
+        argued into speech several times a day. The rescue only ever fires
+        on a turn the model already decided to drop, so a real question
+        answered on first look is untouched either way.
+
+        Action and report shapes keep the rescue precisely because silence
+        there is a correctness failure rather than an annoyance.
+        """
         from app.core.turn_context import should_double_check_sentinel
-        # Observed in prod with an unverified verdict — a real question.
-        assert should_double_check_sentinel(
+        assert not should_double_check_sentinel(
             "wake", wake_confidence=0.97, wake_verified=False,
             transcript="Is it going to rain later?")
 
@@ -777,3 +793,69 @@ class TestSentinelRescueSkipsUnverifiedFragments:
         from app.core.turn_context import should_double_check_sentinel
         assert should_double_check_sentinel(
             "chat", wake_verified=False, transcript="Okay.")
+
+
+class TestRescueGatedOnVerificationNotConfidence:
+    """The /think rescue now keys on whether the wake word was VERIFIED.
+
+    2026-08-27, 16.5h after the previous fix shipped: false wakes were still
+    talking. Traced, not guessed — in two of three observed cases the model
+    emitted <not_for_me/> correctly and the rescue overturned it into speech:
+
+        "Yes."       -> <not_for_me/> -> "Alex, I'm here. What can I help
+                                          you with?"
+        "that is a"  -> <not_for_me/> -> "That is a smart kettle — the one
+                                          you use for tea or coffee"
+
+    The previous gate withdrew the rescue only for one-or-two-word fragments,
+    so a three-word mid-sentence scrap kept it. Word count was always a proxy;
+    the real signal is that the wake clip contained no wake word. Node
+    telemetry established the clip IS the scored audio (consumed_chunks
+    128/128, median 1 ms), so "unverified" is trustworthy positive evidence
+    that the wake phrase was never spoken — and a rescue exists only to
+    overturn a silence the model already chose.
+
+    The 2026-08-15 protection is kept explicitly instead of by word count:
+    an action- or report-shaped transcript keeps its rescue on any verdict,
+    because not-acting on those is a correctness failure.
+    """
+
+    def test_unverified_withdraws_rescue_regardless_of_length(self):
+        from app.core.turn_context import should_double_check_sentinel
+        for t in ("Yes.", "What?", "that is a", "If there was a",
+                  "This presents", "power just to grow and see it around."):
+            assert not should_double_check_sentinel(
+                "wake", wake_confidence=0.97, wake_verified=False, transcript=t
+            ), t
+
+    def test_verified_wake_keeps_the_rescue(self):
+        from app.core.turn_context import should_double_check_sentinel
+        # The "who is Leo?" case: a real wake, a real question, model
+        # snap-silences it — this is exactly what the rescue is for.
+        assert should_double_check_sentinel(
+            "wake", wake_confidence=0.97, wake_verified=True,
+            transcript="Can you tell me who Leo is?")
+
+    def test_action_and_report_shapes_keep_the_rescue_when_unverified(self):
+        from app.core.turn_context import should_double_check_sentinel
+        # 2026-08-15: two real lights commands suppressed off junk clips.
+        # Not-acting on these is a correctness failure, so they are exempt.
+        for t in ("Turn on the living room lights.", "stop music",
+                  "Leo took his medicine.", "I gave Leo his medicine."):
+            assert should_double_check_sentinel(
+                "wake", wake_confidence=0.97, wake_verified=False, transcript=t
+            ), t
+
+    def test_absent_verdict_still_fails_open(self):
+        from app.core.turn_context import should_double_check_sentinel
+        assert should_double_check_sentinel(
+            "wake", wake_confidence=0.97, wake_verified=None, transcript="Yes.")
+        assert should_double_check_sentinel("wake", wake_confidence=0.97)
+
+    def test_follow_up_and_chat_unaffected(self):
+        from app.core.turn_context import should_double_check_sentinel
+        assert should_double_check_sentinel(
+            "follow_up", follow_up_iteration=1, wake_verified=False,
+            transcript="Yes.")
+        assert should_double_check_sentinel(
+            "chat", wake_verified=False, transcript="Yes.")

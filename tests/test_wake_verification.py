@@ -269,24 +269,16 @@ class TestClipPlausibilityGate:
         assert resolved["verified"] is False
 
     def test_similarity_recomputed_when_absent(self):
-        # Verdicts stored before the similarity field existed still gate —
-        # exercised on the surviving self-playback path.
-        self._store("Turn on the living room lights.")
-        resolved = self._resolve({
-            "source": "wake", "wake_confidence": 0.97,
-            "self_playback": True, "self_playback_kind": "music",
-        })
-        assert resolved is None
-
-    def test_boundary_confidence_gates(self):
-        # The surviving bar is the self-playback one.
-        self._store("Eat it.", similarity=0.0)
-        resolved = self._resolve({
-            "source": "wake",
-            "wake_confidence": wv.CLIP_UNRELIABLE_WAKE_CONFIDENCE_SELF_PLAYBACK,
-            "self_playback": True, "self_playback_kind": "music",
-        })
-        assert resolved is None
+        # Verdicts stored before the similarity field existed are still
+        # scored. The gate that used to consume this is retired, so assert
+        # the recompute directly rather than through it.
+        sim = wv._verdict_similarity(
+            {"transcript": "Turn on the living room lights.", "phrase": "jarvis"}
+        )
+        assert sim < wv.CLIP_SIMILARITY_FLOOR
+        assert wv._verdict_similarity(
+            {"transcript": "hey jarvis", "phrase": "jarvis"}
+        ) >= wv.CLIP_SIMILARITY_FLOOR
 
     def test_verified_clip_unaffected(self):
         conversation_cache.set_wake_verification(
@@ -299,138 +291,75 @@ class TestClipPlausibilityGate:
         assert resolved["verified"] is True
 
 
-class TestClipPlausibilityGateSelfPlayback:
-    """Self-playback relaxation: with the node's own music in the wake clip,
-    the verify transcript is degraded by bleed, so "unverified with zero
-    wake-phrase trace" is the EXPECTED reading on a real mid-music wake.
-    The confidence bar for the clip_unreliable/fail-open treatment drops to
-    the node's trigger threshold (0.5) — soft-bias stance: never
-    hard-suppress on acoustic evidence during music."""
+class TestClipUnreliableFullyRetired:
+    """The self-playback fail-open is gone too (2026-08-27).
+
+    #124 kept it, reasoning that music bleed degrades the verify transcript
+    so a no-trace clip during playback is a degraded-clip signature rather
+    than a misfire. Prod falsified that within a day. The clips recorded
+    during self-playback were not degraded at all:
+
+        "- That's it."
+        "No, it's younger."
+        "power just to grow and see it around."
+        "The law presumes an offense to be innocent."
+
+    Clean, fluent transcriptions of television dialogue that simply do not
+    contain the wake word. A degraded clip garbles; these do not. And the
+    self-playback bar was 0.5, so essentially every fire during playback
+    failed open, straight back into the full directed posture.
+    """
 
     def setup_method(self):
         conversation_cache.set(
-            "conv-spb", [{"role": "system", "content": "x"}], [], "UTC", [], {}
+            "conv-cpg", [{"role": "system", "content": "x"}], [], "UTC", [], {}
         )
 
     def teardown_method(self):
-        conversation_cache.remove("conv-spb")
+        conversation_cache.remove("conv-cpg")
 
     def _resolve(self, turn_context, mode="bias"):
         async def _run():
-            return await wv.resolve_wake_verification("conv-spb", turn_context)
+            return await wv.resolve_wake_verification("conv-cpg", turn_context)
         import unittest.mock as m
         with m.patch.object(wv, "_get_mode", return_value=mode):
             return asyncio.run(_run())
 
-    def _store(self, transcript, similarity):
+    def _store(self, transcript, similarity=None, **extra):
+        verdict = {
+            "verified": False, "verdict": "unverified", "transcript": transcript,
+            "phrase": "jarvis", "node_id": "node-1", **extra,
+        }
+        if similarity is not None:
+            verdict["similarity"] = similarity
+        conversation_cache.set_wake_verification("conv-cpg", verdict)
+
+    def test_self_playback_no_longer_fails_open(self):
+        self._store("No, it's younger.", similarity=0.40)
+        resolved = self._resolve({
+            "source": "wake", "wake_confidence": 0.97,
+            "self_playback": True, "self_playback_kind": "music",
+        })
+        assert resolved is not None
+        assert resolved["verified"] is False
+
+    def test_verdict_stays_unverified_in_cache_during_playback(self):
+        self._store("- That's it.", similarity=0.33)
+        self._resolve({
+            "source": "wake", "wake_confidence": 1.0,
+            "self_playback": True, "self_playback_kind": "music",
+        })
+        cached = conversation_cache.get_wake_verification("conv-cpg")
+        assert cached["verdict"] == "unverified"
+
+    def test_verified_clip_still_unaffected(self):
         conversation_cache.set_wake_verification(
-            "conv-spb",
-            {
-                "verified": False,
-                "verdict": "unverified",
-                "transcript": transcript,
-                "phrase": "jarvis",
-                "similarity": similarity,
-                "node_id": "node-1",
-            },
+            "conv-cpg",
+            {"verified": True, "verdict": "verified", "transcript": "hey jarvis",
+             "phrase": "jarvis", "similarity": 1.0},
         )
-
-    def test_mid_confidence_no_trace_fails_open_during_media(self):
-        # 0.6 is below the normal 0.9 bar — off-music this stays unverified;
-        # during self-playback it reads as a bleed-degraded clip instead.
-        self._store("thunder only happens when it's raining", similarity=0.1)
-        resolved = self._resolve(
-            {
-                "source": "wake",
-                "wake_confidence": 0.6,
-                "self_playback": True,
-                "self_playback_kind": "music",
-            }
-        )
-        assert resolved is None  # clip_unreliable → treated as no-verdict
-
-    def test_relabels_verdict_during_media(self):
-        self._store("thunder only happens when it's raining", similarity=0.1)
-        self._resolve(
-            {
-                "source": "wake",
-                "wake_confidence": 0.6,
-                "self_playback": True,
-                "self_playback_kind": "music",
-            }
-        )
-        cached = conversation_cache.get_wake_verification("conv-spb")
-        assert cached["verdict"] == "clip_unreliable"
-
-    def test_same_confidence_without_media_stays_unverified(self):
-        # The relaxation is scoped to self-playback turns only.
-        self._store("thunder only happens when it's raining", similarity=0.1)
-        resolved = self._resolve({"source": "wake", "wake_confidence": 0.6})
+        resolved = self._resolve({
+            "source": "wake", "wake_confidence": 0.97, "self_playback": True,
+        })
         assert resolved is not None
-        assert resolved["verified"] is False
-
-    def test_below_trigger_threshold_stays_unverified_even_during_media(self):
-        self._store("thunder only happens when it's raining", similarity=0.1)
-        resolved = self._resolve(
-            {
-                "source": "wake",
-                "wake_confidence": wv.CLIP_UNRELIABLE_WAKE_CONFIDENCE_SELF_PLAYBACK
-                - 0.05,
-                "self_playback": True,
-                "self_playback_kind": "music",
-            }
-        )
-        assert resolved is not None
-        assert resolved["verified"] is False
-
-    def test_missing_wake_confidence_stays_unverified_during_media(self):
-        # Still requires a reported score — no score, no capture-bug claim.
-        self._store("thunder only happens when it's raining", similarity=0.1)
-        resolved = self._resolve(
-            {"source": "wake", "self_playback": True, "self_playback_kind": "music"}
-        )
-        assert resolved is not None
-        assert resolved["verified"] is False
-
-    def test_phrase_trace_stays_unverified_during_media(self):
-        # A trace of the wake phrase means the clip pipeline worked; the
-        # soft unverified lean (not fail-open) is the right treatment.
-        self._store("the harvest is ready", similarity=0.62)
-        resolved = self._resolve(
-            {
-                "source": "wake",
-                "wake_confidence": 0.6,
-                "self_playback": True,
-                "self_playback_kind": "music",
-            }
-        )
-        assert resolved is not None
-        assert resolved["verified"] is False
-
-    def test_missing_kind_counts_as_music(self):
-        self._store("thunder only happens when it's raining", similarity=0.1)
-        resolved = self._resolve(
-            {"source": "wake", "wake_confidence": 0.6, "self_playback": True}
-        )
-        assert resolved is None
-
-    def test_future_non_music_kind_keeps_normal_bar(self):
-        self._store("thunder only happens when it's raining", similarity=0.1)
-        resolved = self._resolve(
-            {
-                "source": "wake",
-                "wake_confidence": 0.6,
-                "self_playback": True,
-                "self_playback_kind": "podcast",
-            }
-        )
-        assert resolved is not None
-        assert resolved["verified"] is False
-
-    def test_no_media_fields_means_no_fail_open(self):
-        # Without a playback signal there is nothing to degrade the clip, so
-        # the verdict stands however confident the node was (retired 08-26).
-        self._store("Turn on the living room lights.", similarity=0.2)
-        resolved = self._resolve({"source": "wake", "wake_confidence": 0.97})
-        assert resolved is not None
-        assert resolved["verified"] is False
+        assert resolved["verified"] is True
