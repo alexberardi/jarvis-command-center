@@ -34,9 +34,10 @@ from app.core.direction_hint import (
 )
 from app.core.transcript_filter import (
     addressed_household_member,
+    is_action_command_shaped,
+    is_report_shaped,
     is_device_command_shaped,
     is_music_control_shaped,
-    is_short_non_command_fragment,
 )
 
 # OWW detection scores at or above this are treated as a clean, deliberate
@@ -217,12 +218,30 @@ def should_double_check_sentinel(
     # sentinel on it deserves the reasoned re-check.
     if turn_source == "chat":
         return True
-    # Two-signal misfire: no wake word in the clip AND a bare fragment for a
-    # command. Either alone is fail-open; together they are the television.
+    # An unverified wake clip withdraws the rescue. The clip IS the audio the
+    # detector scored (node telemetry: consumed_chunks 128/128, written a
+    # median of 1 ms after the fire), so "no wake word in it" is positive
+    # evidence the wake phrase was never spoken — and this rescue exists only
+    # to overturn a silence the model already chose.
+    #
+    # This replaced a one-or-two-word fragment test on 2026-08-27. Word count
+    # was a proxy, and it leaked: a three-word mid-sentence scrap ("that is
+    # a") kept its rescue and was talked out of a correct <not_for_me/> into
+    # "That is a smart kettle — the one you use for tea or coffee", spoken to
+    # an empty room.
+    #
+    # The 2026-08-15 protection is now explicit rather than incidental: an
+    # action- or report-shaped transcript keeps its rescue on ANY verdict,
+    # because failing to act on "turn on the living room lights" or "Leo took
+    # his medicine" is a correctness failure, while going quiet on chatter
+    # never is.
     if (
         turn_source == "wake"
         and wake_verified is False
-        and is_short_non_command_fragment(transcript)
+        and not (
+            is_action_command_shaped(transcript)
+            or is_report_shaped(transcript)
+        )
     ):
         return False
     if (
