@@ -368,6 +368,12 @@ def create_node(node: NodeCreate, db: Session = Depends(get_db)):
         room=node.room,
         user=node.user,
         voice_mode=node.voice_mode,
+        # Persist locally too, not just in jarvis-auth. Without this the local
+        # row keeps household_id NULL, and every household-scoped reader drops
+        # the node: mobile_command_data.list_nodes does `if not
+        # node.household_id: continue`, so an admin-created node is invisible in
+        # the app to every user, including the household admin who made it.
+        household_id=node.household_id,
     )
     db.add(db_node)
     db.commit()
