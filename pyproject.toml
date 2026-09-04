@@ -30,7 +30,7 @@ dependencies = [
     "paho-mqtt>=2,<3",
     "cryptography>=42,<51",
     "jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@402674d",
-    "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@4549b23",
+    "jarvis-auth-client @ git+https://github.com/alexberardi/jarvis-auth-client.git@a656811",
     "ddgs>=7.0.0",
     "redis>=5,<9",
     # Pinned to the commit adding FetchConfig.enable_jina_fallback (r.jina.ai opt-in).
