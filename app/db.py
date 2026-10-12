@@ -28,6 +28,18 @@ def get_database_url() -> str:
             f"got: {database_url[:20]}..."
         )
 
+    return pin_psycopg2(database_url)
+
+
+def pin_psycopg2(database_url: str) -> str:
+    """Name the psycopg2 driver on a bare ``postgresql://`` URL.
+
+    SQLAlchemy 2.1 made psycopg (v3) the default driver for ``postgresql://``;
+    this service ships psycopg2, so a bare URL would fail to import a driver.
+    URLs that already name a driver (``postgresql+...``) are left alone.
+    """
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
     return database_url
 
 
