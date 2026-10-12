@@ -64,6 +64,19 @@ class WhisperClient:
             url = _get_whisper_url_from_discovery()
         self.base_url = url if url else _FALLBACK_WHISPER_URL
 
+        # Default decoding hints (whisper.prompt, whisper.preprocess), applied to
+        # every request that does not pass its own. A settings failure must never
+        # break transcription, so any lookup error just means "no defaults".
+        self._default_options: dict[str, Any] = {}
+        try:
+            prompt = settings.get("whisper.prompt", household_id=household_id, node_id=node_id)
+            if isinstance(prompt, str) and prompt.strip():
+                self._default_options["prompt"] = prompt.strip()
+            if settings.get("whisper.preprocess", household_id=household_id, node_id=node_id) is True:
+                self._default_options["preprocess"] = True
+        except Exception:  # noqa: BLE001 - defaults are best effort
+            self._default_options = {}
+
     def _build_headers(self) -> dict[str, str]:
         """Build headers including app auth and context.
 
@@ -111,7 +124,11 @@ class WhisperClient:
                 shared nodes, and a memberless request would otherwise exercise
                 the speaker path for no benefit.
             timeout: Request timeout in seconds
-            **params: Additional parameters (language, task, etc.)
+            **params: Additional Whisper options. Sent as query parameters,
+                which is where ``/transcribe`` reads them (``prompt``,
+                ``preprocess``, ``beam_size``, ``temperature``,
+                ``temperature_inc``). Unknown names are ignored by Whisper.
+                Overrides the whisper.prompt / whisper.preprocess defaults.
 
         Returns:
             Transcription result dict with text, optional speaker_id, etc.
@@ -127,16 +144,23 @@ class WhisperClient:
                 (speaker_audio_filename or "speaker.wav", speaker_audio),
             ))
 
-        # speaker_recognition is a query param on Whisper's /transcribe; only
-        # send it when opting out so the default (node) path is unchanged.
-        query = None if speaker_recognition else {"speaker_recognition": "false"}
+        # Every tunable on Whisper's /transcribe is a QUERY parameter (it has no
+        # form fields besides the files), so options posted as form data are
+        # silently ignored. speaker_recognition is only sent when opting out so
+        # the default (node) path is unchanged.
+        query: dict[str, Any] = {}
+        if not speaker_recognition:
+            query["speaker_recognition"] = "false"
+        for key, value in {**self._default_options, **params}.items():
+            if value is None:
+                continue
+            query[key] = str(value).lower() if isinstance(value, bool) else value
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 url,
-                params=query,
+                params=query or None,
                 files=files,
-                data=params if params else None,
                 headers=self._build_headers(),
             )
             response.raise_for_status()

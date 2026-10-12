@@ -263,7 +263,12 @@ class TestWhisperClientTranscribe:
 
     @pytest.mark.asyncio
     async def test_transcribe_passes_extra_params(self):
-        """Transcribe passes additional params like language, task."""
+        """Extra options go in the query string, where /transcribe reads them.
+
+        Whisper's /transcribe declares prompt, preprocess, beam_size and the
+        temperatures as Query parameters and has no form fields besides the
+        files, so options posted as form data were silently ignored.
+        """
         from app.core.clients.whisper_client import WhisperClient
 
         with patch("app.core.clients.whisper_client.get_settings_service") as mock_settings:
@@ -290,10 +295,9 @@ class TestWhisperClientTranscribe:
                     )
 
                     call_kwargs = mock_client.post.call_args[1]
-                    # Extra params should be sent as form data
-                    assert "data" in call_kwargs
-                    assert call_kwargs["data"]["language"] == "es"
-                    assert call_kwargs["data"]["task"] == "translate"
+                    assert call_kwargs["params"]["language"] == "es"
+                    assert call_kwargs["params"]["task"] == "translate"
+                    assert "data" not in call_kwargs
 
 
 class TestEnrollVoiceProfileSampleIndex:
@@ -396,3 +400,72 @@ class TestVoiceProfileSamplesEndpoints:
 
                     url = mock_client.delete.call_args[0][0]
                     assert url == "http://w:7706/voice-profiles/42/samples/1"
+
+
+class TestWhisperQueryOptions:
+    """prompt / preprocess reach Whisper as query parameters."""
+
+    @staticmethod
+    async def _transcribe(settings_values: dict, **kwargs):
+        from app.core.clients.whisper_client import WhisperClient
+
+        def fake_get(key, **_):
+            return settings_values.get(key)
+
+        with patch("app.core.clients.whisper_client.get_settings_service") as mock_settings:
+            mock_settings.return_value.get.side_effect = fake_get
+            with patch("app.core.clients.whisper_client.get_app_headers", return_value={}):
+                client = WhisperClient(household_id="h123")
+                with patch("httpx.AsyncClient") as mock_client_class:
+                    mock_client = AsyncMock()
+                    mock_response = MagicMock()
+                    mock_response.json.return_value = {"text": "ok"}
+                    mock_response.raise_for_status = MagicMock()
+                    mock_client.post.return_value = mock_response
+                    mock_client_class.return_value.__aenter__.return_value = mock_client
+                    await client.transcribe(b"audio", "t.wav", **kwargs)
+                    return mock_client.post.call_args[1]
+
+    @pytest.mark.asyncio
+    async def test_no_options_sends_no_query(self):
+        kwargs = await self._transcribe({})
+        assert kwargs["params"] is None
+
+    @pytest.mark.asyncio
+    async def test_settings_defaults_are_sent_as_query(self):
+        kwargs = await self._transcribe(
+            {"whisper.prompt": "  Hey Jarvis, set a timer.  ", "whisper.preprocess": True}
+        )
+        assert kwargs["params"] == {"prompt": "Hey Jarvis, set a timer.", "preprocess": "true"}
+
+    @pytest.mark.asyncio
+    async def test_call_options_override_defaults_and_combine_with_speaker_recognition(self):
+        kwargs = await self._transcribe(
+            {"whisper.prompt": "default prompt"},
+            speaker_recognition=False,
+            prompt="explicit prompt",
+            beam_size=4,
+        )
+        assert kwargs["params"] == {
+            "speaker_recognition": "false",
+            "prompt": "explicit prompt",
+            "beam_size": 4,
+        }
+
+    @pytest.mark.asyncio
+    async def test_blank_prompt_and_false_preprocess_send_nothing(self):
+        kwargs = await self._transcribe({"whisper.prompt": "   ", "whisper.preprocess": False})
+        assert kwargs["params"] is None
+
+    @pytest.mark.asyncio
+    async def test_settings_failure_never_breaks_transcription(self):
+        from app.core.clients.whisper_client import WhisperClient
+
+        with patch("app.core.clients.whisper_client.get_settings_service") as mock_settings:
+            def boom(key, **_):
+                if key.startswith("whisper.prompt"):
+                    raise RuntimeError("settings down")
+                return None
+            mock_settings.return_value.get.side_effect = boom
+            client = WhisperClient(household_id="h123")
+            assert client._default_options == {}
