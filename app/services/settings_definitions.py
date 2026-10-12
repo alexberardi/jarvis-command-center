@@ -612,6 +612,31 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         ),
     ),
     SettingDefinition(
+        key="whisper.prompt",
+        category="voice",
+        value_type="string",
+        default="",
+        description=(
+            "Initial prompt sent to Whisper with every transcription. A short "
+            "sentence such as \"Hey Jarvis, set a timer for ten minutes.\" "
+            "primes the wake phrase and typical commands, which improves "
+            "wake-clip verification and command accuracy on quiet or distant "
+            "speech. Keep it to one or two short sentences: a long prompt can "
+            "make Whisper invent a command from room noise. Empty = none."
+        ),
+    ),
+    SettingDefinition(
+        key="whisper.preprocess",
+        category="voice",
+        value_type="bool",
+        default=False,
+        description=(
+            "Ask Whisper to normalise the audio level and trim silence before "
+            "transcribing. Helps quiet, distant microphones; leave off for "
+            "close, loud ones."
+        ),
+    ),
+    SettingDefinition(
         key="voice.followup_doubt_max_rounds",
         category="voice",
         value_type="int",
