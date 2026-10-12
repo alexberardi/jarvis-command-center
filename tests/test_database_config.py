@@ -11,7 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
 
-from app.db import get_database_url, create_database_engine, get_session_local
+from app.db import get_database_url, create_database_engine, get_session_local, pin_psycopg2
 from app.models import Base, Node
 from app.main import app
 
@@ -29,21 +29,20 @@ class TestDatabaseConfiguration:
             with patch.dict(os.environ, env, clear=True):
                 with patch.dict(os.environ, {"DATABASE_URL": test_url}):
                     url = get_database_url()
-                    assert url == test_url
+                    assert url == "postgresql+psycopg2://user:pass@localhost:5432/testdb"
 
     def test_get_database_url_from_db_url_env(self):
         """Test that DB_URL env var is used as fallback."""
         test_url = "postgresql://user:pass@localhost:5432/testdb"
         with patch.dict(os.environ, {"DB_URL": test_url}, clear=True):
             url = get_database_url()
-            assert url == test_url
+            assert url == "postgresql+psycopg2://user:pass@localhost:5432/testdb"
 
     def test_get_database_url_normalizes_postgres_to_postgresql(self):
         """Test that postgres:// URLs are normalized to postgresql://."""
         with patch.dict(os.environ, {"DATABASE_URL": "postgres://user:pass@localhost:5432/db"}, clear=True):
             url = get_database_url()
-            assert url.startswith("postgresql://")
-            assert url == "postgresql://user:pass@localhost:5432/db"
+            assert url == "postgresql+psycopg2://user:pass@localhost:5432/db"
 
     def test_get_database_url_raises_when_not_set(self):
         """Test that missing DATABASE_URL raises ValueError."""
@@ -62,7 +61,7 @@ class TestDatabaseConfiguration:
         # Use the test database URL from environment
         engine = create_database_engine()
         assert engine is not None
-        assert engine.url.drivername == "postgresql"
+        assert engine.url.drivername == "postgresql+psycopg2"
 
     def test_get_session_local_returns_sessionmaker(self):
         """Test that get_session_local returns a sessionmaker."""
@@ -205,3 +204,13 @@ class TestDatabaseErrorHandling:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestPinPsycopg2:
+    """SQLAlchemy 2.1 defaults postgresql:// to psycopg v3, which isn't installed."""
+
+    def test_bare_url_gets_psycopg2(self):
+        assert pin_psycopg2("postgresql://u:p@h/db") == "postgresql+psycopg2://u:p@h/db"
+
+    def test_explicit_driver_is_kept(self):
+        assert pin_psycopg2("postgresql+psycopg://u:p@h/db") == "postgresql+psycopg://u:p@h/db"

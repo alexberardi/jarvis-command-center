@@ -25,8 +25,11 @@ jobs:
     # Dependabot PRs run with a SEPARATE secrets store, so the cross-repo PAT
     # resolves to an empty string and `gh` exits 4 ("set the GH_TOKEN env
     # variable"). The dependency bump itself is fine — the `test` job passes —
-    # so don't fail the PR on a dispatch that cannot work by design.
-    if: github.actor != 'dependabot[bot]'
+    # so don't fail the PR on a dispatch that cannot work by design. PRs from
+    # forks get no secrets at all, for the same result.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 2
 
