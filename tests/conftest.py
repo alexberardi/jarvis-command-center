@@ -5,6 +5,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from alembic.config import Config
 from alembic import command
+from app.db import pin_psycopg2
 from app.models import Node
 
 
@@ -15,13 +16,13 @@ def get_test_database_url() -> str:
     from the dev database, then falls back to DATABASE_URL and finally
     the default local PostgreSQL setup.
     """
-    return os.getenv(
+    return pin_psycopg2(os.getenv(
         "TEST_DATABASE_URL",
         os.getenv(
             "DATABASE_URL",
             "postgresql://jarvis_user:jarvis_password@localhost:5433/jarvis_command_center"
         )
-    )
+    ))
 
 
 def _run_alembic_upgrade(database_url: str) -> None:
