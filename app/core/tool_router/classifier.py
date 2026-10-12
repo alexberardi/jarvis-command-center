@@ -41,6 +41,24 @@ class FastTextToolClassifier(ToolClassifier):
             raise RuntimeError("fasttext is not installed") from exc
         self._model = fasttext.load_model(self.model_path)
 
+    def _predict(self, utterance: str) -> tuple[tuple[str, ...], tuple[float, ...]]:
+        """Top-1 (labels, scores) from the loaded model.
+
+        fastText 0.9.x's Python ``predict()`` calls ``np.array(probs, copy=False)``,
+        which raises ``ValueError`` under NumPy 2, so every prediction failed
+        (and was swallowed as "classifier unavailable"). The C++ binding it wraps
+        returns ``(score, label)`` pairs directly and has no such problem, so fall
+        back to it. fastText also rejects input containing a newline.
+        """
+        text = utterance.replace("\n", " ")
+        try:
+            return self._model.predict(text, k=1)  # type: ignore[union-attr]
+        except ValueError as exc:
+            if "copy" not in str(exc).lower():
+                raise
+        pairs = self._model.f.predict(text + "\n", 1, 0.0, "strict")  # type: ignore[union-attr]
+        return tuple(label for _score, label in pairs), tuple(score for score, _label in pairs)
+
     def predict(self, utterance: str) -> ToolPrediction:
         if not utterance:
             return ToolPrediction(tool_name=None, score=0.0)
@@ -48,7 +66,7 @@ class FastTextToolClassifier(ToolClassifier):
             return ToolPrediction(tool_name=None, score=0.0)
         try:
             self._load()
-            labels, scores = self._model.predict(utterance, k=1)  # type: ignore[union-attr]
+            labels, scores = self._predict(utterance)
         except Exception as exc:
             logger.warning("⚠️ Tool classifier unavailable: %s", exc)
             return ToolPrediction(tool_name=None, score=0.0)

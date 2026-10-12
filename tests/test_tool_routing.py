@@ -321,3 +321,53 @@ class TestUtteranceMatchesKeywords:
         assert utterance_matches_keywords(None, ["lights"]) is False
         assert utterance_matches_keywords("turn on the lights", []) is False
         assert utterance_matches_keywords("!!!", ["lights"]) is False
+
+
+class _FakeFastText:
+    """Stand-in for a loaded fastText model."""
+
+    def __init__(self, python_predict, binding_pairs=None):
+        self._python_predict = python_predict
+        self.f = type("B", (), {"predict": staticmethod(lambda text, k, thr, on_unicode: binding_pairs)})()
+        self.seen: list[str] = []
+
+    def predict(self, text, k=1):
+        self.seen.append(text)
+        return self._python_predict(text, k)
+
+
+def _classifier_with(model):
+    from app.core.tool_router.classifier import FastTextToolClassifier
+
+    clf = FastTextToolClassifier(model_path="/unused.bin")
+    clf._model = model
+    return clf
+
+
+class TestFastTextNumpy2Fallback:
+    def test_normal_predict_path(self):
+        model = _FakeFastText(lambda t, k: (("__label__set_timer",), (0.97,)))
+        pred = _classifier_with(model).predict("set a timer for ten minutes")
+        assert (pred.tool_name, round(pred.score, 2)) == ("set_timer", 0.97)
+
+    def test_numpy2_copy_error_falls_back_to_binding(self):
+        def numpy2(_t, _k):
+            raise ValueError("Unable to avoid copy while creating an array as requested.")
+
+        model = _FakeFastText(numpy2, binding_pairs=[(0.91, "__label__answer_question")])
+        pred = _classifier_with(model).predict("why is the sky blue")
+        assert (pred.tool_name, round(pred.score, 2)) == ("answer_question", 0.91)
+
+    def test_other_value_errors_are_not_masked(self):
+        def broken(_t, _k):
+            raise ValueError("something else entirely")
+
+        model = _FakeFastText(broken, binding_pairs=[(0.9, "__label__x")])
+        pred = _classifier_with(model).predict("hello")
+        # Falls through to the existing "classifier unavailable" handling.
+        assert pred.tool_name is None and pred.score == 0.0
+
+    def test_newlines_are_removed_before_predicting(self):
+        model = _FakeFastText(lambda t, k: (("__label__music",), (0.8,)))
+        _classifier_with(model).predict("play\nsome jazz")
+        assert model.seen == ["play some jazz"]
