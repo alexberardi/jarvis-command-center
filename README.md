@@ -1,5 +1,10 @@
 # jarvis-command-center
 
+> [!WARNING]
+> **Deprecated: replaced by jarvisd.** This service is part of the old multi-container Jarvis Automation stack. Its features are now built into jarvisd, the single-program server in [jarvis-server](https://github.com/alexberardi/jarvis-server). New installs: [installer.jarvisautomation.io](https://installer.jarvisautomation.io). Moving an existing install: [Migrating from the Docker install](https://docs.jarvisautomation.dev/install/migrating-from-docker/).
+>
+> The old stack stays supported, with fixes only, until jarvisd v0.1.0. This repository will be archived after that; published images and packages stay available for existing installs.
+
 The "brain" of the Jarvis ecosystem — the central voice-orchestration service. It receives voice commands and chat from Pi Zero nodes and the mobile/web clients, builds prompts, calls the LLM proxy for inference, routes to tools, runs routines and agents, manages long-term memory with embeddings, and coordinates STT/TTS and node management.
 
 This is a large FastAPI service (tens of thousands of lines across `app/`, dozens of routers under `/api/v0`), **not** a minimal app. It requires **PostgreSQL with the `pgvector` extension** (used for memory/embedding storage) — there is no SQLite mode; the database layer rejects any non-PostgreSQL URL.
